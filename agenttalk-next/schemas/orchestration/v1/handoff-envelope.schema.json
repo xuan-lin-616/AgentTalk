@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agenttalk:schema:orchestration:v1:handoff-envelope",
+  "title": "AgentTalk Handoff Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "handoffId",
+    "projectRunId",
+    "edgeId",
+    "from",
+    "to",
+    "ownerBinding",
+    "artifactBindings",
+    "producer",
+    "acceptance",
+    "allowedConsumers",
+    "producerContextManifestDigest",
+    "dagSnapshotDigest",
+    "roleBindingSnapshotDigest",
+    "leaseEpoch",
+    "declarationDigest",
+    "artifactTransferSetDigest",
+    "idempotencyKey",
+    "deliveryPayloadDigest",
+    "envelopeSha256"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "agenttalk.handoff.envelope.v1"
+    },
+    "handoffId": {
+      "type": "string"
+    },
+    "projectRunId": {
+      "type": "string"
+    },
+    "edgeId": {
+      "type": "string"
+    },
+    "from": {
+      "$ref": "#/$defs/fromIdentity"
+    },
+    "to": {
+      "$ref": "#/$defs/consumer"
+    },
+    "ownerBinding": {
+      "$ref": "#/$defs/ownerBinding"
+    },
+    "artifactBindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifactBinding"
+      }
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "acceptance": {
+      "$ref": "#/$defs/acceptance"
+    },
+    "allowedConsumers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "$ref": "#/$defs/consumer"
+      }
+    },
+    "producerContextManifestDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "dagSnapshotDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "roleBindingSnapshotDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "leaseEpoch": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "declarationDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "artifactTransferSetDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "idempotencyKey": {
+      "$ref": "#/$defs/digest"
+    },
+    "deliveryPayloadDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "envelopeSha256": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fromIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskNodeId",
+        "attemptId",
+        "executionRunId"
+      ],
+      "properties": {
+        "taskNodeId": {
+          "type": "string"
+        },
+        "attemptId": {
+          "type": "string"
+        },
+        "executionRunId": {
+          "type": "string"
+        }
+      }
+    },
+    "consumer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskNodeId",
+        "roleId",
+        "agentId"
+      ],
+      "properties": {
+        "taskNodeId": {
+          "type": "string"
+        },
+        "roleId": {
+          "type": "string"
+        },
+        "agentId": {
+          "type": "string"
+        }
+      }
+    },
+    "ownerBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskNodeId",
+        "roleId"
+      ],
+      "properties": {
+        "taskNodeId": {
+          "type": "string"
+        },
+        "roleId": {
+          "type": "string"
+        }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentId",
+        "roleId"
+      ],
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "roleId": {
+          "type": "string"
+        }
+      }
+    },
+    "portRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "portId"
+      ],
+      "properties": {
+        "portId": {
+          "type": "string"
+        }
+      }
+    },
+    "schemaRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "objectRef",
+        "sha256",
+        "size",
+        "contentSchemaRef",
+        "normalizedContentType",
+        "normalizedContentTypePolicyVersion"
+      ],
+      "properties": {
+        "objectRef": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentSchemaRef": {
+          "$ref": "#/$defs/schemaRef"
+        },
+        "normalizedContentType": {
+          "type": "string"
+        },
+        "normalizedContentTypePolicyVersion": {
+          "type": "string"
+        }
+      }
+    },
+    "artifactBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceOutput",
+        "targetInput",
+        "artifactRef"
+      ],
+      "properties": {
+        "sourceOutput": {
+          "$ref": "#/$defs/portRef"
+        },
+        "targetInput": {
+          "$ref": "#/$defs/portRef"
+        },
+        "artifactRef": {
+          "$ref": "#/$defs/artifactRef"
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractRef",
+        "contractDigest",
+        "evidenceRef",
+        "evidenceDigest",
+        "validator",
+        "validatorVersion"
+      ],
+      "properties": {
+        "contractRef": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "contractDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidenceRef": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "evidenceDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "validator": {
+          "type": "string"
+        },
+        "validatorVersion": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

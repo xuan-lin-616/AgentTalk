@@ -10,6 +10,7 @@ members = [
   "crates/agenttalk-context",
   "crates/agenttalk-migration",
   "crates/agenttalk-storage",
+  "crates/agenttalk-orchestration-contracts",
   "apps/agenttalk_core",
   "apps/runtime_host"
 ]

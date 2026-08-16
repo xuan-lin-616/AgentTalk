@@ -1,0 +1,14 @@
+[package]
+name = "agenttalk-orchestration-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "Frozen orchestration contract schemas, duplicate-key-safe JCS digests, and pure content verification"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+jsonschema = { version = "0.49.9", default-features = false }
+serde = "1"
+serde_jcs = "0.2.0"
+serde_json = "1"
+sha2 = "0.10"
+unicode-normalization = "0.1"

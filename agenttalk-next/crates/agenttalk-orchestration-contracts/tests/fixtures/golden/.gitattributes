@@ -1,0 +1,4 @@
+# Golden payloads are hashed byte-for-byte by contract tests.  Do not allow
+# platform checkout filters to rewrite their line endings.
+**/bytes/** -text
+*.blob -text
