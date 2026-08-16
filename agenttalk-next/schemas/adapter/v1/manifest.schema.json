@@ -1,0 +1,270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agenttalk.local/schemas/adapter/v1/manifest.schema.json",
+  "title": "AgentTalk Adapter Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "displayName",
+    "category",
+    "protocol",
+    "match",
+    "launch",
+    "verification",
+    "capabilityPolicy"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "agenttalk.adapter.v1" },
+    "id": { "$ref": "#/$defs/id" },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[^\\r\\n\\t\\u0000-\\u001f\\u007f\\u202a-\\u202e\\u2066-\\u2069]+$"
+    },
+    "category": {
+      "type": "string",
+      "enum": ["agent_protocol", "model_runtime", "mcp", "unknown"]
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "major"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["acp", "a2a", "openai_compatible", "ollama", "mcp"] },
+        "major": { "type": "integer", "minimum": 1, "maximum": 255 }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executableNames": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/executableName" }
+        },
+        "publisherSubjects": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/displayString" }
+        },
+        "registryIds": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "packageIds": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/packageId" }
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "launch": {
+      "oneOf": [
+        { "$ref": "#/$defs/directLaunch" },
+        { "$ref": "#/$defs/npxLaunch" },
+        { "$ref": "#/$defs/uvxLaunch" }
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "timeoutMs"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["acp_initialize", "a2a_card", "model_metadata", "mcp_initialize", "manual"] },
+        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 30000 }
+      }
+    },
+    "capabilityPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filesystem", "shell", "streaming", "cancel"],
+      "properties": {
+        "filesystem": { "$ref": "#/$defs/capabilityRequirement" },
+        "shell": { "$ref": "#/$defs/capabilityRequirement" },
+        "streaming": { "$ref": "#/$defs/capabilityRequirement" },
+        "cancel": { "$ref": "#/$defs/capabilityRequirement" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "version"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["agenttalk_manifest", "acp_registry"] },
+        "id": { "$ref": "#/$defs/id" },
+        "version": { "$ref": "#/$defs/displayString" },
+        "revision": { "$ref": "#/$defs/displayString" },
+        "catalogSha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*[a-z0-9]$"
+    },
+    "packageId": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 180,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "displayString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\r\\n\\t\\u0000-\\u001f\\u007f\\u202a-\\u202e\\u2066-\\u2069]+$"
+    },
+    "executableName": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 96,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*\\.exe$"
+    },
+    "arg": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[^\\r\\n\\u0000-\\u001f\\u007f\\u202a-\\u202e\\u2066-\\u2069]*$",
+      "allOf": [
+        {
+          "not": {
+            "pattern": "([Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Tt][Oo][Kk][Ee][Nn]=|[Aa][Pp][Ii]_[Kk][Ee][Yy]|[Aa][Pp][Ii][Kk][Ee][Yy]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Ss][Ee][Cc][Rr][Ee][Tt]=|[Rr][Uu][Nn][Tt][Ii][Mm][Ee]_[Tt][Oo][Kk][Ee][Nn]|[Rr][Uu][Nn][Tt][Ii][Mm][Ee][Tt][Oo][Kk][Ee][Nn])"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^\\s*([Cc][Mm][Dd](\\.[Ee][Xx][Ee])?(\\s+/[Cc]\\b)?|[Pp][Oo][Ww][Ee][Rr][Ss][Hh][Ee][Ll][Ll](\\.[Ee][Xx][Ee])?(\\s+-[Cc][Oo][Mm][Mm][Aa][Nn][Dd]\\b)?|[Ss][Hh](\\s+-[Cc]\\b)?)$"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[|&;`]"
+          }
+        }
+      ]
+    },
+    "envName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{64}$"
+    },
+    "directLaunch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "transport", "executableRef", "args", "environmentAllowlist"],
+      "properties": {
+        "kind": { "const": "direct" },
+        "transport": { "type": "string", "enum": ["stdio", "http"] },
+        "executableRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 260
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/arg" }
+        },
+        "environmentAllowlist": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/envName" }
+        },
+        "credentialEnvironment": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/envName" }
+        },
+        "archiveSha256": { "$ref": "#/$defs/sha256" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "npxLaunch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "package", "args", "environmentAllowlist"],
+      "properties": {
+        "kind": { "const": "npx" },
+        "package": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^(?:[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?|@[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?/[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?)(?:@[0-9]+\\.[0-9]+\\.[0-9]+)?$"
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/arg" }
+        },
+        "environmentAllowlist": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/envName" }
+        },
+        "credentialEnvironment": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/envName" }
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "uvxLaunch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "package", "args", "environmentAllowlist"],
+      "properties": {
+        "kind": { "const": "uvx" },
+        "package": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,94}[a-z0-9])?(?:(?:==|@)[0-9]+\\.[0-9]+\\.[0-9]+)?$"
+        },
+        "args": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/arg" }
+        },
+        "environmentAllowlist": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/envName" }
+        },
+        "credentialEnvironment": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/envName" }
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "capabilityRequirement": {
+      "type": "string",
+      "enum": ["required", "optional", "negotiate", "forbidden"]
+    }
+  }
+}

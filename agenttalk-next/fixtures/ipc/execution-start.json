@@ -1,0 +1,16 @@
+{
+  "kind": "command",
+  "protocol": { "major": 1, "minor": 0 },
+  "requestId": "req-execution-start-1",
+  "sessionId": "session-20260805-000000",
+  "command": "execution.start",
+  "payload": {
+    "executionRunId": "run-fixture",
+    "collaborationRunId": "collab-fixture",
+    "projectId": "project-fixture",
+    "conversationId": "conversation-fixture",
+    "agentId": "agent-fixture",
+    "workspaceAccess": "none"
+  },
+  "deadlineMs": 120000
+}

@@ -1,0 +1,8 @@
+[package]
+name = "agenttalk-permissions"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agenttalk-domain = { path = "../agenttalk-domain" }
+thiserror = "2"

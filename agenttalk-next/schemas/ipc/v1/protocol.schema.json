@@ -1,0 +1,848 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agenttalk://schemas/ipc/v1/protocol.schema.json",
+  "title": "AgentTalk local IPC protocol v1",
+  "type": "object",
+  "$defs": {
+    "ProtocolVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "type": "integer", "const": 1 },
+        "minor": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RequestId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
+    "SessionId": { "type": "string", "minLength": 16, "maxLength": 128 },
+    "SessionCredential": { "type": "string", "minLength": 32, "maxLength": 256 },
+    "StreamCursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["streamId", "sequence"],
+      "properties": {
+        "streamId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "epoch": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "EmptyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "DiscoveryId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "EventStreamId": {
+      "type": "string",
+      "enum": ["core-events", "local-discovery-events"]
+    },
+    "EventsReplayPayload": {
+      "type": "object",
+      "properties": {
+        "streamId": { "$ref": "#/$defs/EventStreamId" },
+        "epoch": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "afterSequence": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 256 }
+      }
+    },
+    "EventsSubscribePayload": {
+      "type": "object",
+      "properties": {
+        "streamId": { "$ref": "#/$defs/EventStreamId" },
+        "epoch": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "afterSequence": { "type": "integer", "minimum": 0 },
+        "afterCursor": { "$ref": "#/$defs/StreamCursor" },
+        "maxInFlightEvents": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "maxInFlightBytes": { "type": "integer", "minimum": 1024, "maximum": 1048576 }
+      }
+    },
+    "AgentDiscoveryStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "AgentDiscoveryVerifyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "candidateId", "consent"],
+      "properties": {
+        "scanId": { "$ref": "#/$defs/DiscoveryId" },
+        "candidateId": { "$ref": "#/$defs/DiscoveryId" },
+        "consent": { "const": true },
+        "deadlineMs": { "type": "integer", "minimum": 100, "maximum": 30000 }
+      }
+    },
+    "AgentDiscoveryDismissPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "candidateId"],
+      "properties": {
+        "scanId": { "$ref": "#/$defs/DiscoveryId" },
+        "candidateId": { "$ref": "#/$defs/DiscoveryId" }
+      }
+    },
+    "AgentDiscoverySnapshotPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId"],
+      "properties": {
+        "scanId": { "$ref": "#/$defs/DiscoveryId" }
+      }
+    },
+    "AgentImportPlanPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "candidateId", "projectId"],
+      "properties": {
+        "scanId": { "$ref": "#/$defs/DiscoveryId" },
+        "candidateId": { "$ref": "#/$defs/DiscoveryId" },
+        "projectId": { "$ref": "#/$defs/DiscoveryId" },
+        "modelSelection": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      }
+    },
+    "AgentImportLocalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scanId", "candidateId", "projectId"],
+      "properties": {
+        "scanId": { "$ref": "#/$defs/DiscoveryId" },
+        "candidateId": { "$ref": "#/$defs/DiscoveryId" },
+        "projectId": { "$ref": "#/$defs/DiscoveryId" },
+        "modelSelection": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      }
+    },
+    "ConfigExportPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId"],
+      "properties": {
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "ConfigImportPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config"],
+      "properties": {
+        "config": { "type": "object", "maxProperties": 16 }
+      }
+    },
+    "ConnectorProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeId", "connectorId", "displayName", "providerType", "runtimeType", "enabled"],
+      "properties": {
+        "scopeId": { "const": "desktop" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "providerType": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "runtimeType": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "enabled": { "type": "boolean" },
+        "authEnvKey": { "type": ["string", "null"], "maxLength": 200, "pattern": "^[A-Z_][A-Z0-9_]*$" }
+      }
+    },
+    "ConnectorProfileWritePayload": {
+      "allOf": [{ "$ref": "#/$defs/ConnectorProfile" }]
+    },
+    "ConnectorProfileRemovePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeId", "connectorId"],
+      "properties": {
+        "scopeId": { "const": "desktop" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" }
+      }
+    },
+    "ConnectorProfileQueryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeId"],
+      "properties": {
+        "scopeId": { "const": "desktop" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 256 }
+      }
+    },
+    "ConnectorHealthQueryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeId", "connectorId"],
+      "properties": {
+        "scopeId": { "const": "desktop" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" }
+      }
+    },
+    "ConnectorModelsQueryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeId", "connectorId"],
+      "properties": {
+        "scopeId": { "const": "desktop" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" }
+      }
+    },
+    "LocalDiscoveryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connectorId", "runtimeType", "displayName", "availability", "models", "catalogRevision", "source", "requiresConfiguration"],
+      "properties": {
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "runtimeType": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "availability": { "enum": ["available", "unavailable", "unconfigured", "authentication_required"] },
+        "models": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "catalogRevision": { "type": ["string", "null"], "maxLength": 256 },
+        "source": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "requiresConfiguration": { "type": "boolean" }
+      }
+    },
+    "LocalDiscoveryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discoveries"],
+      "properties": {
+        "discoveries": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/LocalDiscoveryEntry" }
+        }
+      }
+    },
+    "ModelSelectionMode": { "enum": ["inherit", "connector_default", "pinned"] },
+    "IdentityModelListMode": { "enum": ["own", "inherit", "override", "legacy_compatibility"] },
+    "IdentityModelListScope": { "enum": ["base_agent", "project_agent", "conversation_agent"] },
+    "AgentModelBindingPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentId"],
+      "properties": {
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "connectorId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "modelId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "candidateModelListRevision": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "AgentModelBindingPatchPayload": {
+      "allOf": [{ "$ref": "#/$defs/AgentModelBindingPayload" }]
+    },
+    "ProjectAgentSetPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "agentId"],
+      "properties": {
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "enabled": { "type": "boolean" },
+        "workspaceAccess": { "enum": ["none", "read_only", "workspace_write"] },
+        "modelSelectionMode": { "$ref": "#/$defs/ModelSelectionMode" },
+        "modelId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "candidateModelListMode": { "enum": ["inherit", "override"] },
+        "candidateModelListRevision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ConversationAgentSetPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conversationId", "agentId"],
+      "properties": {
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "enabled": { "type": "boolean" },
+        "modelSelectionMode": { "$ref": "#/$defs/ModelSelectionMode" },
+        "modelId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 },
+        "candidateModelListMode": { "enum": ["inherit", "override"] },
+        "candidateModelListRevision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "IdentityModelListTargetPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityScope", "agentId"],
+      "properties": {
+        "identityScope": { "$ref": "#/$defs/IdentityModelListScope" },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "projectId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "connectorId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "IdentityModelOptionWritePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "identityScope", "agentId", "modelId", "displayName", "connectorId", "source", "availability", "isDefault", "sortOrder"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "identityScope": { "$ref": "#/$defs/IdentityModelListScope" },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "projectId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "modelId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "source": { "enum": ["runtime", "config", "manual"] },
+        "availability": { "enum": ["available", "unverified", "unavailable"] },
+        "isDefault": { "type": "boolean" },
+        "sortOrder": { "type": "integer", "minimum": 0 },
+        "catalogRevision": { "type": ["string", "null"], "maxLength": 256 },
+        "contextWindow": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000000 },
+        "reasoningEfforts": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 128 } },
+        "serviceTiers": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      }
+    },
+    "IdentityModelOptionDefaultPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityScope", "agentId", "connectorId", "modelId"],
+      "properties": {
+        "identityScope": { "$ref": "#/$defs/IdentityModelListScope" },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "projectId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "modelId": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "ModelSelectionSnapshotQueryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionRunId"],
+      "properties": {
+        "executionRunId": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "ExecutionStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionRunId", "collaborationRunId", "projectId", "conversationId", "agentId"],
+      "properties": {
+        "executionRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "collaborationRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "workspaceAccess": { "enum": ["none", "read_only", "workspace_write"] },
+        "canonicalCwd": { "type": ["string", "null"], "maxLength": 4096 },
+        "currentTask": { "type": ["string", "null"], "maxLength": 64000 },
+        "connectorId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "modelId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" }
+      }
+    },
+    "ExecutionRetryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionRunId", "sourceExecutionRunId", "currentTask"],
+      "properties": {
+        "executionRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "sourceExecutionRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "currentTask": { "type": "string", "minLength": 1, "maxLength": 64000 },
+        "connectorId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "modelId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" }
+      }
+    },
+    "WorkflowDispatchPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflowId", "collaborationRunId", "parentExecutionRunId", "sourceMessageId", "task"],
+      "properties": {
+        "workflowId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "collaborationRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "parentExecutionRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "sourceMessageId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "task": { "type": "string", "minLength": 1, "maxLength": 64000 },
+        "startRuntime": { "type": "boolean" }
+      }
+    },
+    "RetrievalPreviewPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expectedProjectId", "conversationId", "agentId", "query", "scope"],
+      "properties": {
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "agentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "query": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "scope": { "enum": ["conversation", "project"] },
+        "sourceTypes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["message", "execution", "project_file"] }
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "mode": { "enum": ["exact", "vector_fixture"] }
+      }
+    },
+    "RetrievalPreviewCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exactSearch", "pathSearch", "boundedFileScan", "rgAvailable", "ftsAvailable", "semantic", "semanticUnavailableReason"],
+      "properties": {
+        "exactSearch": { "const": true },
+        "pathSearch": { "const": true },
+        "boundedFileScan": { "type": "boolean" },
+        "boundedFileScanUnavailableReason": { "type": "string", "minLength": 1 },
+        "rgAvailable": { "type": "boolean" },
+        "ftsAvailable": { "const": false },
+        "semantic": { "type": "boolean" },
+        "semanticUnavailableReason": { "type": "string", "minLength": 1 },
+        "embeddingProvider": { "enum": ["local_fixture"] },
+        "embeddingDimension": { "type": "integer", "minimum": 1, "maximum": 4096 }
+      }
+    },
+    "RetrievalPreviewHit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hitId", "projectId", "conversationId", "agentId", "sourceType", "sourceObjectId", "sourceHash", "selectedProjectId", "selectedConversationId", "snippet", "matchReason", "matchMethod", "score", "estimatedTokens", "trustLevel", "permissionDecision", "rank"],
+      "properties": {
+        "hitId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": ["string", "null"] },
+        "agentId": { "type": ["string", "null"] },
+        "sourceType": { "enum": ["message", "execution", "project_file"] },
+        "sourceObjectId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sourceHash": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "selectedProjectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "selectedConversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "snippet": { "type": "string", "maxLength": 1024 },
+        "matchReason": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "matchMethod": { "enum": ["exact_phrase", "exact_terms", "local_vector_fixture"] },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "estimatedTokens": { "type": "integer", "minimum": 0 },
+        "trustLevel": { "const": "untrusted" },
+        "permissionDecision": { "enum": ["none", "read_only", "workspace_write", "not_applicable"] },
+        "rank": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "RetrievalPreviewResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retrievalVersion", "projectId", "conversationId", "scopeRevision", "workspaceRevision", "queryHash", "capabilities", "hits"],
+      "properties": {
+        "retrievalVersion": { "enum": ["exact-retrieval-v1", "local-vector-fixture-v1"] },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "conversationId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "scopeRevision": { "type": "integer", "minimum": 0 },
+        "workspaceRevision": { "type": "integer", "minimum": 0 },
+        "queryHash": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "capabilities": { "$ref": "#/$defs/RetrievalPreviewCapabilities" },
+        "hits": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/RetrievalPreviewHit" } }
+      }
+    },
+    "RuntimeCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["streaming", "cancel", "filesystem", "shell"],
+      "properties": {
+        "streaming": { "type": "boolean" },
+        "cancel": { "type": "boolean" },
+        "filesystem": { "type": "boolean" },
+        "shell": { "type": "boolean" }
+      }
+    },
+    "RuntimeModelMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelId", "availability", "capabilities"],
+      "properties": {
+        "modelId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "availability": { "enum": ["available", "degraded", "unavailable", "unknown"] },
+        "capabilities": { "$ref": "#/$defs/RuntimeCapabilities" }
+      }
+    },
+    "RuntimeModelsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "connectorId", "runtimeId", "runtimeVersion", "runtimeOwned", "availability", "capabilities", "models", "modelMetadata"],
+      "properties": {
+        "schemaVersion": { "const": "runtime.models.v1" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "runtimeId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "runtimeVersion": { "type": ["string", "null"], "maxLength": 128, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "runtimeOwned": { "type": "boolean" },
+        "availability": { "enum": ["available", "degraded", "unavailable", "unknown"] },
+        "capabilities": { "$ref": "#/$defs/RuntimeCapabilities" },
+        "models": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" }
+        },
+        "modelMetadata": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RuntimeModelMetadata" }
+        }
+      }
+    },
+    "ConnectorModelsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "scopeId", "connectorId", "runtimeType", "catalogRevision", "defaultModelId", "models", "modelMetadata", "availability"],
+      "properties": {
+        "schemaVersion": { "const": "connector.models.v1" },
+        "scopeId": { "const": "desktop" },
+        "connectorId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+        "runtimeType": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "catalogRevision": { "type": "integer", "minimum": 1 },
+        "defaultModelId": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" },
+        "models": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$" }
+        },
+        "modelMetadata": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RuntimeModelMetadata" }
+        },
+        "availability": { "enum": ["available", "degraded", "unavailable", "unknown"] }
+      }
+    },
+    "ProtocolHandshake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol", "clientId", "sessionId", "sessionCredential", "maxMessageBytes"],
+      "properties": {
+        "kind": { "const": "handshake" },
+        "protocol": { "$ref": "#/$defs/ProtocolVersion" },
+        "clientId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sessionId": { "$ref": "#/$defs/SessionId" },
+        "sessionCredential": { "$ref": "#/$defs/SessionCredential" },
+        "maxMessageBytes": { "type": "integer", "minimum": 1024, "maximum": 16777216 },
+        "lastSeen": { "$ref": "#/$defs/StreamCursor" }
+      }
+    },
+    "CommandEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol", "requestId", "sessionId", "command", "payload"],
+      "properties": {
+        "kind": { "const": "command" },
+        "protocol": { "$ref": "#/$defs/ProtocolVersion" },
+        "requestId": { "$ref": "#/$defs/RequestId" },
+        "sessionId": { "$ref": "#/$defs/SessionId" },
+        "command": { "enum": ["project.create", "project.update", "agent.create", "agent.update", "agent.model_binding.set", "agent.model_binding.patch", "conversation.create", "conversation.update", "connector.create", "connector.update", "connector.remove", "config.export", "config.import", "message.create", "memory.store", "summary.store", "summary.generate", "artifact.store", "attachment.import_file", "attachment.store", "retrieval.store", "retrieval.select", "retrieval.feedback", "workflow.create", "workflow.dispatch", "collaboration.create", "handoff.create", "handoff.approve", "handoff.reject", "handoff.dispatch", "handoff.cancel", "workspace.authorize", "project_agent.set", "project_agent.remove", "conversation_agent.set", "conversation_agent.remove", "identity_model_option.upsert", "identity_model_option.default", "execution.start", "execution.retry", "execution.rerun_current", "execution.cancel", "events.subscribe", "events.ack", "events.unsubscribe", "shutdown_owned", "agent.discovery.start", "agent.discovery.verify", "agent.discovery.dismiss", "agent.import_local"] },
+        "payload": { "type": "object" },
+        "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "config.export" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ConfigExportPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "config.import" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ConfigImportPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "execution.start" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ExecutionStartPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "enum": ["execution.retry", "execution.rerun_current"] } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ExecutionRetryPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "enum": ["connector.create", "connector.update"] } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ConnectorProfileWritePayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "connector.remove" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ConnectorProfileRemovePayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "workflow.dispatch" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/WorkflowDispatchPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "enum": ["agent.model_binding.set", "agent.model_binding.patch"] } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/AgentModelBindingPatchPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "project_agent.set" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ProjectAgentSetPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "conversation_agent.set" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/ConversationAgentSetPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "identity_model_option.upsert" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/IdentityModelOptionWritePayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "identity_model_option.default" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/IdentityModelOptionDefaultPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "agent.discovery.start" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/AgentDiscoveryStartPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "agent.discovery.verify" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/AgentDiscoveryVerifyPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "agent.discovery.dismiss" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/AgentDiscoveryDismissPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "agent.import_local" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/AgentImportLocalPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "events.subscribe" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/EventsSubscribePayload" } } }
+        }
+      ]
+    },
+    "QueryEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol", "requestId", "sessionId", "query", "payload"],
+      "properties": {
+        "kind": { "const": "query" },
+        "protocol": { "$ref": "#/$defs/ProtocolVersion" },
+        "requestId": { "$ref": "#/$defs/RequestId" },
+        "sessionId": { "$ref": "#/$defs/SessionId" },
+        "query": { "enum": ["projection.snapshot", "events.replay", "execution.get", "model_selection.snapshot", "identity_model_options.list", "messages.search", "summary.content", "artifact.content", "connector.query", "connector.health", "connector.models", "connector.discover", "agent.scan_local", "agent.discovery.snapshot", "agent.import.plan", "retrieval.preview", "retrieval.query", "retrieval.selections", "retrieval.feedback", "runtime.health", "runtime.models"] },
+        "payload": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "runtime.models" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/EmptyPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "runtime.health" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/EmptyPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "connector.discover" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/EmptyPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "agent.scan_local" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/EmptyPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "agent.discovery.snapshot" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/AgentDiscoverySnapshotPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "agent.import.plan" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/AgentImportPlanPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "events.replay" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/EventsReplayPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "retrieval.preview" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/RetrievalPreviewPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "connector.query" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/ConnectorProfileQueryPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "connector.health" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/ConnectorHealthQueryPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "connector.models" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/ConnectorModelsQueryPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "identity_model_options.list" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/IdentityModelListTargetPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "model_selection.snapshot" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/ModelSelectionSnapshotQueryPayload" } }
+          }
+        }
+      ]
+    },
+    "EventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol", "eventId", "sessionId", "cursor", "event", "occurredAt", "payload"],
+      "properties": {
+        "kind": { "const": "event" },
+        "protocol": { "$ref": "#/$defs/ProtocolVersion" },
+        "eventId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sessionId": { "$ref": "#/$defs/SessionId" },
+        "cursor": { "$ref": "#/$defs/StreamCursor" },
+        "subscriptionId": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+        "executionRunId": { "type": ["string", "null"], "maxLength": 128 },
+        "event": { "enum": ["projection.changed", "execution.created", "execution.status_changed", "scope.frozen", "context.assembled", "context.sealed", "connector.started", "runtime.started", "output.delta", "tool.requested", "tool.approved", "tool.denied", "verification.started", "handoff.proposed", "handoff.approved", "handoff.rejected", "handoff.dispatched", "handoff.cancelled", "handoff.completed", "execution.completed", "execution.failed", "execution.cancelled", "execution.interrupted", "core.restarted", "core.heartbeat", "agent.discovery.started", "agent.discovery.candidate_observed", "agent.discovery.candidate_classified", "agent.discovery.candidate_verified", "agent.discovery.completed", "agent.discovery.failed", "local_agent.imported"] },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      }
+    },
+    "ErrorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol", "requestId", "code", "message", "retryable"],
+      "properties": {
+        "kind": { "const": "error" },
+        "protocol": { "$ref": "#/$defs/ProtocolVersion" },
+        "requestId": { "$ref": "#/$defs/RequestId" },
+        "code": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "retryable": { "type": "boolean" },
+        "details": { "type": "object" }
+      }
+    },
+    "ResponseEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "protocol", "requestId", "ok", "payload"],
+      "properties": {
+        "kind": { "const": "response" },
+        "protocol": { "$ref": "#/$defs/ProtocolVersion" },
+        "requestId": { "$ref": "#/$defs/RequestId" },
+        "ok": { "type": "boolean" },
+        "payload": { "type": "object" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/ProtocolHandshake" },
+    { "$ref": "#/$defs/CommandEnvelope" },
+    { "$ref": "#/$defs/QueryEnvelope" },
+    { "$ref": "#/$defs/EventEnvelope" },
+    { "$ref": "#/$defs/ErrorEnvelope" },
+    { "$ref": "#/$defs/ResponseEnvelope" }
+  ]
+}

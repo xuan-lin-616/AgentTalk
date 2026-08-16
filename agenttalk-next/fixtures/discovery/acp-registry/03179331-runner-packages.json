@@ -1,0 +1,149 @@
+{
+  "upstreamCommit": "03179331de80aa1b4695aab133a1fb79ded9ee8d",
+  "entries": [
+    {
+      "id": "agoragentic-acp",
+      "kind": "npx",
+      "package": "agoragentic-mcp@1.3.0",
+      "args": ["--acp"]
+    },
+    {
+      "id": "auggie",
+      "kind": "npx",
+      "package": "@augmentcode/auggie@0.35.0",
+      "args": ["--acp"]
+    },
+    {
+      "id": "autohand",
+      "kind": "npx",
+      "package": "@autohandai/autohand-acp@0.2.1",
+      "args": []
+    },
+    {
+      "id": "claude-acp",
+      "kind": "npx",
+      "package": "@agentclientprotocol/claude-agent-acp@0.66.0",
+      "args": []
+    },
+    {
+      "id": "cline",
+      "kind": "npx",
+      "package": "cline@3.0.53",
+      "args": ["--acp"]
+    },
+    {
+      "id": "codebuddy-code",
+      "kind": "npx",
+      "package": "@tencent-ai/codebuddy-code@2.106.7",
+      "args": ["--acp"]
+    },
+    {
+      "id": "codex-acp",
+      "kind": "npx",
+      "package": "@agentclientprotocol/codex-acp@1.1.14",
+      "args": []
+    },
+    {
+      "id": "deepagents",
+      "kind": "npx",
+      "package": "deepagents-acp@0.1.7",
+      "args": []
+    },
+    {
+      "id": "dimcode",
+      "kind": "npx",
+      "package": "dimcode@0.3.10",
+      "args": ["acp"]
+    },
+    {
+      "id": "dirac",
+      "kind": "npx",
+      "package": "dirac-cli@0.4.35",
+      "args": ["--acp"]
+    },
+    {
+      "id": "factory-droid",
+      "kind": "npx",
+      "package": "droid@0.193.0",
+      "args": ["exec", "--output-format", "acp-daemon"]
+    },
+    {
+      "id": "fast-agent",
+      "kind": "uvx",
+      "package": "fast-agent-acp==0.9.30",
+      "args": ["-x"]
+    },
+    {
+      "id": "gemini",
+      "kind": "npx",
+      "package": "@google/gemini-cli@0.55.1",
+      "args": ["--acp"]
+    },
+    {
+      "id": "github-copilot",
+      "kind": "npx",
+      "package": "@github/copilot-language-server@1.531.0",
+      "args": ["--acp"]
+    },
+    {
+      "id": "github-copilot-cli",
+      "kind": "npx",
+      "package": "@github/copilot@1.0.79",
+      "args": ["--acp"]
+    },
+    {
+      "id": "glm-acp-agent",
+      "kind": "npx",
+      "package": "glm-acp-agent@1.3.0",
+      "args": []
+    },
+    {
+      "id": "grok-build",
+      "kind": "npx",
+      "package": "@xai-official/grok@1.0.2",
+      "args": ["agent", "stdio"]
+    },
+    {
+      "id": "kilo",
+      "kind": "npx",
+      "package": "@kilocode/cli@7.4.21",
+      "args": ["acp"]
+    },
+    {
+      "id": "minion-code",
+      "kind": "uvx",
+      "package": "minion-code@0.1.44",
+      "args": ["acp"]
+    },
+    {
+      "id": "nova",
+      "kind": "npx",
+      "package": "@compass-ai/nova@1.1.31",
+      "args": ["acp"]
+    },
+    {
+      "id": "pi-acp",
+      "kind": "npx",
+      "package": "pi-acp@0.0.33",
+      "args": []
+    },
+    {
+      "id": "qoder",
+      "kind": "npx",
+      "package": "@qoder-ai/qodercli@0.2.14",
+      "args": ["--acp"]
+    },
+    {
+      "id": "qwen-code",
+      "kind": "npx",
+      "package": "@qwen-code/qwen-code@0.21.10",
+      "args": ["--acp", "--experimental-skills"]
+    },
+    {
+      "id": "sigit",
+      "kind": "npx",
+      "package": "@smbcloud/sigit@1.5.2",
+      "args": []
+    }
+  ]
+}

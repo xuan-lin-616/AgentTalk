@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/agenttalk-domain",
+  "crates/agenttalk-protocols",
+  "crates/agenttalk-events",
+  "crates/agenttalk-ipc",
+  "crates/agenttalk-permissions",
+  "crates/agenttalk-workspace",
+  "crates/agenttalk-context",
+  "crates/agenttalk-migration",
+  "crates/agenttalk-storage",
+  "apps/agenttalk_core",
+  "apps/runtime_host"
+]

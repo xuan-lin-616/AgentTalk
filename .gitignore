@@ -1,0 +1,107 @@
+# AgentTalk root repository policy
+
+# Secrets and local credentials (all locations)
+**/.env
+**/.env.*
+!**/.env.example
+**/*secret*.json
+**/*credential*.json
+**/*token*.json
+**/*apikey*.json
+**/*api-key*.json
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.key
+
+# Dependencies and package caches
+**/node_modules/
+**/.npm/
+**/.pnpm-store/
+**/.yarn/
+**/.dart_tool/
+**/.pub-cache/
+
+# Rust/Flutter/build output
+**/target/
+**/build/
+**/dist/
+**/dist-electron/
+**/windows/flutter/ephemeral/
+**/test/failures/
+**/*.tsbuildinfo
+**/*.dSYM/
+**/*.app/
+**/*.exe
+**/*.msix
+**/*.msixbundle
+**/*.appx
+**/*.appxbundle
+
+# Databases and runtime sidecars
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.db
+**/*.db-*
+**/*.wal
+**/*.shm
+**/*.dump
+**/*.sqlitedb
+
+# Generated/local project state kept outside the repository
+/artifacts/
+/backups/
+/release/
+/release-*/
+/node_modules/
+/dist/
+/dist-electron/
+/.codex-tmp/
+/_incoming_*/
+/_codex_backup_*/
+/temp/
+/tmp/
+/logs/
+/restructure-inventory.md
+/restructure-move-manifest.json
+/restructure-risk-report.md
+/.planning/
+
+# Local-only legacy reference and migration/parity evidence
+/legacy-electron/
+/scripts/shadow-compare.ps1
+/tools/codex-audit/
+/agenttalk-next/docs/refactor/
+/agenttalk-next/fixtures/migration/
+/agenttalk-next/fixtures/shadow/
+/agenttalk-next/scripts/verify-shadow-fixture.ps1
+
+# Old Electron bundled runtime is external state; keep the small icon resource trackable.
+/build/node/
+
+# Test/tool caches
+coverage/
+*.lcov
+.eslintcache
+.cache/
+.pytest_cache/
+.playwright-cli/
+*.log
+*.trace
+*.dmp
+
+# IDE/OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Preserve deterministic lockfiles
+!package-lock.json
+!**/Cargo.lock
+!**/pubspec.lock

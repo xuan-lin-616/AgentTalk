@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "generation": 1,
+  "revision": "agenttalk-v1",
+  "createdAtMs": 0,
+  "registrySha256": "c20b4ee9fc7039523a1386008b0979076c9a82a413af560d5ecfb0b0a06cc83a",
+  "manifests": [
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "com.github.copilot-cli.acp",
+      "displayName": "GitHub Copilot CLI",
+      "category": "agent_protocol",
+      "protocol": { "kind": "acp", "major": 1 },
+      "match": { "executableNames": ["copilot.exe"], "sha256": "9e9825123b868a979aca1778ef33f64a2b793e9b685533d968a0a2fb25c89518" },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "matched-observation",
+        "args": ["--acp", "--stdio"],
+        "environmentAllowlist": []
+      },
+      "verification": { "kind": "acp_initialize", "timeoutMs": 10000 },
+      "capabilityPolicy": {
+        "filesystem": "forbidden",
+        "shell": "forbidden",
+        "streaming": "negotiate",
+        "cancel": "negotiate"
+      },
+      "source": {
+        "kind": "agenttalk_manifest",
+        "id": "com.github.copilot-cli.acp",
+        "version": "1",
+        "revision": "agenttalk-v1",
+        "catalogSha256": "c20b4ee9fc7039523a1386008b0979076c9a82a413af560d5ecfb0b0a06cc83a"
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "kind": "event",
+  "protocol": { "major": 1, "minor": 0 },
+  "eventId": "event-output-delta-1",
+  "sessionId": "session-20260805-000000",
+  "cursor": { "streamId": "execution-fixture", "sequence": 1, "epoch": "epoch-fixture" },
+  "executionRunId": "run-fixture",
+  "event": "output.delta",
+  "occurredAt": "2026-08-05T00:00:00.000Z",
+  "payload": { "delta": "fixture output" }
+}

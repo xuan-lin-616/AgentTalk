@@ -1,0 +1,8 @@
+{
+  "kind": "handshake",
+  "protocol": { "major": 1, "minor": 0 },
+  "clientId": "flutter-desktop",
+  "sessionId": "session-20260805-000000",
+  "sessionCredential": "fixture-session-credential-0123456789abcdef0123456789abcdef",
+  "maxMessageBytes": 1048576
+}

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "agenttalk.adapter.v1",
+  "id": "org.fixture.agent",
+  "displayName": "Fixture Agent",
+  "category": "agent_protocol",
+  "protocol": {
+    "kind": "acp",
+    "major": 1
+  },
+  "match": {
+    "executableNames": ["fixture-agent.exe"],
+    "publisherSubjects": ["Fixture Corp"],
+    "registryIds": ["fixture-agent"],
+    "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  },
+  "launch": {
+    "kind": "direct",
+    "transport": "stdio",
+    "executableRef": "matched-observation",
+    "args": ["--acp"],
+    "environmentAllowlist": ["PATH", "LOCALAPPDATA"]
+  },
+  "verification": {
+    "kind": "acp_initialize",
+    "timeoutMs": 3000
+  },
+  "capabilityPolicy": {
+    "filesystem": "negotiate",
+    "shell": "negotiate",
+    "streaming": "required",
+    "cancel": "required"
+  }
+}

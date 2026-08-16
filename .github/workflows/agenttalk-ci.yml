@@ -1,0 +1,116 @@
+name: AgentTalk CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows (Rust + Flutter, serial)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout (read-only)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Install Flutter 3.44.7
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: 3.44.7
+          channel: stable
+
+      - name: Verify IPC schema SHA-256
+        shell: pwsh
+        working-directory: agenttalk-next
+        run: |
+          $sha = (Get-FileHash -Algorithm SHA256 'schemas/ipc/v1/protocol.schema.json').Hash.ToLower()
+          $expected = '362d8d8dafccb26062f9a4ba9d37062c395e9fede322cd6cca79b36482f6bfde'
+          if ($sha -ne $expected) { throw "IPC schema SHA mismatch: got $sha, want $expected" }
+          Write-Host "IPC schema SHA ok: $sha"
+
+      - name: Rust fmt check
+        shell: pwsh
+        working-directory: agenttalk-next
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy
+        shell: pwsh
+        working-directory: agenttalk-next
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Rust release build
+        shell: pwsh
+        working-directory: agenttalk-next
+        run: cargo build --workspace --release --locked
+
+      - name: Rust workspace tests
+        shell: pwsh
+        working-directory: agenttalk-next
+        run: cargo test --workspace --locked
+
+      - name: Flutter gen-l10n
+        shell: pwsh
+        working-directory: agenttalk-next/apps/desktop_flutter
+        run: flutter gen-l10n
+
+      - name: Dart format check
+        shell: pwsh
+        working-directory: agenttalk-next/apps/desktop_flutter
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Flutter analyze
+        shell: pwsh
+        working-directory: agenttalk-next/apps/desktop_flutter
+        run: flutter analyze
+
+      - name: Provision SQLite CLI 3.53.4
+        shell: pwsh
+        run: |
+          $location = Join-Path $env:RUNNER_TEMP 'sqlite'
+          New-Item -ItemType Directory -Force $location | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP 'sqlite-tools-win-x64-3530400.zip'
+          Invoke-WebRequest -Uri 'https://www.sqlite.org/2026/sqlite-tools-win-x64-3530400.zip' -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          $expected = 'f46ee2475de4cbe287e6e5f7d43c838796b14e7379cd216bdbb28d391429f9fc'
+          if ($actual -ne $expected) { throw "sqlite-tools SHA-256 mismatch: got $actual, want $expected" }
+          Expand-Archive -Path $zip -DestinationPath $location
+          $sqlite = Get-ChildItem -Path $location -Recurse -Filter 'sqlite3.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $sqlite) { throw "sqlite3.exe not found under $location" }
+          Add-Content -Path $env:GITHUB_PATH -Value $sqlite.DirectoryName
+
+      - name: Verify SQLite CLI version
+        shell: pwsh
+        run: |
+          $cmd = Get-Command sqlite3 -ErrorAction Stop
+          Write-Host "sqlite3 at $($cmd.Source)"
+          $version = & sqlite3 --version
+          Write-Host "sqlite3 version: $version"
+          if ($version -notmatch '^3\.53\.4') { throw "unexpected sqlite3 version: $version" }
+
+      - name: Flutter test
+        shell: pwsh
+        working-directory: agenttalk-next/apps/desktop_flutter
+        env:
+          AGENTTALK_CORE_INTEGRATION_BINARY: ${{ github.workspace }}/agenttalk-next/target/release/agenttalk-core.exe
+        run: flutter test
+
+      - name: Flutter build windows
+        shell: pwsh
+        working-directory: agenttalk-next/apps/desktop_flutter
+        run: flutter build windows --release
+
+      - name: Ensure no uncommitted generated changes
+        shell: pwsh
+        working-directory: agenttalk-next
+        run: git diff --exit-code
