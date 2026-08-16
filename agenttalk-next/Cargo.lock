@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "agenttalk-brief-sealer"
+version = "0.1.0"
+dependencies = [
+ "agenttalk-orchestration-contracts",
+ "serde_json",
+ "sha2",
+ "windows-sys",
+]
+
+[[package]]
 name = "agenttalk-context"
 version = "0.1.0"
 dependencies = [
