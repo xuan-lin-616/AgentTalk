@@ -899,6 +899,23 @@ impl RuntimeRegistry {
     }
 }
 
+fn recover_orchestration_on_startup(storage: &mut SqliteStore) -> Result<(), CoreError> {
+    for (run_id, status) in storage.orchestration_run_ids()? {
+        if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+            continue;
+        }
+        // The generation bump is the first durable recovery write. It fences
+        // every active lease before any attempt is interpreted or retried.
+        storage.bump_coordinator_generation(&run_id)?;
+        for (node_id, node_status, _) in storage.orchestration_recovery_state(&run_id)? {
+            if matches!(node_status.as_str(), "running" | "sealing") {
+                storage.recover_active_attempt_interrupted(&node_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub const RUNTIME_MODELS_SCHEMA_VERSION: &str = "runtime.models.v1";
 pub const CONNECTOR_MODELS_SCHEMA_VERSION: &str = "connector.models.v1";
 pub const RUNTIME_HEALTH_SCHEMA_VERSION: &str = "runtime.health.v1";
@@ -1001,6 +1018,7 @@ impl PersistentCore {
         runtime_timeout_ms: u64,
     ) -> Result<Self, CoreError> {
         let mut storage = SqliteStore::open_with_artifact_root(path, artifact_root)?;
+        recover_orchestration_on_startup(&mut storage)?;
         let event_stream_epoch = storage.event_stream_epoch()?;
         let persisted_assignments = storage.load_project_agent_assignments()?;
         let persisted_conversation_assignments = storage.load_conversation_agent_assignments()?;
@@ -6770,6 +6788,61 @@ mod tests {
             created.run.brief_tree_digest
         );
         assert_eq!(descriptor.files().len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn core_restart_fences_and_recovers_orchestration_attempts() {
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-core-orchestration-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let database = base.join("core.sqlite3");
+        std::fs::create_dir_all(&base).unwrap();
+        {
+            let mut storage = SqliteStore::open(&database).unwrap();
+            storage
+                .create_orchestration_run(agenttalk_storage::OrchestrationRunSeed {
+                    run_id: "orchestration-run-recovery".into(),
+                    project_id: "project-1".into(),
+                    brief_snapshot_id: format!("sha256:{}", "0".repeat(64)),
+                    brief_tree_digest: "0".repeat(64),
+                    dag_snapshot_digest: "1".repeat(64),
+                    role_binding_snapshot_digest: "2".repeat(64),
+                })
+                .unwrap();
+            storage
+                .insert_orchestration_task_node(
+                    "orchestration-run-recovery",
+                    "node-1",
+                    "node-key-1",
+                )
+                .unwrap();
+            storage
+                .mark_orchestration_task_ready("node-1", "input", "role-1", "contract-1")
+                .unwrap();
+            storage
+                .transition_task_ready_to_running("node-1", "execution-run-1", "worker-a")
+                .unwrap();
+        }
+        let core = PersistentCore::open(&database).unwrap();
+        assert_eq!(
+            core.storage
+                .orchestration_run("orchestration-run-recovery")
+                .unwrap()
+                .coordinator_generation,
+            2
+        );
+        let recovery = core
+            .storage
+            .orchestration_recovery_state("orchestration-run-recovery")
+            .unwrap();
+        assert_eq!(recovery, vec![("node-1".into(), "failed".into(), 1)]);
+        drop(core);
         std::fs::remove_dir_all(&base).unwrap();
     }
 

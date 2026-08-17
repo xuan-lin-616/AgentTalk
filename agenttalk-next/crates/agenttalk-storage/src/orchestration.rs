@@ -1990,6 +1990,24 @@ impl SqliteStore {
             "UPDATE orchestration_runs SET coordinator_generation = ?2 WHERE run_id = ?1",
             params![run_id, next],
         )?;
+        let fenced = tx.execute(
+            "UPDATE orchestration_leases
+             SET status = 'fenced'
+             WHERE run_id = ?1 AND status = 'active'",
+            [run_id],
+        )?;
+        if fenced > 0 {
+            append_audit_event(
+                &tx,
+                run_id,
+                "leases_fenced",
+                "run",
+                run_id,
+                &format!("{{\"count\":{fenced}}}"),
+                &format!("leases_fenced:{run_id}:{next}"),
+                next,
+            )?;
+        }
         append_audit_event(
             &tx,
             run_id,
@@ -2002,6 +2020,19 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(next)
+    }
+
+    /// Returns the durable orchestration runs and their current status for
+    /// Core restart recovery.  It deliberately exposes no payload/body data.
+    pub fn orchestration_run_ids(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT run_id, status FROM orchestration_runs ORDER BY run_id")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from);
+        rows
     }
 
     pub fn assert_lease_epoch_current(
@@ -3333,5 +3364,56 @@ mod tests {
         let record = store.orchestration_run("run-1").unwrap();
         assert!(is_object_ref(&record.brief_snapshot_id));
         assert_eq!(record.brief_tree_digest.len(), 64);
+    }
+
+    #[test]
+    fn generation_bump_fences_active_leases_before_attempt_recovery() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        store.set_task_max_attempts("node-1", 2).unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT status FROM orchestration_leases WHERE attempt_id = ?1",
+                    [&outcome.attempt_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "active"
+        );
+        assert_eq!(store.bump_coordinator_generation("run-1").unwrap(), 2);
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT status FROM orchestration_leases WHERE attempt_id = ?1",
+                    [&outcome.attempt_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "fenced"
+        );
+        assert!(matches!(
+            store.assert_lease_epoch_current(
+                &outcome.attempt_id,
+                outcome.lease_epoch,
+                1,
+                "worker-a"
+            ),
+            Err(StorageError::StaleLease { .. })
+        ));
+        store.recover_active_attempt_interrupted("node-1").unwrap();
+        let state = store.orchestration_recovery_state("run-1").unwrap();
+        assert_eq!(state[0].1, "ready");
     }
 }
