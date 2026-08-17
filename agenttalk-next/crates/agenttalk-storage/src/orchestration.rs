@@ -122,25 +122,12 @@ impl SqliteStore {
             tx.commit()?;
             return Ok(());
         }
-        if tx
-            .query_row(
-                "SELECT 1 FROM orchestration_runs WHERE brief_snapshot_id = ?1",
-                [&seed.brief_snapshot_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some()
-        {
-            return Err(StorageError::OrchestrationRunConflict {
-                run_id: seed.run_id,
-            });
-        }
         tx.execute(
             "INSERT INTO orchestration_runs(
                run_id, project_id, status, version, brief_snapshot_id,
                brief_tree_digest, dag_snapshot_digest,
                role_binding_snapshot_digest, coordinator_generation
-             ) VALUES(?1, ?2, 'prepared', 1, ?3, ?4, ?5, ?6, 1)",
+             ) VALUES(?1, ?2, 'pending', 1, ?3, ?4, ?5, ?6, 1)",
             params![
                 seed.run_id,
                 seed.project_id,
@@ -220,6 +207,8 @@ impl SqliteStore {
         milestone_id: &str,
         milestone_key: &str,
         brief_tree_digest: &str,
+        presented_artifact_set_digest: &str,
+        acceptance_evidence_digest: &str,
     ) -> Result<(), StorageError> {
         self.orchestration_run(run_id)?;
         self.connection.execute(
@@ -227,9 +216,16 @@ impl SqliteStore {
                milestone_id, run_id, milestone_key, required, status, version,
                brief_tree_digest, presented_artifact_set_digest,
                acceptance_evidence_digest
-             ) VALUES(?1, ?2, ?3, 1, 'ready', 1, ?4, '', '')
+             ) VALUES(?1, ?2, ?3, 1, 'awaiting_approval', 1, ?4, ?5, ?6)
              ON CONFLICT(milestone_id) DO NOTHING",
-            params![milestone_id, run_id, milestone_key, brief_tree_digest],
+            params![
+                milestone_id,
+                run_id,
+                milestone_key,
+                brief_tree_digest,
+                presented_artifact_set_digest,
+                acceptance_evidence_digest,
+            ],
         )?;
         Ok(())
     }
@@ -241,23 +237,12 @@ impl SqliteStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let milestone_run: Option<String> = tx
-            .query_row(
-                "SELECT run_id FROM orchestration_milestones WHERE milestone_id = ?1",
-                [&receipt.milestone_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if milestone_run.is_none() {
-            return Err(StorageError::OrchestrationMilestoneNotFound {
-                milestone_id: receipt.milestone_id,
-            });
-        }
+        // Step 1: replay or conflict on the immutable receipt slot.
         let existing = tx
             .query_row(
-                "SELECT semantic_payload_hash, decision, brief_tree_digest,
+                "SELECT run_id, semantic_payload_hash, decision, brief_tree_digest,
                         presented_artifact_set_digest, acceptance_evidence_digest,
-                        authenticated_principal
+                        authenticated_principal, expected_version
                  FROM orchestration_human_receipts
                  WHERE milestone_id = ?1 AND request_id = ?2",
                 params![receipt.milestone_id, receipt.request_id],
@@ -269,17 +254,20 @@ impl SqliteStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
             .optional()?;
         if let Some(existing) = existing {
-            if existing.0 != receipt.semantic_payload_hash
-                || existing.1 != receipt.decision
-                || existing.2 != receipt.brief_tree_digest
-                || existing.3 != receipt.presented_artifact_set_digest
-                || existing.4 != receipt.acceptance_evidence_digest
-                || existing.5 != receipt.authenticated_principal
+            if existing.1 != receipt.semantic_payload_hash
+                || existing.2 != receipt.decision
+                || existing.3 != receipt.brief_tree_digest
+                || existing.4 != receipt.presented_artifact_set_digest
+                || existing.5 != receipt.acceptance_evidence_digest
+                || existing.6 != receipt.authenticated_principal
+                || existing.7 != receipt.expected_version
             {
                 return Err(StorageError::HumanReceiptConflict {
                     milestone_id: receipt.milestone_id,
@@ -289,6 +277,82 @@ impl SqliteStore {
             tx.commit()?;
             return Ok(true);
         }
+
+        // Step 2: milestone ownership.
+        let milestone = tx
+            .query_row(
+                "SELECT run_id, status, version, brief_tree_digest,
+                        presented_artifact_set_digest, acceptance_evidence_digest
+                 FROM orchestration_milestones WHERE milestone_id = ?1",
+                [&receipt.milestone_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationMilestoneNotFound {
+                milestone_id: receipt.milestone_id.clone(),
+            })?;
+        if milestone.0 != receipt.run_id {
+            return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                milestone_id: receipt.milestone_id,
+                status: "run_id mismatch".into(),
+            });
+        }
+        if milestone.1 != "awaiting_approval" {
+            return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                milestone_id: receipt.milestone_id,
+                status: milestone.1,
+            });
+        }
+
+        // Step 3: run state and active attempt guard.
+        let run_status: String = tx.query_row(
+            "SELECT status FROM orchestration_runs WHERE run_id = ?1",
+            [&receipt.run_id],
+            |row| row.get(0),
+        )?;
+        if run_status != "awaiting_approval" {
+            return Err(StorageError::OrchestrationRunStatusInvalid {
+                run_id: receipt.run_id,
+                status: run_status,
+            });
+        }
+        let now = crate::orchestration::now_unix()?;
+        let active_attempt: Option<String> = tx
+            .query_row(
+                "SELECT attempt_id FROM orchestration_leases
+                 WHERE run_id = ?1 AND status = 'active' AND deadline > ?2 LIMIT 1",
+                params![receipt.run_id, now],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active_attempt.is_some() {
+            return Err(StorageError::OrchestrationActiveAttemptExists {
+                run_id: receipt.run_id,
+            });
+        }
+
+        // Step 4: receipt field validation against the milestone view.
+        if receipt.expected_version != milestone.2
+            || receipt.brief_tree_digest != milestone.3.unwrap_or_default()
+            || receipt.presented_artifact_set_digest != milestone.4.unwrap_or_default()
+            || receipt.acceptance_evidence_digest != milestone.5.unwrap_or_default()
+        {
+            return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                milestone_id: receipt.milestone_id,
+                status: "receipt digest/version mismatch".into(),
+            });
+        }
+
+        // Step 5: write the immutable receipt and close the run/milestone.
         tx.execute(
             "INSERT INTO orchestration_human_receipts(
                receipt_id, run_id, milestone_id, request_id,
@@ -312,18 +376,39 @@ impl SqliteStore {
                 receipt.core_timestamp,
             ],
         )?;
-        tx.execute(
-            "UPDATE orchestration_milestones
-             SET status = 'human_approved',
-                 presented_artifact_set_digest = ?2,
-                 acceptance_evidence_digest = ?3
-             WHERE milestone_id = ?1",
-            params![
-                receipt.milestone_id,
-                receipt.presented_artifact_set_digest,
-                receipt.acceptance_evidence_digest,
-            ],
-        )?;
+        if receipt.decision == "approve" {
+            tx.execute(
+                "UPDATE orchestration_milestones
+                 SET status = 'approved', version = version + 1
+                 WHERE milestone_id = ?1",
+                [&receipt.milestone_id],
+            )?;
+            tx.execute(
+                "UPDATE orchestration_runs
+                 SET status = 'running', version = version + 1
+                 WHERE run_id = ?1",
+                [&receipt.run_id],
+            )?;
+        } else if receipt.decision == "reject" {
+            tx.execute(
+                "UPDATE orchestration_milestones
+                 SET status = 'rejected', version = version + 1
+                 WHERE milestone_id = ?1",
+                [&receipt.milestone_id],
+            )?;
+            tx.execute(
+                "UPDATE orchestration_runs
+                 SET status = 'failed', terminal_reason = 'milestone_rejected',
+                     version = version + 1
+                 WHERE run_id = ?1",
+                [&receipt.run_id],
+            )?;
+        } else {
+            return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                milestone_id: receipt.milestone_id,
+                status: receipt.decision,
+            });
+        }
         tx.commit()?;
         Ok(false)
     }
@@ -421,16 +506,60 @@ impl SqliteStore {
             "INSERT INTO orchestration_task_nodes(
                node_id, run_id, node_key, required, status, version,
                attempt_count, max_attempts
-             ) VALUES(?1, ?2, ?3, 1, 'ready', 1, 0, 1)
+             ) VALUES(?1, ?2, ?3, 1, 'pending', 1, 0, 1)
              ON CONFLICT(node_id) DO NOTHING",
             params![node_id, run_id, node_key],
         )?;
         Ok(())
     }
 
+    pub fn mark_orchestration_task_ready(
+        &mut self,
+        node_id: &str,
+        input_artifact_set_digest: &str,
+        role_id: &str,
+        acceptance_contract_ref: &str,
+    ) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM orchestration_task_nodes WHERE node_id = ?1",
+                [node_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
+                node_id: node_id.to_owned(),
+            })?;
+        if status != "pending" {
+            return Err(StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status,
+            });
+        }
+        tx.execute(
+            "UPDATE orchestration_task_nodes
+             SET status = 'ready', input_artifact_set_digest = ?2,
+                 role_id = ?3, acceptance_contract_ref = ?4,
+                 version = version + 1
+             WHERE node_id = ?1",
+            params![
+                node_id,
+                input_artifact_set_digest,
+                role_id,
+                acceptance_contract_ref
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn transition_task_ready_to_running(
         &mut self,
         node_id: &str,
+        from_execution_run_id: &str,
         lease_owner: &str,
     ) -> Result<TaskReadyToRunningOutcome, StorageError> {
         let tx = self
@@ -438,13 +567,15 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let node = tx
             .query_row(
-                "SELECT run_id, status, attempt_count FROM orchestration_task_nodes WHERE node_id = ?1",
+                "SELECT run_id, status, attempt_count, max_attempts
+                 FROM orchestration_task_nodes WHERE node_id = ?1",
                 [node_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
@@ -452,37 +583,72 @@ impl SqliteStore {
             .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
                 node_id: node_id.to_owned(),
             })?;
-        if matches!(
-            node.1.as_str(),
-            "completed" | "failed" | "cancelled" | "interrupted" | "running"
-        ) {
+        if node.1 != "ready" {
+            return Err(StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status: node.1,
+            });
+        }
+        if node.2 >= node.3 {
             return Err(StorageError::OrchestrationTaskTerminal {
                 node_id: node_id.to_owned(),
             });
         }
+        let coordinator_generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&node.0],
+            |row| row.get(0),
+        )?;
         let attempt_no = node.2 + 1;
+        let lease_epoch = attempt_no;
         let attempt_id = format!("{node_id}:attempt:{attempt_no}");
-        let lease_epoch = 1;
         let now = crate::orchestration::now_unix()?;
+        // Attempt is created as leased before it may transition to running.
         tx.execute(
             "INSERT INTO orchestration_task_attempts(
-               attempt_id, run_id, node_id, attempt_no, status, lease_epoch
-             ) VALUES(?1, ?2, ?3, ?4, 'running', ?5)",
-            params![attempt_id, node.0, node_id, attempt_no, lease_epoch],
+               attempt_id, run_id, node_id, attempt_no, from_execution_run_id,
+               status, lease_epoch
+             ) VALUES(?1, ?2, ?3, ?4, ?5, 'leased', ?6)",
+            params![
+                attempt_id,
+                node.0,
+                node_id,
+                attempt_no,
+                from_execution_run_id,
+                lease_epoch,
+            ],
         )?;
         tx.execute(
             "INSERT INTO orchestration_leases(
                attempt_id, run_id, node_id, lease_epoch, lease_owner,
                heartbeat_at, deadline, coordinator_generation, status
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6 + 30000, 1, 'active')",
-            params![attempt_id, node.0, node_id, lease_epoch, lease_owner, now],
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6 + 30000, ?7, 'active')",
+            params![
+                attempt_id,
+                node.0,
+                node_id,
+                lease_epoch,
+                lease_owner,
+                now,
+                coordinator_generation,
+            ],
         )?;
         tx.execute(
             "UPDATE orchestration_task_nodes
-             SET status = 'running', active_attempt_id = ?2,
+             SET status = 'leased', active_attempt_id = ?2,
                  attempt_count = ?3, version = version + 1
              WHERE node_id = ?1",
             params![node_id, attempt_id, attempt_no],
+        )?;
+        // Explicit boundary: leased -> running after the lease is durable.
+        tx.execute(
+            "UPDATE orchestration_task_attempts SET status = 'running' WHERE attempt_id = ?1",
+            [&attempt_id],
+        )?;
+        tx.execute(
+            "UPDATE orchestration_task_nodes
+             SET status = 'running' WHERE node_id = ?1",
+            [node_id],
         )?;
         tx.commit()?;
         Ok(TaskReadyToRunningOutcome {
@@ -520,21 +686,147 @@ impl SqliteStore {
         &self,
         attempt_id: &str,
         requested_epoch: i64,
+        requested_generation: i64,
+        expected_owner: &str,
     ) -> Result<(), StorageError> {
-        let latest: Option<i64> = self
+        let now = crate::orchestration::now_unix()?;
+        let current = self
             .connection
             .query_row(
-                "SELECT MAX(lease_epoch) FROM orchestration_leases WHERE attempt_id = ?1",
-                [attempt_id],
-                |row| row.get(0),
+                "SELECT l.status, l.deadline, l.lease_owner, l.coordinator_generation,
+                        r.coordinator_generation
+                 FROM orchestration_leases l
+                 JOIN orchestration_runs r ON r.run_id = l.run_id
+                 WHERE l.attempt_id = ?1 AND l.lease_epoch = ?2
+                 ORDER BY l.coordinator_generation DESC LIMIT 1",
+                params![attempt_id, requested_epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
             )
             .optional()?
-            .flatten();
-        if latest.is_some_and(|epoch| epoch > requested_epoch) {
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            })?;
+        if current.0 != "active"
+            || current.1 <= now
+            || current.2 != expected_owner
+            || current.3 != requested_generation
+            || current.3 != current.4
+        {
             return Err(StorageError::StaleLease {
                 attempt_id: attempt_id.to_owned(),
             });
         }
+        Ok(())
+    }
+
+    pub fn transition_run_to_awaiting_approval(
+        &mut self,
+        run_id: &str,
+    ) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM orchestration_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationRunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        if status != "pending" {
+            return Err(StorageError::OrchestrationRunStatusInvalid {
+                run_id: run_id.to_owned(),
+                status,
+            });
+        }
+        tx.execute(
+            "UPDATE orchestration_runs SET status = 'awaiting_approval', version = version + 1 WHERE run_id = ?1",
+            [run_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_role_binding_snapshot(
+        &mut self,
+        run_id: &str,
+        snapshot_id: &str,
+        digest: &str,
+        role_id: &str,
+        agent_id: &str,
+        workspace_access: &str,
+    ) -> Result<(), StorageError> {
+        self.orchestration_run(run_id)?;
+        self.connection.execute(
+            "INSERT INTO orchestration_role_binding_snapshots(
+               role_binding_snapshot_id, run_id, digest, sealed_at,
+               role_id, agent_id, workspace_access
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                snapshot_id,
+                run_id,
+                digest,
+                crate::orchestration::now_unix()?,
+                role_id,
+                agent_id,
+                workspace_access,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_artifact_binding(
+        &mut self,
+        binding_id: &str,
+        run_id: &str,
+        delivery_id: &str,
+        edge_port_id: &str,
+        object_ref: &str,
+        sha256: &str,
+        size: i64,
+    ) -> Result<(), StorageError> {
+        if delivery_id.is_empty() || edge_port_id.is_empty() {
+            return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                reason: "delivery_id and edge_port_id are required".into(),
+            });
+        }
+        if !is_object_ref(object_ref) || !is_hex64(sha256) {
+            return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                reason: "object_ref must be sha256:<64hex> and sha256 must be 64hex".into(),
+            });
+        }
+        if object_ref != format!("sha256:{sha256}") {
+            return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                reason: "object_ref does not match sha256".into(),
+            });
+        }
+        self.connection.execute(
+            "INSERT INTO orchestration_artifact_bindings(
+               binding_id, run_id, delivery_id, edge_port_id,
+               object_ref, sha256, size
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                binding_id,
+                run_id,
+                delivery_id,
+                edge_port_id,
+                object_ref,
+                sha256,
+                size,
+            ],
+        )?;
         Ok(())
     }
 
@@ -603,6 +895,32 @@ mod tests {
         }
     }
 
+    fn hex64(byte: char) -> String {
+        byte.to_string().repeat(64)
+    }
+
+    fn receipt(
+        receipt_id: &str,
+        milestone_id: &str,
+        run_id: &str,
+        decision: &str,
+    ) -> HumanReceiptRecord {
+        HumanReceiptRecord {
+            receipt_id: receipt_id.into(),
+            run_id: run_id.into(),
+            milestone_id: milestone_id.into(),
+            request_id: "request-1".into(),
+            semantic_payload_hash: "payload-hash-1".into(),
+            decision: decision.into(),
+            expected_version: 1,
+            brief_tree_digest: hex64('a'),
+            presented_artifact_set_digest: format!("sha256:{}", hex64('b')),
+            acceptance_evidence_digest: format!("sha256:{}", hex64('c')),
+            authenticated_principal: "human-a".into(),
+            core_timestamp: 1000,
+        }
+    }
+
     #[test]
     fn v15_migration_checksum_version_and_legacy_tables_are_recorded() {
         let store = SqliteStore::open_in_memory().unwrap();
@@ -624,11 +942,12 @@ mod tests {
     }
 
     #[test]
-    fn run_creation_binds_brief_snapshot_and_rejects_conflict() {
+    fn run_creation_allows_multiple_runs_for_same_brief_and_rejects_different_binding() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         store.create_orchestration_run(seed("run-1")).unwrap();
+        store.create_orchestration_run(seed("run-2")).unwrap();
         let record = store.orchestration_run("run-1").unwrap();
-        assert_eq!(record.status, "prepared");
+        assert_eq!(record.status, "pending");
         assert_eq!(record.coordinator_generation, 1);
         let mut conflict = seed("run-1");
         conflict.brief_tree_digest = "1".repeat(64);
@@ -639,7 +958,55 @@ mod tests {
     }
 
     #[test]
-    fn human_receipt_replay_conflict_and_cas_ordering() {
+    fn human_receipt_approve_and_reject_close_run_and_milestone_states() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store.transition_run_to_awaiting_approval("run-1").unwrap();
+        store
+            .ensure_orchestration_milestone(
+                "run-1",
+                "milestone-1",
+                "m1",
+                &hex64('a'),
+                &format!("sha256:{}", hex64('b')),
+                &format!("sha256:{}", hex64('c')),
+            )
+            .unwrap();
+        let r = receipt("receipt-1", "milestone-1", "run-1", "approve");
+        assert!(!store.record_human_receipt(r.clone()).unwrap());
+        assert!(store.record_human_receipt(r).unwrap());
+        let run = store.orchestration_run("run-1").unwrap();
+        assert_eq!(run.status, "running");
+        let milestone_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_milestones WHERE milestone_id = 'milestone-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(milestone_status, "approved");
+
+        store.create_orchestration_run(seed("run-2")).unwrap();
+        store.transition_run_to_awaiting_approval("run-2").unwrap();
+        store
+            .ensure_orchestration_milestone(
+                "run-2",
+                "milestone-2",
+                "m2",
+                &hex64('a'),
+                &format!("sha256:{}", hex64('b')),
+                &format!("sha256:{}", hex64('c')),
+            )
+            .unwrap();
+        let r = receipt("receipt-2", "milestone-2", "run-2", "reject");
+        assert!(!store.record_human_receipt(r).unwrap());
+        let run = store.orchestration_run("run-2").unwrap();
+        assert_eq!(run.status, "failed");
+    }
+
+    #[test]
+    fn human_receipt_rejects_wrong_state_digests_and_active_attempt() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         store.create_orchestration_run(seed("run-1")).unwrap();
         store
@@ -647,33 +1014,88 @@ mod tests {
                 "run-1",
                 "milestone-1",
                 "m1",
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &hex64('a'),
+                &format!("sha256:{}", hex64('b')),
+                &format!("sha256:{}", hex64('c')),
             )
             .unwrap();
-        let receipt = HumanReceiptRecord {
-            receipt_id: "receipt-1".into(),
-            run_id: "run-1".into(),
-            milestone_id: "milestone-1".into(),
-            request_id: "request-1".into(),
-            semantic_payload_hash: "payload-hash-1".into(),
-            decision: "approved".into(),
-            expected_version: 1,
-            brief_tree_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                .into(),
-            presented_artifact_set_digest:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            acceptance_evidence_digest:
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            authenticated_principal: "human-a".into(),
-            core_timestamp: 1000,
-        };
-        assert!(!store.record_human_receipt(receipt.clone()).unwrap());
-        assert!(store.record_human_receipt(receipt.clone()).unwrap());
-        let mut conflicting = receipt;
-        conflicting.semantic_payload_hash = "different".into();
         assert!(matches!(
-            store.record_human_receipt(conflicting),
-            Err(StorageError::HumanReceiptConflict { .. })
+            store.record_human_receipt(receipt("receipt-1", "milestone-1", "run-1", "approve")),
+            Err(StorageError::OrchestrationRunStatusInvalid { .. })
+        ));
+        store.transition_run_to_awaiting_approval("run-1").unwrap();
+        let mut bad = receipt("receipt-1", "milestone-1", "run-1", "approve");
+        bad.expected_version = 9;
+        assert!(matches!(
+            store.record_human_receipt(bad),
+            Err(StorageError::OrchestrationMilestoneStateInvalid { .. })
+        ));
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        assert!(matches!(
+            store.record_human_receipt(receipt("receipt-1", "milestone-1", "run-1", "approve")),
+            Err(StorageError::OrchestrationActiveAttemptExists { .. })
+        ));
+    }
+
+    #[test]
+    fn ready_only_transition_and_lease_fencing() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        assert!(matches!(
+            store.transition_task_ready_to_running("node-1", "exec-run-1", "worker-a"),
+            Err(StorageError::OrchestrationTaskNotReady { .. })
+        ));
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        assert_eq!(outcome.attempt_no, 1);
+        assert_eq!(outcome.lease_epoch, 1);
+        let attempt_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&outcome.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_status, "running");
+        store
+            .assert_lease_epoch_current(&outcome.attempt_id, 1, 1, "worker-a")
+            .unwrap();
+        assert!(matches!(
+            store.assert_lease_epoch_current(&outcome.attempt_id, 0, 1, "worker-a"),
+            Err(StorageError::StaleLease { .. })
+        ));
+        assert!(matches!(
+            store.assert_lease_epoch_current(&outcome.attempt_id, 1, 2, "worker-a"),
+            Err(StorageError::StaleLease { .. })
+        ));
+        assert!(matches!(
+            store.assert_lease_epoch_current(&outcome.attempt_id, 1, 1, "worker-b"),
+            Err(StorageError::StaleLease { .. })
+        ));
+        store.bump_coordinator_generation("run-1").unwrap();
+        assert!(matches!(
+            store.assert_lease_epoch_current(&outcome.attempt_id, 1, 1, "worker-a"),
+            Err(StorageError::StaleLease { .. })
+        ));
+        assert!(matches!(
+            store.transition_task_ready_to_running("node-1", "exec-run-2", "worker-b"),
+            Err(StorageError::OrchestrationTaskNotReady { .. })
         ));
     }
 
@@ -691,12 +1113,9 @@ mod tests {
             artifact_transfer_set_digest: "artifact-set-1".into(),
             idempotency_key: "key-1".into(),
             delivery_payload_digest: "payload-1".into(),
-            envelope_object_ref:
-                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
-            envelope_raw_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .into(),
-            envelope_sha256_jcs: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .into(),
+            envelope_object_ref: format!("sha256:{}", hex64('c')),
+            envelope_raw_sha256: hex64('c'),
+            envelope_sha256_jcs: hex64('c'),
             acceptance_contract_ref: "contract-1".into(),
             acceptance_contract_digest: "contract-digest-1".into(),
             acceptance_evidence_ref: "evidence-1".into(),
@@ -715,28 +1134,75 @@ mod tests {
     }
 
     #[test]
-    fn ready_to_running_is_single_shot_and_stale_lease_fencing_works() {
+    fn role_snapshot_allows_same_digest_for_multiple_roles_and_artifact_binding_is_guarded() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         store.create_orchestration_run(seed("run-1")).unwrap();
         store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .record_role_binding_snapshot(
+                "run-1",
+                "snapshot-1",
+                "digest-1",
+                "role-a",
+                "agent-a",
+                "read-write",
+            )
             .unwrap();
-        let outcome = store
-            .transition_task_ready_to_running("node-1", "worker-a")
-            .unwrap();
-        assert_eq!(outcome.attempt_no, 1);
-        assert!(matches!(
-            store.transition_task_ready_to_running("node-1", "worker-b"),
-            Err(StorageError::OrchestrationTaskTerminal { .. })
-        ));
         store
-            .assert_lease_epoch_current(&outcome.attempt_id, 1)
+            .record_role_binding_snapshot(
+                "run-1",
+                "snapshot-2",
+                "digest-1",
+                "role-b",
+                "agent-b",
+                "read",
+            )
+            .unwrap();
+        let role_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_role_binding_snapshots WHERE digest = 'digest-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(role_count, 2);
+
+        let sha = hex64('d');
+        store
+            .record_artifact_binding(
+                "binding-1",
+                "run-1",
+                "delivery-1",
+                "edge-port-1",
+                &format!("sha256:{sha}"),
+                &sha,
+                12,
+            )
             .unwrap();
         assert!(matches!(
-            store.assert_lease_epoch_current(&outcome.attempt_id, 0),
-            Err(StorageError::StaleLease { .. })
+            store.record_artifact_binding(
+                "binding-2",
+                "run-1",
+                "delivery-1",
+                "edge-port-1",
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                &sha,
+                12,
+            ),
+            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
         ));
-        assert_eq!(store.bump_coordinator_generation("run-1").unwrap(), 2);
+        assert!(matches!(
+            store.record_artifact_binding(
+                "binding-3",
+                "run-1",
+                "",
+                "edge-port-1",
+                &format!("sha256:{sha}"),
+                &sha,
+                12,
+            ),
+            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
+        ));
     }
 
     #[test]
@@ -747,16 +1213,14 @@ mod tests {
             .insert_orchestration_task_node("run-1", "node-1", "key-1")
             .unwrap();
         store
-            .insert_orchestration_task_node("run-1", "node-2", "key-2")
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
             .unwrap();
         store
-            .transition_task_ready_to_running("node-1", "worker-a")
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
             .unwrap();
         let matrix = store.orchestration_recovery_state("run-1").unwrap();
         assert_eq!(matrix[0].0, "node-1");
         assert_eq!(matrix[0].1, "running");
-        assert_eq!(matrix[1].0, "node-2");
-        assert_eq!(matrix[1].1, "ready");
         let record = store.orchestration_run("run-1").unwrap();
         assert!(is_object_ref(&record.brief_snapshot_id));
         assert_eq!(record.brief_tree_digest.len(), 64);

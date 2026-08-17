@@ -507,23 +507,21 @@ const MIGRATION_V15_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS orchestration_runs (
   run_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','running','awaiting_approval','cancelling','completed','failed','cancelled')),
   version INTEGER NOT NULL,
   brief_snapshot_id TEXT NOT NULL,
   brief_tree_digest TEXT NOT NULL,
   dag_snapshot_digest TEXT NOT NULL,
   role_binding_snapshot_digest TEXT NOT NULL,
   coordinator_generation INTEGER NOT NULL DEFAULT 1,
-  terminal_reason TEXT,
-  UNIQUE(run_id, coordinator_generation),
-  UNIQUE(brief_snapshot_id)
+  terminal_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS orchestration_task_nodes (
   node_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   node_key TEXT NOT NULL,
   required INTEGER NOT NULL CHECK(required IN (0, 1)),
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','ready','blocked','leased','running','completed','failed','cancelled')),
   version INTEGER NOT NULL,
   active_attempt_id TEXT,
   attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -540,7 +538,7 @@ CREATE TABLE IF NOT EXISTS orchestration_task_attempts (
   node_id TEXT NOT NULL,
   attempt_no INTEGER NOT NULL,
   from_execution_run_id TEXT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('leased','running','completed','failed','cancelled')),
   lease_epoch INTEGER NOT NULL DEFAULT 0,
   artifact_set_digest TEXT,
   acceptance_evidence_digest TEXT,
@@ -553,7 +551,7 @@ CREATE TABLE IF NOT EXISTS orchestration_milestones (
   run_id TEXT NOT NULL,
   milestone_key TEXT NOT NULL,
   required INTEGER NOT NULL CHECK(required IN (0, 1)),
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('awaiting_approval','approved','rejected')),
   version INTEGER NOT NULL,
   brief_tree_digest TEXT,
   presented_artifact_set_digest TEXT,
@@ -581,11 +579,11 @@ CREATE TABLE IF NOT EXISTS orchestration_edge_ports (
 CREATE TABLE IF NOT EXISTS orchestration_artifact_bindings (
   binding_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  delivery_id TEXT,
-  edge_port_id TEXT,
+  delivery_id TEXT NOT NULL,
+  edge_port_id TEXT NOT NULL,
   object_ref TEXT NOT NULL,
   sha256 TEXT NOT NULL,
-  size INTEGER NOT NULL,
+  size INTEGER NOT NULL CHECK(size >= 0),
   normalized_content_type TEXT,
   normalized_content_type_policy_version TEXT,
   content_schema_ref_json TEXT,
@@ -594,7 +592,7 @@ CREATE TABLE IF NOT EXISTS orchestration_artifact_bindings (
 CREATE TABLE IF NOT EXISTS orchestration_role_binding_snapshots (
   role_binding_snapshot_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  digest TEXT NOT NULL UNIQUE,
+  digest TEXT NOT NULL,
   sealed_at INTEGER NOT NULL,
   role_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
@@ -607,7 +605,7 @@ CREATE TABLE IF NOT EXISTS orchestration_human_receipts (
   milestone_id TEXT NOT NULL,
   request_id TEXT NOT NULL,
   semantic_payload_hash TEXT NOT NULL,
-  decision TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('approve','reject')),
   expected_version INTEGER NOT NULL,
   brief_tree_digest TEXT NOT NULL,
   presented_artifact_set_digest TEXT NOT NULL,
@@ -625,7 +623,7 @@ CREATE TABLE IF NOT EXISTS orchestration_leases (
   heartbeat_at INTEGER NOT NULL,
   deadline INTEGER NOT NULL,
   coordinator_generation INTEGER NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('active','expired','released','fenced')),
   PRIMARY KEY(attempt_id, lease_epoch, coordinator_generation)
 );
 CREATE TABLE IF NOT EXISTS orchestration_handoff_deliveries (
@@ -784,6 +782,19 @@ pub enum StorageError {
         edge_id: String,
         lease_epoch: i64,
     },
+    #[error("orchestration run status {status} is invalid for run {run_id}")]
+    OrchestrationRunStatusInvalid { run_id: String, status: String },
+    #[error("orchestration milestone {milestone_id} has invalid state {status}")]
+    OrchestrationMilestoneStateInvalid {
+        milestone_id: String,
+        status: String,
+    },
+    #[error("orchestration run has active attempt: {run_id}")]
+    OrchestrationActiveAttemptExists { run_id: String },
+    #[error("orchestration task {node_id} is not ready (status {status})")]
+    OrchestrationTaskNotReady { node_id: String, status: String },
+    #[error("orchestration artifact binding is invalid: {reason}")]
+    OrchestrationArtifactBindingInvalid { reason: String },
     #[error("artifact body is not registered: {id}")]
     ArtifactBodyNotFound { id: String },
     #[error("artifact body does not match its registered metadata")]
