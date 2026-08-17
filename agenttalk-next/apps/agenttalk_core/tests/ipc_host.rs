@@ -1,14 +1,15 @@
 #![cfg(windows)]
 
-use agenttalk_brief_sealer::BriefSealer;
+use agenttalk_brief_sealer::{BriefSealer, CoreCas};
 use agenttalk_ipc::{FramedTransport, NamedPipeClient};
 use agenttalk_orchestration_contracts::registry::InMemorySchemaRegistry;
+use agenttalk_orchestration_contracts::{handoff, json as contract_json};
 use agenttalk_protocols::{
     CommandEnvelope, ErrorEnvelope, EventEnvelope, ProtocolHandshake, ProtocolVersion,
     QueryEnvelope, ResponseEnvelope, PROTOCOL_MAJOR,
 };
 use agenttalk_storage::{OrchestrationRunSeed, SqliteStore};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -2340,6 +2341,199 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
     );
     assert!(sealed.ok);
     assert_eq!(sealed.payload["status"], "sealing");
+
+    let cas = CoreCas::new(&project_root);
+    let artifact = cas.publish(b"ipc artifact bytes").unwrap();
+    let contract = cas.publish(b"ipc acceptance contract").unwrap();
+    let evidence = cas.publish(b"ipc acceptance evidence").unwrap();
+    let handoff_id = format!("handoff-{}", "0".repeat(64));
+    let attempt_id = "orchestration-node-1:attempt:1";
+    let mut envelope = json!({
+        "schemaVersion": "agenttalk.handoff.envelope.v1",
+        "handoffId": handoff_id.clone(),
+        "projectRunId": "orchestration-create-run",
+        "edgeId": "orchestration-edge-1",
+        "from": {
+            "taskNodeId": "orchestration-node-1",
+            "attemptId": attempt_id,
+            "executionRunId": "execution-1"
+        },
+        "to": {"taskNodeId": "orchestration-node-1"},
+        "leaseEpoch": 1,
+        "artifactBindings": [{
+            "sourceOutput": {"portId": "out"},
+            "targetInput": {"portId": "in"},
+            "artifactRef": {
+                "objectRef": artifact.object_ref.clone(),
+                "sha256": artifact.sha256.clone(),
+                "size": 18,
+                "contentSchemaRef": {
+                    "id": "agenttalk.test.spec.v1",
+                    "version": "1",
+                    "digest": "a".repeat(64)
+                },
+                "normalizedContentType": "text/plain",
+                "normalizedContentTypePolicyVersion": "1"
+            }
+        }],
+        "envelopeSha256": ""
+    });
+    let envelope_jcs = handoff::envelope_sha256_hex(&envelope).unwrap();
+    envelope["envelopeSha256"] = Value::String(envelope_jcs.clone());
+    let envelope_bytes = contract_json::canonicalize(&envelope).unwrap();
+    let envelope_object = cas.publish(&envelope_bytes).unwrap();
+    let envelope_raw = contract_json::sha256_raw_hex(&envelope_bytes);
+    assert_eq!(envelope_object.sha256, envelope_raw);
+    let declaration_digest = "f".repeat(64);
+    let dag_digest = "1".repeat(64);
+    let role_digest = "2".repeat(64);
+    let context_digest = "3".repeat(64);
+    let transfer_digest = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
+    let idempotency_key = handoff::idempotency_key_hex(&envelope).unwrap();
+    let delivery_payload_digest = handoff::delivery_payload_digest_hex(
+        &declaration_digest,
+        &transfer_digest,
+        &contract.sha256,
+        &evidence.sha256,
+        &context_digest,
+        &dag_digest,
+        &role_digest,
+    )
+    .unwrap();
+    let delivery_payload = json!({
+        "delivery": {
+            "deliveryId": handoff_id.clone(),
+            "runId": "orchestration-create-run",
+            "attemptId": attempt_id,
+            "edgeId": "orchestration-edge-1",
+            "leaseEpoch": 1,
+            "leaseOwner": "core-instance-1",
+            "coordinatorGeneration": 1,
+            "envelopeHandoffId": format!("handoff-{}", "0".repeat(64)),
+            "fromTaskNodeId": "orchestration-node-1",
+            "fromExecutionRunId": "execution-1",
+            "toTaskNodeId": "orchestration-node-1",
+            "dagSnapshotDigest": dag_digest,
+            "roleBindingSnapshotDigest": role_digest,
+            "declarationDigest": declaration_digest,
+            "artifactTransferSetDigest": transfer_digest,
+            "idempotencyKey": idempotency_key,
+            "deliveryPayloadDigest": delivery_payload_digest,
+            "envelopeObjectRef": envelope_object.object_ref.clone(),
+            "envelopeRawSha256": envelope_raw,
+            "envelopeSha256Jcs": envelope_jcs,
+            "acceptanceContractRef": contract.object_ref.clone(),
+            "acceptanceContractDigest": contract.sha256.clone(),
+            "acceptanceEvidenceRef": evidence.object_ref.clone(),
+            "acceptanceEvidenceDigest": evidence.sha256.clone(),
+            "producerContextManifestDigest": context_digest,
+            "replayReceiptJson": Value::Null
+        },
+        "bindings": [{
+            "bindingId": "orchestration-binding-1",
+            "edgePortId": "orchestration-edge-port-1",
+            "sourceOutputPortId": "out",
+            "targetInputPortId": "in",
+            "objectRef": artifact.object_ref.clone(),
+            "sha256": artifact.sha256.clone(),
+            "size": 18,
+            "contentSchemaId": "agenttalk.test.spec.v1",
+            "contentSchemaVersion": "1",
+            "contentSchemaDigest": "a".repeat(64),
+            "normalizedContentType": "text/plain",
+            "normalizedContentTypePolicyVersion": "1",
+            "contentSchemaRefJson": format!(
+                "{{\"id\":\"agenttalk.test.spec.v1\",\"version\":\"1\",\"digest\":\"{}\"}}",
+                "a".repeat(64)
+            )
+        }]
+    });
+    let delivery = send_command(
+        &mut client,
+        "orchestration-delivery-record-1",
+        "orchestration-create-test-session",
+        "orchestration.delivery.record",
+        delivery_payload.clone(),
+    );
+    assert!(delivery.ok);
+    assert_eq!(delivery.payload["journaled"], true);
+    let delivery_replay = send_command(
+        &mut client,
+        "orchestration-delivery-record-replay",
+        "orchestration-create-test-session",
+        "orchestration.delivery.record",
+        delivery_payload,
+    );
+    assert!(delivery_replay.ok);
+    assert_eq!(delivery_replay.payload["replayed"], true);
+
+    let acceptance_payload = json!({
+        "acceptance": {
+            "acceptanceId": "orchestration-acceptance-1",
+            "runId": "orchestration-create-run",
+            "attemptId": attempt_id,
+            "edgeId": "orchestration-edge-1",
+            "leaseEpoch": 1,
+            "deliveryId": format!("handoff-{}", "0".repeat(64)),
+            "acceptanceContractRef": contract.object_ref.clone(),
+            "acceptanceContractDigest": contract.sha256.clone(),
+            "acceptanceEvidenceRef": evidence.object_ref.clone(),
+            "acceptanceEvidenceDigest": evidence.sha256.clone(),
+            "verifierId": "caller-must-be-overridden",
+            "verifierVersion": "caller-must-be-overridden",
+            "verdict": "accepted",
+            "resultDigest": "0".repeat(64),
+            "coordinatorGeneration": 1,
+            "coreTimestamp": 0
+        }
+    });
+    let acceptance = send_command(
+        &mut client,
+        "orchestration-acceptance-record-1",
+        "orchestration-create-test-session",
+        "orchestration.acceptance.record",
+        acceptance_payload.clone(),
+    );
+    assert!(acceptance.ok);
+    assert_eq!(acceptance.payload["verdict"], "accepted");
+    let acceptance_replay = send_command(
+        &mut client,
+        "orchestration-acceptance-record-replay",
+        "orchestration-create-test-session",
+        "orchestration.acceptance.record",
+        acceptance_payload.clone(),
+    );
+    assert!(acceptance_replay.ok);
+    assert_eq!(acceptance_replay.payload["replayed"], true);
+    let mut acceptance_conflict_payload = acceptance_payload;
+    acceptance_conflict_payload["acceptance"]["verdict"] = Value::String("rejected".into());
+    let acceptance_conflict = send_command_error(
+        &mut client,
+        "orchestration-acceptance-record-conflict",
+        "orchestration-create-test-session",
+        "orchestration.acceptance.record",
+        acceptance_conflict_payload,
+    );
+    assert_eq!(acceptance_conflict.code, "COMMAND_REJECTED");
+    let accepted_snapshot = send_query(
+        &mut client,
+        "orchestration-accepted-snapshot-1",
+        "orchestration-create-test-session",
+        "orchestration.run.snapshot",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert_eq!(
+        accepted_snapshot.payload["attempts"][0]["status"],
+        "completed"
+    );
+    assert_eq!(accepted_snapshot.payload["nodes"][0]["status"], "completed");
+    assert_eq!(
+        accepted_snapshot.payload["machineAcceptances"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 
     let approval_run = send_command(
         &mut client,
