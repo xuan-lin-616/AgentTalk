@@ -116,6 +116,18 @@ pub trait CasVerifier {
     fn verify_object(&self, object_ref: &str) -> Result<Vec<u8>, StorageError>;
 }
 
+pub struct CoreCasVerifier<'a> {
+    pub cas: &'a agenttalk_brief_sealer::CoreCas,
+}
+
+impl CasVerifier for CoreCasVerifier<'_> {
+    fn verify_object(&self, object_ref: &str) -> Result<Vec<u8>, StorageError> {
+        self.cas
+            .read(object_ref)
+            .map_err(|_error| StorageError::ArtifactBodyMismatch)
+    }
+}
+
 impl SqliteStore {
     pub fn create_orchestration_run(
         &mut self,
@@ -2191,6 +2203,30 @@ mod tests {
             ),
             Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn core_cas_verifier_round_trips_real_objects() {
+        let root = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-corecas-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&root);
+        let bytes = b"hello sealed object";
+        let object = cas.publish(bytes).unwrap();
+        let verifier = CoreCasVerifier { cas: &cas };
+        assert_eq!(verifier.verify_object(&object.object_ref).unwrap(), bytes);
+        assert!(verifier
+            .verify_object(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+            .is_err());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
