@@ -23,7 +23,7 @@ use agenttalk_storage::{
     AgentModelBinding, AgentModelBindingPatch, ArtifactBodyChunk, CommandReceipt,
     CommandReceiptKey, LocalAgentImportOutcome, LocalAgentImportRequest, OrchestrationRunRecord,
     OrchestrationRunSeed, RetrievalEmbeddingProvider, RetrievalPreviewRequest, SqliteStore,
-    StorageError, StoredModelSelection,
+    StorageError, StoredModelSelection, TaskReadyToRunningOutcome,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1025,6 +1025,46 @@ impl PersistentCore {
             "coordinatorGeneration": run.coordinator_generation,
             "nodes": nodes,
         }))
+    }
+
+    pub fn insert_orchestration_task_node(
+        &mut self,
+        run_id: &str,
+        node_id: &str,
+        node_key: &str,
+    ) -> Result<(), CoreError> {
+        self.storage
+            .insert_orchestration_task_node(run_id, node_id, node_key)?;
+        Ok(())
+    }
+
+    pub fn mark_orchestration_task_ready(
+        &mut self,
+        node_id: &str,
+        input_artifact_set_digest: &str,
+        role_id: &str,
+        acceptance_contract_ref: &str,
+    ) -> Result<(), CoreError> {
+        self.storage.mark_orchestration_task_ready(
+            node_id,
+            input_artifact_set_digest,
+            role_id,
+            acceptance_contract_ref,
+        )?;
+        Ok(())
+    }
+
+    pub fn transition_orchestration_task_ready_to_running(
+        &mut self,
+        node_id: &str,
+        from_execution_run_id: &str,
+        lease_owner: &str,
+    ) -> Result<TaskReadyToRunningOutcome, CoreError> {
+        Ok(self.storage.transition_task_ready_to_running(
+            node_id,
+            from_execution_run_id,
+            lease_owner,
+        )?)
     }
 
     pub fn open_with_runtime(

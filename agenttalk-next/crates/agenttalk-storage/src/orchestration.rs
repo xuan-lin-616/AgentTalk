@@ -132,7 +132,8 @@ pub struct MachineAcceptanceRecord {
     pub core_timestamp: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskReadyToRunningOutcome {
     pub node_id: String,
     pub attempt_id: String,

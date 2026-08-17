@@ -358,6 +358,37 @@
         "roleBindingSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
+    "OrchestrationTaskInsertPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "nodeId", "nodeKey"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "nodeId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "nodeKey": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "OrchestrationTaskReadyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "inputArtifactSetDigest", "roleId", "acceptanceContractRef"],
+      "properties": {
+        "nodeId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "inputArtifactSetDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "roleId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "acceptanceContractRef": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "OrchestrationTaskStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "fromExecutionRunId", "leaseOwner"],
+      "properties": {
+        "nodeId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "fromExecutionRunId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "leaseOwner": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
     "ExecutionStartPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -564,7 +595,7 @@
         "protocol": { "$ref": "#/$defs/ProtocolVersion" },
         "requestId": { "$ref": "#/$defs/RequestId" },
         "sessionId": { "$ref": "#/$defs/SessionId" },
-        "command": { "enum": ["project.create", "project.update", "agent.create", "agent.update", "agent.model_binding.set", "agent.model_binding.patch", "conversation.create", "conversation.update", "connector.create", "connector.update", "connector.remove", "config.export", "config.import", "message.create", "memory.store", "summary.store", "summary.generate", "artifact.store", "attachment.import_file", "attachment.store", "retrieval.store", "retrieval.select", "retrieval.feedback", "workflow.create", "workflow.dispatch", "collaboration.create", "handoff.create", "handoff.approve", "handoff.reject", "handoff.dispatch", "handoff.cancel", "workspace.authorize", "project_agent.set", "project_agent.remove", "conversation_agent.set", "conversation_agent.remove", "identity_model_option.upsert", "identity_model_option.default", "execution.start", "execution.retry", "execution.rerun_current", "execution.cancel", "orchestration.run.create", "events.subscribe", "events.ack", "events.unsubscribe", "shutdown_owned", "agent.discovery.start", "agent.discovery.verify", "agent.discovery.dismiss", "agent.import_local"] },
+        "command": { "enum": ["project.create", "project.update", "agent.create", "agent.update", "agent.model_binding.set", "agent.model_binding.patch", "conversation.create", "conversation.update", "connector.create", "connector.update", "connector.remove", "config.export", "config.import", "message.create", "memory.store", "summary.store", "summary.generate", "artifact.store", "attachment.import_file", "attachment.store", "retrieval.store", "retrieval.select", "retrieval.feedback", "workflow.create", "workflow.dispatch", "collaboration.create", "handoff.create", "handoff.approve", "handoff.reject", "handoff.dispatch", "handoff.cancel", "workspace.authorize", "project_agent.set", "project_agent.remove", "conversation_agent.set", "conversation_agent.remove", "identity_model_option.upsert", "identity_model_option.default", "execution.start", "execution.retry", "execution.rerun_current", "execution.cancel", "orchestration.run.create", "orchestration.task.insert", "orchestration.task.ready", "orchestration.task.start", "events.subscribe", "events.ack", "events.unsubscribe", "shutdown_owned", "agent.discovery.start", "agent.discovery.verify", "agent.discovery.dismiss", "agent.import_local"] },
         "payload": { "type": "object" },
         "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
       },
@@ -694,6 +725,27 @@
             "properties": { "command": { "const": "orchestration.run.create" } }
           },
           "then": { "properties": { "payload": { "$ref": "#/$defs/OrchestrationRunCreatePayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "orchestration.task.insert" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/OrchestrationTaskInsertPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "orchestration.task.ready" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/OrchestrationTaskReadyPayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "orchestration.task.start" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/OrchestrationTaskStartPayload" } } }
         }
       ]
     },

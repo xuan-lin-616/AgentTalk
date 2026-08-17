@@ -2214,6 +2214,66 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
     assert_eq!(recovery.payload["runId"], "orchestration-create-run");
     assert_eq!(recovery.payload["coordinatorGeneration"], 1);
 
+    let inserted = send_command(
+        &mut client,
+        "orchestration-task-insert-1",
+        "orchestration-create-test-session",
+        "orchestration.task.insert",
+        json!({
+            "runId": "orchestration-create-run",
+            "nodeId": "orchestration-node-1",
+            "nodeKey": "architect"
+        }),
+    );
+    assert!(inserted.ok);
+    assert_eq!(inserted.payload["status"], "pending");
+
+    let ready = send_command(
+        &mut client,
+        "orchestration-task-ready-1",
+        "orchestration-create-test-session",
+        "orchestration.task.ready",
+        json!({
+            "nodeId": "orchestration-node-1",
+            "inputArtifactSetDigest": "3".repeat(64),
+            "roleId": "architect",
+            "acceptanceContractRef": format!("sha256:{}", "4".repeat(64))
+        }),
+    );
+    assert!(ready.ok);
+    assert_eq!(ready.payload["status"], "ready");
+
+    let started = send_command(
+        &mut client,
+        "orchestration-task-start-1",
+        "orchestration-create-test-session",
+        "orchestration.task.start",
+        json!({
+            "nodeId": "orchestration-node-1",
+            "fromExecutionRunId": "execution-1",
+            "leaseOwner": "core-instance-1"
+        }),
+    );
+    assert!(started.ok);
+    assert_eq!(
+        started.payload["outcome"]["attemptId"],
+        "orchestration-node-1:attempt:1"
+    );
+    assert_eq!(started.payload["outcome"]["leaseEpoch"], 1);
+
+    let running_snapshot = send_query(
+        &mut client,
+        "orchestration-run-snapshot-running",
+        "orchestration-create-test-session",
+        "orchestration.run.snapshot",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert_eq!(running_snapshot.payload["nodes"][0]["status"], "running");
+    assert_eq!(
+        running_snapshot.payload["attempts"][0]["fromExecutionRunId"],
+        "execution-1"
+    );
+
     let wrong_digest = json!({
         "projectId": "orchestration-create-project",
         "runId": "orchestration-create-run-wrong",

@@ -611,6 +611,71 @@ void main() {
   );
 
   test(
+    'orchestration task lifecycle sends typed control-plane commands',
+    () async {
+      final pipe = _FakePipe(
+        responsePayload: const {
+          'created': true,
+          'nodeId': 'node-1',
+          'status': 'pending',
+        },
+      );
+      final client = _clientFor(pipe);
+      addTearDown(client.close);
+
+      final inserted = await client.insertOrchestrationTaskNode(
+        sessionId: 'session-test-123456',
+        runId: 'run-1',
+        nodeId: 'node-1',
+        nodeKey: 'architect',
+      );
+      expect(inserted['status'], 'pending');
+
+      final readyPipe = _FakePipe(
+        responsePayload: const {
+          'changed': true,
+          'nodeId': 'node-1',
+          'status': 'ready',
+        },
+      );
+      final readyClient = _clientFor(readyPipe);
+      addTearDown(readyClient.close);
+      final ready = await readyClient.markOrchestrationTaskReady(
+        sessionId: 'session-test-123456',
+        nodeId: 'node-1',
+        inputArtifactSetDigest:
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        roleId: 'architect',
+        acceptanceContractRef:
+            'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      );
+      expect(ready['status'], 'ready');
+
+      final startPipe = _FakePipe(
+        responsePayload: const {
+          'started': true,
+          'outcome': {
+            'nodeId': 'node-1',
+            'attemptId': 'node-1:attempt:1',
+            'attemptNo': 1,
+            'leaseEpoch': 1,
+          },
+        },
+      );
+      final startClient = _clientFor(startPipe);
+      addTearDown(startClient.close);
+      final started = await startClient.startOrchestrationTask(
+        sessionId: 'session-test-123456',
+        nodeId: 'node-1',
+        fromExecutionRunId: 'execution-1',
+        leaseOwner: 'core-instance-1',
+      );
+      expect(started['outcome'], isA<Map<String, dynamic>>());
+      expect(startPipe.writtenCommands, ['orchestration.task.start']);
+    },
+  );
+
+  test(
     'local discovery queries use empty payloads and reject extra fields',
     () async {
       const responsePayload = {

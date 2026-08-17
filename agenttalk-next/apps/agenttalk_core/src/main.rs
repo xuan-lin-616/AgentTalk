@@ -2990,6 +2990,96 @@ fn handle_command(
                 }
             }
         }
+        "orchestration.task.insert" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(&command.payload, &["runId", "nodeId", "nodeKey"])
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let run_id = required_string(&command.payload, "runId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let node_id = required_string(&command.payload, "nodeId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let node_key = required_string(&command.payload, "nodeKey")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                core.insert_orchestration_task_node(&run_id, &node_id, &node_key)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(
+                    json!({"created": true, "runId": run_id, "nodeId": node_id, "status": "pending"}),
+                )
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.task.ready" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "nodeId",
+                        "inputArtifactSetDigest",
+                        "roleId",
+                        "acceptanceContractRef",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let node_id = required_string(&command.payload, "nodeId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let input_digest =
+                    required_orchestration_digest(&command.payload, "inputArtifactSetDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let role_id = required_string(&command.payload, "roleId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let contract_ref =
+                    required_orchestration_object_ref(&command.payload, "acceptanceContractRef")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                core.mark_orchestration_task_ready(
+                    &node_id,
+                    &input_digest,
+                    &role_id,
+                    &contract_ref,
+                )
+                .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"changed": true, "nodeId": node_id, "status": "ready"}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.task.start" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &["nodeId", "fromExecutionRunId", "leaseOwner"],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let node_id = required_string(&command.payload, "nodeId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let from_execution_run_id = required_string(&command.payload, "fromExecutionRunId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let lease_owner = required_string(&command.payload, "leaseOwner")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let outcome = core
+                    .transition_orchestration_task_ready_to_running(
+                        &node_id,
+                        &from_execution_run_id,
+                        &lease_owner,
+                    )
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"started": true, "outcome": outcome}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
         "project.create" => {
             let project = Project {
                 id: parse_or_error!(required_string(&command.payload, "projectId")),
@@ -6212,6 +6302,22 @@ fn required_orchestration_digest(payload: &Value, key: &str) -> Result<String, B
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(format!("{key} must be lowercase hex64").into());
+    }
+    Ok(value)
+}
+
+#[cfg(windows)]
+fn required_orchestration_object_ref(payload: &Value, key: &str) -> Result<String, Box<dyn Error>> {
+    let value = required_string(payload, key)?;
+    let digest = value
+        .strip_prefix("sha256:")
+        .ok_or_else(|| format!("{key} must be sha256:<lowercase hex64>"))?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("{key} must be sha256:<lowercase hex64>").into());
     }
     Ok(value)
 }

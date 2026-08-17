@@ -7,6 +7,9 @@ const String orchestrationRunSnapshotQuery = 'orchestration.run.snapshot';
 const String orchestrationRunRecoveryStateQuery =
     'orchestration.run.recovery_state';
 const String orchestrationRunCreateCommand = 'orchestration.run.create';
+const String orchestrationTaskInsertCommand = 'orchestration.task.insert';
+const String orchestrationTaskReadyCommand = 'orchestration.task.ready';
+const String orchestrationTaskStartCommand = 'orchestration.task.start';
 
 class ProtocolVersion {
   const ProtocolVersion(this.major, this.minor);

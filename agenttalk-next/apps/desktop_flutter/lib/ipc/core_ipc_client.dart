@@ -2141,6 +2141,108 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> insertOrchestrationTaskNode({
+    required String sessionId,
+    required String runId,
+    required String nodeId,
+    required String nodeKey,
+  }) async {
+    _requireNonEmpty('runId', runId);
+    _requireNonEmpty('nodeId', nodeId);
+    _requireNonEmpty('nodeKey', nodeKey);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-task-insert'),
+      'sessionId': sessionId,
+      'command': orchestrationTaskInsertCommand,
+      'payload': {'runId': runId, 'nodeId': nodeId, 'nodeKey': nodeKey},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['created'] is! bool ||
+        payload['nodeId'] != nodeId ||
+        payload['status'] != 'pending') {
+      throw const CoreIpcException(
+        'orchestration.task.insert response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> markOrchestrationTaskReady({
+    required String sessionId,
+    required String nodeId,
+    required String inputArtifactSetDigest,
+    required String roleId,
+    required String acceptanceContractRef,
+  }) async {
+    _requireNonEmpty('nodeId', nodeId);
+    _requireLowerHex64('inputArtifactSetDigest', inputArtifactSetDigest);
+    _requireNonEmpty('roleId', roleId);
+    if (!RegExp(r'^sha256:[0-9a-f]{64}$').hasMatch(acceptanceContractRef)) {
+      throw const CoreIpcException(
+        'acceptanceContractRef must be sha256:<lowercase hex64>',
+      );
+    }
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-task-ready'),
+      'sessionId': sessionId,
+      'command': orchestrationTaskReadyCommand,
+      'payload': {
+        'nodeId': nodeId,
+        'inputArtifactSetDigest': inputArtifactSetDigest,
+        'roleId': roleId,
+        'acceptanceContractRef': acceptanceContractRef,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['changed'] is! bool ||
+        payload['nodeId'] != nodeId ||
+        payload['status'] != 'ready') {
+      throw const CoreIpcException(
+        'orchestration.task.ready response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> startOrchestrationTask({
+    required String sessionId,
+    required String nodeId,
+    required String fromExecutionRunId,
+    required String leaseOwner,
+  }) async {
+    _requireNonEmpty('nodeId', nodeId);
+    _requireNonEmpty('fromExecutionRunId', fromExecutionRunId);
+    _requireNonEmpty('leaseOwner', leaseOwner);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-task-start'),
+      'sessionId': sessionId,
+      'command': orchestrationTaskStartCommand,
+      'payload': {
+        'nodeId': nodeId,
+        'fromExecutionRunId': fromExecutionRunId,
+        'leaseOwner': leaseOwner,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['started'] is! bool ||
+        payload['outcome'] is! Map<String, dynamic> ||
+        payload['outcome']['nodeId'] != nodeId) {
+      throw const CoreIpcException(
+        'orchestration.task.start response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> queryOrchestrationRecoveryState({
     required String sessionId,
     required String runId,
