@@ -2174,6 +2174,36 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> cancelOrchestrationRun({
+    required String sessionId,
+    required String runId,
+    String reason = 'cancelled_by_core',
+  }) async {
+    _requireNonEmpty('runId', runId);
+    _requireNonEmpty('reason', reason);
+    if (reason.length > 256) {
+      throw const CoreIpcException('cancel reason is too long');
+    }
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-run-cancel'),
+      'sessionId': sessionId,
+      'command': orchestrationRunCancelCommand,
+      'payload': {'runId': runId, 'reason': reason},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['cancelled'] != true ||
+        payload['runId'] != runId ||
+        payload['replayed'] is! bool) {
+      throw const CoreIpcException(
+        'orchestration.run.cancel response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> insertOrchestrationTaskNode({
     required String sessionId,
     required String runId,
@@ -2296,6 +2326,31 @@ class CoreIpcClient {
         payload['status'] != 'sealing') {
       throw const CoreIpcException(
         'orchestration.task.seal response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> retryOrchestrationTask({
+    required String sessionId,
+    required String nodeId,
+  }) async {
+    _requireNonEmpty('nodeId', nodeId);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-task-retry'),
+      'sessionId': sessionId,
+      'command': orchestrationTaskRetryCommand,
+      'payload': {'nodeId': nodeId},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['ready'] != true ||
+        payload['nodeId'] != nodeId ||
+        payload['replayed'] is! bool) {
+      throw const CoreIpcException(
+        'orchestration.task.retry response payload is invalid',
       );
     }
     return payload;

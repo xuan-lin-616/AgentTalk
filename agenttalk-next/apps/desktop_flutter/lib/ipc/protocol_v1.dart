@@ -8,10 +8,12 @@ const String orchestrationRunRecoveryStateQuery =
     'orchestration.run.recovery_state';
 const String orchestrationAuditEventsQuery = 'orchestration.audit.events';
 const String orchestrationRunCreateCommand = 'orchestration.run.create';
+const String orchestrationRunCancelCommand = 'orchestration.run.cancel';
 const String orchestrationTaskInsertCommand = 'orchestration.task.insert';
 const String orchestrationTaskReadyCommand = 'orchestration.task.ready';
 const String orchestrationTaskStartCommand = 'orchestration.task.start';
 const String orchestrationTaskSealCommand = 'orchestration.task.seal';
+const String orchestrationTaskRetryCommand = 'orchestration.task.retry';
 const String orchestrationLeaseRenewCommand = 'orchestration.lease.renew';
 const String orchestrationLeaseReleaseCommand = 'orchestration.lease.release';
 const String orchestrationDeliveryRecordCommand =

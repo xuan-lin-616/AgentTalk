@@ -3172,6 +3172,47 @@ fn handle_command(
                 }
             }
         }
+        "orchestration.run.cancel" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(&command.payload, &["runId", "reason"])
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let run_id = required_string(&command.payload, "runId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let reason = command
+                    .payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("cancelled_by_core");
+                let replayed = core
+                    .cancel_orchestration_run(&run_id, reason)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"cancelled": true, "replayed": replayed, "runId": run_id}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.task.retry" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(&command.payload, &["nodeId"])
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let node_id = required_string(&command.payload, "nodeId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let replayed = core
+                    .retry_orchestration_task(&node_id)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"ready": true, "replayed": replayed, "nodeId": node_id}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
         "orchestration.delivery.record" => {
             let result = (|| -> Result<Value, (&str, String, bool)> {
                 reject_unknown_fields(&command.payload, &["delivery", "bindings"])

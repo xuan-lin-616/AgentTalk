@@ -2228,6 +2228,24 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
     );
     assert!(inserted.ok);
     assert_eq!(inserted.payload["status"], "pending");
+    for (node_id, node_key) in [
+        ("orchestration-node-2", "developer"),
+        ("orchestration-node-3", "reviewer"),
+    ] {
+        let inserted = send_command(
+            &mut client,
+            &format!("orchestration-task-insert-{node_key}"),
+            "orchestration-create-test-session",
+            "orchestration.task.insert",
+            json!({
+                "runId": "orchestration-create-run",
+                "nodeId": node_id,
+                "nodeKey": node_key
+            }),
+        );
+        assert!(inserted.ok);
+        assert_eq!(inserted.payload["status"], "pending");
+    }
 
     let graph = send_command(
         &mut client,
@@ -2240,7 +2258,14 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
                 "edgeId": "orchestration-edge-1",
                 "runId": "orchestration-create-run",
                 "fromNodeId": "orchestration-node-1",
-                "toNodeId": "orchestration-node-1",
+                "toNodeId": "orchestration-node-2",
+                "dagSnapshotDigest": "1".repeat(64),
+                "allowedConsumerJson": "[]"
+            }, {
+                "edgeId": "orchestration-edge-2",
+                "runId": "orchestration-create-run",
+                "fromNodeId": "orchestration-node-1",
+                "toNodeId": "orchestration-node-3",
                 "dagSnapshotDigest": "1".repeat(64),
                 "allowedConsumerJson": "[]"
             }],
@@ -2248,7 +2273,13 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
                 "edgePortId": "orchestration-edge-port-1",
                 "edgeId": "orchestration-edge-1",
                 "sourceOutputPortId": "out",
-                "targetInputPortId": "in",
+                "targetInputPortId": "in-developer",
+                "portPolicyJson": "{}"
+            }, {
+                "edgePortId": "orchestration-edge-port-2",
+                "edgeId": "orchestration-edge-2",
+                "sourceOutputPortId": "out-review",
+                "targetInputPortId": "in-reviewer",
                 "portPolicyJson": "{}"
             }],
             "roleBindings": [{
@@ -2258,13 +2289,27 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
                 "roleId": "architect",
                 "agentId": "agent-fixture",
                 "workspaceAccess": "read_only"
+            }, {
+                "roleBindingSnapshotId": "orchestration-role-binding-2",
+                "runId": "orchestration-create-run",
+                "digest": "2".repeat(64),
+                "roleId": "developer",
+                "agentId": "agent-fixture",
+                "workspaceAccess": "read_only"
+            }, {
+                "roleBindingSnapshotId": "orchestration-role-binding-3",
+                "runId": "orchestration-create-run",
+                "digest": "2".repeat(64),
+                "roleId": "reviewer",
+                "agentId": "agent-fixture",
+                "workspaceAccess": "read_only"
             }],
             "contextAuthorities": []
         }),
     );
     assert!(graph.ok);
-    assert_eq!(graph.payload["edges"], 1);
-    assert_eq!(graph.payload["edgePorts"], 1);
+    assert_eq!(graph.payload["edges"], 2);
+    assert_eq!(graph.payload["edgePorts"], 2);
 
     let ready = send_command(
         &mut client,
@@ -2358,11 +2403,11 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
             "attemptId": attempt_id,
             "executionRunId": "execution-1"
         },
-        "to": {"taskNodeId": "orchestration-node-1"},
+        "to": {"taskNodeId": "orchestration-node-2"},
         "leaseEpoch": 1,
         "artifactBindings": [{
             "sourceOutput": {"portId": "out"},
-            "targetInput": {"portId": "in"},
+            "targetInput": {"portId": "in-developer"},
             "artifactRef": {
                 "objectRef": artifact.object_ref.clone(),
                 "sha256": artifact.sha256.clone(),
@@ -2412,7 +2457,7 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
             "envelopeHandoffId": format!("handoff-{}", "0".repeat(64)),
             "fromTaskNodeId": "orchestration-node-1",
             "fromExecutionRunId": "execution-1",
-            "toTaskNodeId": "orchestration-node-1",
+            "toTaskNodeId": "orchestration-node-2",
             "dagSnapshotDigest": dag_digest,
             "roleBindingSnapshotDigest": role_digest,
             "declarationDigest": declaration_digest,
@@ -2433,7 +2478,7 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
             "bindingId": "orchestration-binding-1",
             "edgePortId": "orchestration-edge-port-1",
             "sourceOutputPortId": "out",
-            "targetInputPortId": "in",
+            "targetInputPortId": "in-developer",
             "objectRef": artifact.object_ref.clone(),
             "sha256": artifact.sha256.clone(),
             "size": 18,
@@ -2515,6 +2560,147 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
         acceptance_conflict_payload,
     );
     assert_eq!(acceptance_conflict.code, "COMMAND_REJECTED");
+    let partial_snapshot = send_query(
+        &mut client,
+        "orchestration-partial-snapshot-1",
+        "orchestration-create-test-session",
+        "orchestration.run.snapshot",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert_eq!(partial_snapshot.payload["attempts"][0]["status"], "sealing");
+    assert_eq!(partial_snapshot.payload["nodes"][0]["status"], "sealing");
+    let handoff_id_two = format!("handoff-{}", "1".repeat(64));
+    let mut envelope_two = json!({
+        "schemaVersion": "agenttalk.handoff.envelope.v1",
+        "handoffId": handoff_id_two.clone(),
+        "projectRunId": "orchestration-create-run",
+        "edgeId": "orchestration-edge-2",
+        "from": {
+            "taskNodeId": "orchestration-node-1",
+            "attemptId": attempt_id,
+            "executionRunId": "execution-1"
+        },
+        "to": {"taskNodeId": "orchestration-node-3"},
+        "leaseEpoch": 1,
+        "artifactBindings": [{
+            "sourceOutput": {"portId": "out-review"},
+            "targetInput": {"portId": "in-reviewer"},
+            "artifactRef": {
+                "objectRef": artifact.object_ref.clone(),
+                "sha256": artifact.sha256.clone(),
+                "size": 18,
+                "contentSchemaRef": {
+                    "id": "agenttalk.test.spec.v1",
+                    "version": "1",
+                    "digest": "a".repeat(64)
+                },
+                "normalizedContentType": "text/plain",
+                "normalizedContentTypePolicyVersion": "1"
+            }
+        }],
+        "envelopeSha256": ""
+    });
+    let envelope_jcs_two = handoff::envelope_sha256_hex(&envelope_two).unwrap();
+    envelope_two["envelopeSha256"] = Value::String(envelope_jcs_two.clone());
+    let envelope_bytes_two = contract_json::canonicalize(&envelope_two).unwrap();
+    let envelope_object_two = cas.publish(&envelope_bytes_two).unwrap();
+    let envelope_raw_two = contract_json::sha256_raw_hex(&envelope_bytes_two);
+    let transfer_digest_two = handoff::artifact_transfer_set_digest_hex(&envelope_two).unwrap();
+    let idempotency_key_two = handoff::idempotency_key_hex(&envelope_two).unwrap();
+    let delivery_payload_digest_two = handoff::delivery_payload_digest_hex(
+        &declaration_digest,
+        &transfer_digest_two,
+        &contract.sha256,
+        &evidence.sha256,
+        &context_digest,
+        &dag_digest,
+        &role_digest,
+    )
+    .unwrap();
+    let delivery_two_payload = json!({
+        "delivery": {
+            "deliveryId": handoff_id_two.clone(),
+            "runId": "orchestration-create-run",
+            "attemptId": attempt_id,
+            "edgeId": "orchestration-edge-2",
+            "leaseEpoch": 1,
+            "leaseOwner": "core-instance-1",
+            "coordinatorGeneration": 1,
+            "envelopeHandoffId": handoff_id_two.clone(),
+            "fromTaskNodeId": "orchestration-node-1",
+            "fromExecutionRunId": "execution-1",
+            "toTaskNodeId": "orchestration-node-3",
+            "dagSnapshotDigest": dag_digest,
+            "roleBindingSnapshotDigest": role_digest,
+            "declarationDigest": declaration_digest,
+            "artifactTransferSetDigest": transfer_digest_two,
+            "idempotencyKey": idempotency_key_two,
+            "deliveryPayloadDigest": delivery_payload_digest_two,
+            "envelopeObjectRef": envelope_object_two.object_ref.clone(),
+            "envelopeRawSha256": envelope_raw_two,
+            "envelopeSha256Jcs": envelope_jcs_two,
+            "acceptanceContractRef": contract.object_ref.clone(),
+            "acceptanceContractDigest": contract.sha256.clone(),
+            "acceptanceEvidenceRef": evidence.object_ref.clone(),
+            "acceptanceEvidenceDigest": evidence.sha256.clone(),
+            "producerContextManifestDigest": context_digest,
+            "replayReceiptJson": Value::Null
+        },
+        "bindings": [{
+            "bindingId": "orchestration-binding-2",
+            "edgePortId": "orchestration-edge-port-2",
+            "sourceOutputPortId": "out-review",
+            "targetInputPortId": "in-reviewer",
+            "objectRef": artifact.object_ref.clone(),
+            "sha256": artifact.sha256.clone(),
+            "size": 18,
+            "contentSchemaId": "agenttalk.test.spec.v1",
+            "contentSchemaVersion": "1",
+            "contentSchemaDigest": "a".repeat(64),
+            "normalizedContentType": "text/plain",
+            "normalizedContentTypePolicyVersion": "1",
+            "contentSchemaRefJson": format!(
+                "{{\"id\":\"agenttalk.test.spec.v1\",\"version\":\"1\",\"digest\":\"{}\"}}",
+                "a".repeat(64)
+            )
+        }]
+    });
+    let delivery_two = send_command(
+        &mut client,
+        "orchestration-delivery-record-2",
+        "orchestration-create-test-session",
+        "orchestration.delivery.record",
+        delivery_two_payload.clone(),
+    );
+    assert!(delivery_two.ok);
+    let acceptance_two_payload = json!({
+        "acceptance": {
+            "acceptanceId": "orchestration-acceptance-2",
+            "runId": "orchestration-create-run",
+            "attemptId": attempt_id,
+            "edgeId": "orchestration-edge-2",
+            "leaseEpoch": 1,
+            "deliveryId": handoff_id_two,
+            "acceptanceContractRef": contract.object_ref.clone(),
+            "acceptanceContractDigest": contract.sha256.clone(),
+            "acceptanceEvidenceRef": evidence.object_ref.clone(),
+            "acceptanceEvidenceDigest": evidence.sha256.clone(),
+            "verifierId": "caller-must-be-overridden",
+            "verifierVersion": "caller-must-be-overridden",
+            "verdict": "accepted",
+            "resultDigest": "0".repeat(64),
+            "coordinatorGeneration": 1,
+            "coreTimestamp": 0
+        }
+    });
+    let acceptance_two = send_command(
+        &mut client,
+        "orchestration-acceptance-record-2",
+        "orchestration-create-test-session",
+        "orchestration.acceptance.record",
+        acceptance_two_payload,
+    );
+    assert!(acceptance_two.ok);
     let accepted_snapshot = send_query(
         &mut client,
         "orchestration-accepted-snapshot-1",
@@ -2532,7 +2718,99 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
             .as_array()
             .unwrap()
             .len(),
-        1
+        2
+    );
+    assert_eq!(
+        accepted_snapshot.payload["machineAcceptances"][0]["verifierId"],
+        "core.machine.acceptance"
+    );
+    assert_eq!(
+        accepted_snapshot.payload["machineAcceptances"][0]["verifierVersion"],
+        "v1"
+    );
+    assert_eq!(accepted_snapshot.payload["run"]["status"], "running");
+    let recovery_after_edges = send_query(
+        &mut client,
+        "orchestration-run-recovery-after-edges",
+        "orchestration-create-test-session",
+        "orchestration.run.recovery_state",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert_eq!(
+        recovery_after_edges.payload["nodes"][0]["status"],
+        "completed"
+    );
+    let audit_after_edges = send_query(
+        &mut client,
+        "orchestration-audit-after-edges",
+        "orchestration-create-test-session",
+        "orchestration.audit.events",
+        json!({"runId": "orchestration-create-run", "afterSequence": -1, "limit": 500}),
+    );
+    assert!(audit_after_edges.ok);
+    assert!(
+        audit_after_edges.payload["events"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 10
+    );
+
+    for (node_id, role_id, execution_id) in [
+        ("orchestration-node-2", "developer", "execution-2"),
+        ("orchestration-node-3", "reviewer", "execution-3"),
+    ] {
+        let ready = send_command(
+            &mut client,
+            &format!("orchestration-task-ready-{role_id}"),
+            "orchestration-create-test-session",
+            "orchestration.task.ready",
+            json!({
+                "nodeId": node_id,
+                "inputArtifactSetDigest": "3".repeat(64),
+                "roleId": role_id,
+                "acceptanceContractRef": format!("sha256:{}", "4".repeat(64))
+            }),
+        );
+        assert!(ready.ok);
+        let started = send_command(
+            &mut client,
+            &format!("orchestration-task-start-{role_id}"),
+            "orchestration-create-test-session",
+            "orchestration.task.start",
+            json!({
+                "nodeId": node_id,
+                "fromExecutionRunId": execution_id,
+                "leaseOwner": "core-instance-1"
+            }),
+        );
+        assert!(started.ok);
+        let sealed = send_command(
+            &mut client,
+            &format!("orchestration-task-seal-{role_id}"),
+            "orchestration-create-test-session",
+            "orchestration.task.seal",
+            json!({"nodeId": node_id}),
+        );
+        assert!(sealed.ok);
+    }
+    let completed_snapshot = send_query(
+        &mut client,
+        "orchestration-completed-snapshot",
+        "orchestration-create-test-session",
+        "orchestration.run.snapshot",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert_eq!(
+        completed_snapshot.payload["run"]["status"],
+        "awaiting_approval"
+    );
+    assert_eq!(
+        completed_snapshot.payload["nodes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
     );
 
     let approval_run = send_command(

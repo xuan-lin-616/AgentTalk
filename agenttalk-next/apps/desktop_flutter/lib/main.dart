@@ -28,6 +28,7 @@ import 'ui/retrieval_source_write_dialog.dart';
 import 'ui/retrieval_selection_dialog.dart';
 import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
+import 'ui/orchestration_panel.dart';
 
 final _workspaceShellKey = GlobalKey<WorkspaceShellState>();
 
@@ -2857,20 +2858,35 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                                       ),
                                       SizedBox(
                                         width: _rightPaneWidth,
-                                        child: _WorkflowProjection(
-                                          snapshot: _snapshot,
-                                          status: _projectionStatus,
-                                          onCancel: _cancelExecution,
-                                          onRetry: _retryExecution,
-                                          onRerunCurrent:
-                                              _rerunCurrentExecution,
-                                          onCreate: _showCreateWorkflow,
-                                          onCreateHandoff:
-                                              _showCreateStructuredHandoff,
-                                          onDispatchHandoff:
-                                              _dispatchStructuredHandoff,
-                                          onTransitionHandoff:
-                                              _transitionStructuredHandoff,
+                                        child: Column(
+                                          children: [
+                                            Expanded(
+                                              flex: 5,
+                                              child: _WorkflowProjection(
+                                                snapshot: _snapshot,
+                                                status: _projectionStatus,
+                                                onCancel: _cancelExecution,
+                                                onRetry: _retryExecution,
+                                                onRerunCurrent:
+                                                    _rerunCurrentExecution,
+                                                onCreate: _showCreateWorkflow,
+                                                onCreateHandoff:
+                                                    _showCreateStructuredHandoff,
+                                                onDispatchHandoff:
+                                                    _dispatchStructuredHandoff,
+                                                onTransitionHandoff:
+                                                    _transitionStructuredHandoff,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Expanded(
+                                              flex: 4,
+                                              child: OrchestrationPanel(
+                                                client: _client,
+                                                sessionId: _sessionId,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],

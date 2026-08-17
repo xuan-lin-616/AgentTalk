@@ -1158,6 +1158,18 @@ impl PersistentCore {
         )?)
     }
 
+    pub fn cancel_orchestration_run(
+        &mut self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<bool, CoreError> {
+        Ok(self.storage.cancel_orchestration_run(run_id, reason)?)
+    }
+
+    pub fn retry_orchestration_task(&mut self, node_id: &str) -> Result<bool, CoreError> {
+        Ok(self.storage.retry_orchestration_task(node_id)?)
+    }
+
     pub fn record_orchestration_handoff_delivery(
         &mut self,
         delivery: HandoffDeliveryRecord,

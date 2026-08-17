@@ -763,46 +763,49 @@ void main() {
     },
   );
 
-  test('orchestration lease lifecycle clients preserve fencing fields', () async {
-    final renewPipe = _FakePipe(
-      responsePayload: const {
-        'renewed': true,
-        'attemptId': 'node-1:attempt:1',
-        'deadline': 123,
-      },
-    );
-    final renewClient = _clientFor(renewPipe);
-    addTearDown(renewClient.close);
-    final renewed = await renewClient.renewOrchestrationLease(
-      sessionId: 'session-test-123456',
-      attemptId: 'node-1:attempt:1',
-      leaseEpoch: 1,
-      coordinatorGeneration: 1,
-      leaseOwner: 'core-instance-1',
-      extensionSeconds: 60,
-    );
-    expect(renewed['deadline'], 123);
-    expect(renewPipe.writtenCommands, ['orchestration.lease.renew']);
+  test(
+    'orchestration lease lifecycle clients preserve fencing fields',
+    () async {
+      final renewPipe = _FakePipe(
+        responsePayload: const {
+          'renewed': true,
+          'attemptId': 'node-1:attempt:1',
+          'deadline': 123,
+        },
+      );
+      final renewClient = _clientFor(renewPipe);
+      addTearDown(renewClient.close);
+      final renewed = await renewClient.renewOrchestrationLease(
+        sessionId: 'session-test-123456',
+        attemptId: 'node-1:attempt:1',
+        leaseEpoch: 1,
+        coordinatorGeneration: 1,
+        leaseOwner: 'core-instance-1',
+        extensionSeconds: 60,
+      );
+      expect(renewed['deadline'], 123);
+      expect(renewPipe.writtenCommands, ['orchestration.lease.renew']);
 
-    final releasePipe = _FakePipe(
-      responsePayload: const {
-        'released': true,
-        'replayed': false,
-        'attemptId': 'node-1:attempt:1',
-      },
-    );
-    final releaseClient = _clientFor(releasePipe);
-    addTearDown(releaseClient.close);
-    final released = await releaseClient.releaseOrchestrationLease(
-      sessionId: 'session-test-123456',
-      attemptId: 'node-1:attempt:1',
-      leaseEpoch: 1,
-      coordinatorGeneration: 1,
-      leaseOwner: 'core-instance-1',
-    );
-    expect(released['released'], true);
-    expect(releasePipe.writtenCommands, ['orchestration.lease.release']);
-  });
+      final releasePipe = _FakePipe(
+        responsePayload: const {
+          'released': true,
+          'replayed': false,
+          'attemptId': 'node-1:attempt:1',
+        },
+      );
+      final releaseClient = _clientFor(releasePipe);
+      addTearDown(releaseClient.close);
+      final released = await releaseClient.releaseOrchestrationLease(
+        sessionId: 'session-test-123456',
+        attemptId: 'node-1:attempt:1',
+        leaseEpoch: 1,
+        coordinatorGeneration: 1,
+        leaseOwner: 'core-instance-1',
+      );
+      expect(released['released'], true);
+      expect(releasePipe.writtenCommands, ['orchestration.lease.release']);
+    },
+  );
 
   test(
     'orchestration milestone and receipt clients validate sealed facts',

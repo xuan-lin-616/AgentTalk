@@ -1745,6 +1745,15 @@ impl SqliteStore {
         if required_nodes == 0 || pending_nodes != 0 {
             return Ok(());
         }
+        let active_leases: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_leases
+             WHERE run_id = ?1 AND status = 'active' AND deadline > ?2",
+            params![run_id, now_unix()?],
+            |row| row.get(0),
+        )?;
+        if active_leases != 0 {
+            return Ok(());
+        }
 
         let milestone_id = format!("milestone:{run_id}:completion");
         let brief_tree_digest: String = tx.query_row(
@@ -1754,9 +1763,16 @@ impl SqliteStore {
         )?;
         let mut artifact_material = String::new();
         let mut statement = tx.prepare(
-            "SELECT edge_id, lease_epoch, artifact_transfer_set_digest
-             FROM orchestration_handoff_deliveries
-             WHERE run_id = ?1 ORDER BY edge_id, lease_epoch",
+            "SELECT d.edge_id, d.lease_epoch, d.artifact_transfer_set_digest
+             FROM orchestration_handoff_deliveries d
+             JOIN orchestration_task_attempts a ON a.attempt_id = d.attempt_id
+             JOIN orchestration_task_nodes n ON n.node_id = a.node_id
+             WHERE d.run_id = ?1 AND a.status = 'completed' AND n.status = 'completed'
+               AND EXISTS (
+                 SELECT 1 FROM orchestration_machine_acceptances ma
+                 WHERE ma.delivery_id = d.delivery_id AND ma.verdict = 'accepted'
+               )
+             ORDER BY d.edge_id, d.lease_epoch",
         )?;
         for row in statement.query_map([run_id], |row| {
             Ok((
@@ -1775,10 +1791,13 @@ impl SqliteStore {
         }
         let mut evidence_material = String::new();
         let mut statement = tx.prepare(
-            "SELECT acceptance_id, result_digest
-             FROM orchestration_machine_acceptances
-             WHERE run_id = ?1 AND verdict = 'accepted'
-             ORDER BY acceptance_id",
+            "SELECT ma.acceptance_id, ma.result_digest
+             FROM orchestration_machine_acceptances ma
+             JOIN orchestration_task_attempts a ON a.attempt_id = ma.attempt_id
+             JOIN orchestration_task_nodes n ON n.node_id = a.node_id
+             WHERE ma.run_id = ?1 AND ma.verdict = 'accepted'
+               AND a.status = 'completed' AND n.status = 'completed'
+             ORDER BY ma.acceptance_id",
         )?;
         for row in statement.query_map([run_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -3101,6 +3120,60 @@ impl SqliteStore {
             &format!("task_attempt_sealing:{attempt_id}"),
             generation,
         )?;
+        // A node without outgoing edges is a terminal DAG sink only after the
+        // run graph has been bound.  If sealing races graph binding, keep the
+        // attempt in `sealing`; a later delivery/graph operation can close it
+        // without manufacturing a terminal state from an empty graph.
+        let outgoing_count: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_edges
+             WHERE run_id = ?1 AND from_node_id = ?2",
+            params![node.0, node_id],
+            |row| row.get(0),
+        )?;
+        let graph_edge_count: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_edges WHERE run_id = ?1",
+            [&node.0],
+            |row| row.get(0),
+        )?;
+        if outgoing_count == 0 && graph_edge_count > 0 {
+            tx.execute(
+                "UPDATE orchestration_task_attempts SET status = 'completed'
+                 WHERE attempt_id = ?1 AND status = 'sealing'",
+                [&attempt_id],
+            )?;
+            tx.execute(
+                "UPDATE orchestration_task_nodes
+                 SET status = 'completed', active_attempt_id = NULL, version = version + 1
+                 WHERE node_id = ?1 AND status = 'sealing'",
+                [node_id],
+            )?;
+            tx.execute(
+                "UPDATE orchestration_leases SET status = 'released'
+                 WHERE attempt_id = ?1 AND status = 'active'",
+                [&attempt_id],
+            )?;
+            append_audit_event(
+                &tx,
+                &node.0,
+                "task_attempt_completed",
+                "task_attempt",
+                &attempt_id,
+                "{\"status\":\"completed\",\"terminal\":true}",
+                &format!("task_attempt_completed:{attempt_id}"),
+                generation,
+            )?;
+            append_audit_event(
+                &tx,
+                &node.0,
+                "task_node_completed",
+                "task_node",
+                node_id,
+                "{\"status\":\"completed\",\"terminal\":true}",
+                &format!("task_node_completed:{node_id}"),
+                generation,
+            )?;
+            Self::ensure_completion_milestone_in_tx(&tx, &node.0, generation)?;
+        }
         tx.commit()?;
         Ok(attempt_id)
     }
@@ -3367,6 +3440,167 @@ impl SqliteStore {
             &format!("{{\"leaseEpoch\":{lease_epoch},\"status\":\"released\"}}"),
             &format!("lease_released:{attempt_id}:{lease_epoch}"),
             coordinator_generation,
+        )?;
+        tx.commit()?;
+        Ok(false)
+    }
+
+    pub fn cancel_orchestration_run(
+        &mut self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<bool, StorageError> {
+        let reason = if reason.trim().is_empty() {
+            "cancelled_by_core"
+        } else {
+            reason.trim()
+        };
+        if reason.len() > 256 {
+            return Err(StorageError::OrchestrationRunStatusInvalid {
+                run_id: run_id.to_owned(),
+                status: "cancel reason too long".into(),
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM orchestration_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationRunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        if status == "cancelled" {
+            tx.commit()?;
+            return Ok(true);
+        }
+        if matches!(status.as_str(), "completed" | "failed") {
+            return Err(StorageError::OrchestrationRunStatusInvalid {
+                run_id: run_id.to_owned(),
+                status,
+            });
+        }
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        let fenced = tx.execute(
+            "UPDATE orchestration_leases SET status = 'fenced'
+             WHERE run_id = ?1 AND status = 'active'",
+            [run_id],
+        )?;
+        tx.execute(
+            "UPDATE orchestration_task_attempts
+             SET status = 'cancelled'
+             WHERE run_id = ?1 AND status IN ('leased', 'running', 'sealing')",
+            [run_id],
+        )?;
+        tx.execute(
+            "UPDATE orchestration_task_nodes
+             SET status = 'cancelled', active_attempt_id = NULL, version = version + 1
+             WHERE run_id = ?1 AND status IN ('pending', 'ready', 'running', 'sealing', 'blocked')",
+            [run_id],
+        )?;
+        tx.execute(
+            "UPDATE orchestration_runs
+             SET status = 'cancelled', terminal_reason = ?2, version = version + 1
+             WHERE run_id = ?1",
+            params![run_id, reason],
+        )?;
+        append_audit_event(
+            &tx,
+            run_id,
+            "run_cancelled",
+            "run",
+            run_id,
+            &format!(
+                "{{\"status\":\"cancelled\",\"reason\":{}}}",
+                serde_json::to_string(reason)?
+            ),
+            &format!("run_cancelled:{run_id}:{reason}"),
+            generation,
+        )?;
+        if fenced > 0 {
+            append_audit_event(
+                &tx,
+                run_id,
+                "leases_fenced",
+                "run",
+                run_id,
+                &format!("{{\"count\":{fenced},\"reason\":\"cancelled\"}}"),
+                &format!("cancel_leases_fenced:{run_id}"),
+                generation,
+            )?;
+        }
+        tx.commit()?;
+        Ok(false)
+    }
+
+    pub fn retry_orchestration_task(&mut self, node_id: &str) -> Result<bool, StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let node = tx
+            .query_row(
+                "SELECT run_id, status, attempt_count, max_attempts
+                 FROM orchestration_task_nodes WHERE node_id = ?1",
+                [node_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
+                node_id: node_id.to_owned(),
+            })?;
+        if node.1 == "ready" {
+            tx.commit()?;
+            return Ok(true);
+        }
+        if !matches!(node.1.as_str(), "failed" | "blocked") {
+            return Err(StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status: node.1,
+            });
+        }
+        if node.2 >= node.3 {
+            return Err(StorageError::OrchestrationTaskTerminal {
+                node_id: node_id.to_owned(),
+            });
+        }
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&node.0],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE orchestration_task_nodes
+             SET status = 'ready', version = version + 1
+             WHERE node_id = ?1",
+            [node_id],
+        )?;
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_node_retry_ready",
+            "task_node",
+            node_id,
+            "{\"status\":\"ready\"}",
+            &format!(
+                "task_node_retry_ready:{node_id}:{next_attempt_key}",
+                next_attempt_key = node.2 + 1
+            ),
+            generation,
         )?;
         tx.commit()?;
         Ok(false)
@@ -4891,5 +5125,64 @@ mod tests {
         assert!(store
             .release_orchestration_lease(&outcome.attempt_id, outcome.lease_epoch, 1, "worker-a",)
             .unwrap());
+    }
+
+    #[test]
+    fn cancel_and_retry_are_atomic_idempotent_and_budget_checked() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        assert!(!store
+            .cancel_orchestration_run("run-1", "operator_cancelled")
+            .unwrap());
+        assert!(store
+            .cancel_orchestration_run("run-1", "operator_cancelled")
+            .unwrap());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                    [&outcome.attempt_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "cancelled"
+        );
+
+        store.create_orchestration_run(seed("run-2")).unwrap();
+        store
+            .insert_orchestration_task_node("run-2", "node-2", "key-2")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE orchestration_task_nodes SET status = 'failed', max_attempts = 2
+                 WHERE node_id = 'node-2'",
+                [],
+            )
+            .unwrap();
+        assert!(!store.retry_orchestration_task("node-2").unwrap());
+        assert!(store.retry_orchestration_task("node-2").unwrap());
+        store
+            .connection
+            .execute(
+                "UPDATE orchestration_task_nodes SET status = 'failed', attempt_count = 2,
+                 max_attempts = 2 WHERE node_id = 'node-2'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.retry_orchestration_task("node-2"),
+            Err(StorageError::OrchestrationTaskTerminal { .. })
+        ));
     }
 }
