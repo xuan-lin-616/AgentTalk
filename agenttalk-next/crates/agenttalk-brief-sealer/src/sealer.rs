@@ -243,11 +243,12 @@ impl BriefSealer {
         schema_registry: &dyn SchemaRegistry,
     ) -> Result<PreparedBriefSeal, BriefSealError> {
         self.cas.ensure_objects_root()?;
-        let root_handle =
-            fs_guard::open_no_follow(&self.project_root).map_err(|source| BriefSealError::Io {
+        let root_handle = fs_guard::open_root_handle(&self.project_root).map_err(|source| {
+            BriefSealError::Io {
                 path: self.project_root.clone(),
                 source,
-            })?;
+            }
+        })?;
         if fs_guard::handle_is_reparse(&root_handle).map_err(|source| BriefSealError::Io {
             path: self.project_root.clone(),
             source,
@@ -258,7 +259,7 @@ impl BriefSealer {
         }
 
         let manifest_path = self.project_root.join(ROOT_MANIFEST_NAME);
-        let manifest = self.open_safe(&root_handle, &manifest_path)?;
+        let manifest = self.open_safe(&root_handle, Path::new(ROOT_MANIFEST_NAME))?;
         let mut manifest_bytes = Vec::new();
         read_handle(&manifest.file, &mut manifest_bytes, &manifest_path)?;
 
@@ -306,7 +307,7 @@ impl BriefSealer {
                 .and_then(Value::as_str)
                 .expect("shape validation guarantees file.path");
             let source_path = self.project_root.join(path);
-            let opened = self.open_safe(&root_handle, &source_path)?;
+            let opened = self.open_safe(&root_handle, Path::new(path))?;
             if seen_ids.contains(&opened.identity) {
                 return Err(BriefSealError::PhysicalAlias {
                     path: path.to_owned(),
@@ -547,43 +548,35 @@ impl BriefSealer {
         })
     }
 
-    fn open_safe(&self, root_handle: &File, path: &Path) -> Result<OpenedSafe, BriefSealError> {
-        fs_guard::ensure_no_reparse_components(&self.project_root, path).map_err(|source| {
-            if source.to_string().contains("reparse point forbidden") {
-                BriefSealError::ReparsePoint {
-                    path: path.to_path_buf(),
+    fn open_safe(&self, root_handle: &File, relative: &Path) -> Result<OpenedSafe, BriefSealError> {
+        let file =
+            fs_guard::open_relative_components(root_handle, relative, false).map_err(|source| {
+                if source.to_string().contains("reparse point forbidden") {
+                    BriefSealError::ReparsePoint {
+                        path: self.project_root.join(relative),
+                    }
+                } else {
+                    BriefSealError::Io {
+                        path: self.project_root.join(relative),
+                        source,
+                    }
                 }
-            } else {
-                BriefSealError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                }
-            }
-        })?;
-        let file = fs_guard::open_no_follow(path).map_err(|source| BriefSealError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+            })?;
         if fs_guard::handle_is_reparse(&file).map_err(|source| BriefSealError::Io {
-            path: path.to_path_buf(),
+            path: self.project_root.join(relative),
             source,
         })? {
             return Err(BriefSealError::ReparsePoint {
-                path: path.to_path_buf(),
+                path: self.project_root.join(relative),
             });
         }
-        fs_guard::ensure_handle_under_root(root_handle, &file).map_err(|_| {
-            BriefSealError::PathEscape {
-                path: path.to_string_lossy().into_owned(),
-            }
-        })?;
         let identity = fs_guard::identity_from_open_file(&file)
             .map_err(|source| BriefSealError::Io {
-                path: path.to_path_buf(),
+                path: self.project_root.join(relative),
                 source,
             })?
             .ok_or_else(|| BriefSealError::Io {
-                path: path.to_path_buf(),
+                path: self.project_root.join(relative),
                 source: std::io::Error::other("file identity is unavailable on this platform"),
             })?;
         Ok(OpenedSafe { file, identity })

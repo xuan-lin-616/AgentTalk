@@ -9,8 +9,8 @@
 //!
 //! Status: `C3-A PARTIAL / JOURNAL_PERSISTENCE_BLOCKED`
 //!
-//! CAS publication durability is atomic no-replace; full Windows directory
-//! entry durability is explicitly not claimed in this work package.
+//! CAS publication is atomic no-replace; after the hard link is created the
+//! objects directory handle is flushed with `FlushFileBuffers`.
 
 pub mod cas;
 pub mod error;
