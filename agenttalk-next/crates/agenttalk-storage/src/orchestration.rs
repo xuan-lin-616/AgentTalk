@@ -674,8 +674,88 @@ impl SqliteStore {
             &format!("handoff_delivery:{}", delivery.delivery_id),
             generation,
         )?;
+        Self::maybe_complete_attempt_sealing(&tx, &delivery)?;
         tx.commit()?;
         Ok(false)
+    }
+
+    fn maybe_complete_attempt_sealing(
+        tx: &rusqlite::Transaction<'_>,
+        delivery: &HandoffDeliveryRecord,
+    ) -> Result<(), StorageError> {
+        let attempt = tx
+            .query_row(
+                "SELECT node_id, status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&delivery.attempt_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
+        if attempt.1 != "sealing" {
+            return Ok(());
+        }
+        let required_edges: Vec<String> = tx
+            .prepare(
+                "SELECT edge_id FROM orchestration_edges WHERE run_id = ?1 AND from_node_id = ?2",
+            )?
+            .query_map(params![delivery.run_id, attempt.0], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        if required_edges.is_empty() {
+            return Ok(());
+        }
+        let mut pending_edges = Vec::new();
+        for edge_id in &required_edges {
+            let delivered: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM orchestration_handoff_deliveries
+                     WHERE attempt_id = ?1 AND edge_id = ?2 AND lease_epoch = ?3",
+                    params![delivery.attempt_id, edge_id, delivery.lease_epoch],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if delivered.is_none() {
+                pending_edges.push(edge_id.clone());
+            }
+        }
+        if !pending_edges.is_empty() {
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE orchestration_task_attempts SET status = 'completed' WHERE attempt_id = ?1",
+            [&delivery.attempt_id],
+        )?;
+        tx.execute(
+            "UPDATE orchestration_task_nodes SET status = 'completed', version = version + 1 WHERE node_id = ?1",
+            [&attempt.0],
+        )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&delivery.run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            tx,
+            &delivery.run_id,
+            "task_attempt_completed",
+            "task_attempt",
+            &delivery.attempt_id,
+            "{\"status\":\"completed\"}",
+            &format!("task_attempt_completed:{}", delivery.attempt_id),
+            generation,
+        )?;
+        append_audit_event(
+            tx,
+            &delivery.run_id,
+            "task_node_completed",
+            "task_node",
+            &attempt.0,
+            "{\"status\":\"completed\"}",
+            &format!("task_node_completed:{}", attempt.0),
+            generation,
+        )?;
+        Ok(())
     }
 
     fn verify_cas_before_journal(
