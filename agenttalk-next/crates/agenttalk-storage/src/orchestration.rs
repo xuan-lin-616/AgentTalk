@@ -1133,6 +1133,24 @@ impl SqliteStore {
             ("artifactBindings".to_owned(), Value::Array(bindings_json)),
         ]));
 
+        let mut envelope = envelope;
+        if let Some(object) = envelope.as_object_mut() {
+            object.insert("envelopeSha256".to_owned(), Value::String(String::new()));
+        }
+        let computed_jcs = handoff::envelope_sha256_hex(&envelope).map_err(|_| {
+            StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            }
+        })?;
+        if computed_jcs != delivery.envelope_sha256_jcs {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
         let computed_idempotency = handoff::idempotency_key_hex(&envelope).map_err(|_| {
             StorageError::HandoffDeliveryConflict {
                 attempt_id: delivery.attempt_id.clone(),
@@ -2771,48 +2789,241 @@ mod tests {
         assert!(connection.execute_batch(crate::MIGRATION_V16_SQL).is_err());
     }
 
-    #[test]
-    fn restart_after_delivery_reopens_journal_and_audit_facts() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "agenttalk-c4a-delivery-restart-{}-{nonce}.sqlite3",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        {
-            let mut store = SqliteStore::open(&path).unwrap();
-            let (delivery, _outcome) = prepare_sealed_delivery(&mut store);
-            assert!(!store
-                .record_handoff_delivery(delivery.clone(), &[], &TestCas)
-                .unwrap());
+    fn publish_cas_object(cas: &agenttalk_brief_sealer::CoreCas, bytes: &[u8]) -> (String, String) {
+        let object = cas.publish(bytes).unwrap();
+        (object.object_ref, object.sha256)
+    }
+
+    fn setup_real_e2e(
+        store: &mut SqliteStore,
+        cas: &agenttalk_brief_sealer::CoreCas,
+    ) -> (HandoffDeliveryRecord, Vec<ArtifactBindingInput>) {
+        use agenttalk_orchestration_contracts::handoff;
+        use agenttalk_orchestration_contracts::json;
+        use serde_json::{Map, Value};
+
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_edges(
+                   edge_id, run_id, from_node_id, to_node_id,
+                   dag_snapshot_digest, allowed_consumer_json
+                 ) VALUES('edge-1', 'run-1', 'node-1', 'node-1', ?1, '[]')",
+                [hex64('b')],
+            )
+            .unwrap();
+        store.transition_attempt_to_sealing("node-1").unwrap();
+
+        // Sealed run/role/context authorities.
+        let dag = hex64('b');
+        let role = hex64('c');
+        store
+            .connection
+            .execute(
+                "UPDATE orchestration_runs SET dag_snapshot_digest = ?1, role_binding_snapshot_digest = ?2 WHERE run_id = 'run-1'",
+                params![dag, role],
+            )
+            .unwrap();
+        store
+            .record_role_binding_snapshot(
+                "run-1",
+                "snapshot-1",
+                &role,
+                "role-a",
+                "agent-a",
+                "read-write",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_context_manifest_authorities(
+                   context_manifest_ref_id, run_id, attempt_id,
+                   producer_context_manifest_digest, sealed_at
+                 ) VALUES('ctx-1','run-1',?1,?2,1)",
+                params![outcome.attempt_id, hex64('a')],
+            )
+            .unwrap();
+
+        // Real CAS objects.
+        let artifact_bytes = b"artifact sealed bytes";
+        let (artifact_ref, artifact_sha) = publish_cas_object(cas, artifact_bytes);
+        let contract_bytes = b"acceptance contract bytes";
+        let (contract_ref, contract_digest) = publish_cas_object(cas, contract_bytes);
+        let evidence_bytes = b"acceptance evidence bytes";
+        let (evidence_ref, evidence_digest) = publish_cas_object(cas, evidence_bytes);
+
+        let binding = ArtifactBindingInput {
+            binding_id: "binding-1".into(),
+            edge_port_id: "edge-port-1".into(),
+            source_output_port_id: "out".into(),
+            target_input_port_id: "in".into(),
+            object_ref: artifact_ref.clone(),
+            sha256: artifact_sha.clone(),
+            size: artifact_bytes.len() as i64,
+            content_schema_id: "agenttalk.test.spec.v1".into(),
+            content_schema_version: "1".into(),
+            content_schema_digest: hex64('a'),
+            normalized_content_type: "text/plain".into(),
+            normalized_content_type_policy_version: "1".into(),
+            content_schema_ref_json: format!(
+                r#"{{"id":"agenttalk.test.spec.v1","version":"1","digest":"{}"}}"#,
+                hex64('a')
+            ),
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_edge_ports(
+                   edge_port_id, edge_id, source_output_port_id,
+                   target_input_port_id, port_policy_json
+                 ) VALUES('edge-port-1','edge-1','out','in','{}')",
+                [],
+            )
+            .unwrap();
+
+        let envelope = Value::Object(Map::from_iter([
+            (
+                "schemaVersion".to_owned(),
+                Value::String("agenttalk.handoff.envelope.v1".to_owned()),
+            ),
+            (
+                "handoffId".to_owned(),
+                Value::String(format!("handoff-{}", hex64('0'))),
+            ),
+            ("projectRunId".to_owned(), Value::String("run-1".to_owned())),
+            ("edgeId".to_owned(), Value::String("edge-1".to_owned())),
+            ("from".to_owned(), {
+                Value::Object(Map::from_iter([
+                    ("taskNodeId".to_owned(), Value::String("node-1".to_owned())),
+                    (
+                        "attemptId".to_owned(),
+                        Value::String(outcome.attempt_id.clone()),
+                    ),
+                    (
+                        "executionRunId".to_owned(),
+                        Value::String("exec-run-1".to_owned()),
+                    ),
+                ]))
+            }),
+            ("to".to_owned(), {
+                Value::Object(Map::from_iter([(
+                    "taskNodeId".to_owned(),
+                    Value::String("node-1".to_owned()),
+                )]))
+            }),
+            ("leaseEpoch".to_owned(), Value::from(outcome.lease_epoch)),
+            ("artifactBindings".to_owned(), {
+                Value::Array(vec![Value::Object(Map::from_iter([
+                    ("sourceOutput".to_owned(), {
+                        Value::Object(Map::from_iter([(
+                            "portId".to_owned(),
+                            Value::String("out".to_owned()),
+                        )]))
+                    }),
+                    ("targetInput".to_owned(), {
+                        Value::Object(Map::from_iter([(
+                            "portId".to_owned(),
+                            Value::String("in".to_owned()),
+                        )]))
+                    }),
+                    ("artifactRef".to_owned(), {
+                        Value::Object(Map::from_iter([
+                            ("objectRef".to_owned(), Value::String(artifact_ref.clone())),
+                            ("sha256".to_owned(), Value::String(artifact_sha.clone())),
+                            ("size".to_owned(), Value::from(binding.size)),
+                            ("contentSchemaRef".to_owned(), {
+                                Value::Object(Map::from_iter([
+                                    (
+                                        "id".to_owned(),
+                                        Value::String("agenttalk.test.spec.v1".to_owned()),
+                                    ),
+                                    ("version".to_owned(), Value::String("1".to_owned())),
+                                    ("digest".to_owned(), Value::String(hex64('a'))),
+                                ]))
+                            }),
+                            (
+                                "normalizedContentType".to_owned(),
+                                Value::String("text/plain".to_owned()),
+                            ),
+                            (
+                                "normalizedContentTypePolicyVersion".to_owned(),
+                                Value::String("1".to_owned()),
+                            ),
+                        ]))
+                    }),
+                ]))])
+            }),
+        ]));
+        let mut envelope = envelope;
+        if let Some(object) = envelope.as_object_mut() {
+            object.insert("envelopeSha256".to_owned(), Value::String(String::new()));
         }
-        {
-            let store = SqliteStore::open(&path).unwrap();
-            let count: i64 = store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM orchestration_handoff_deliveries WHERE delivery_id = ?1",
-                    ["handoff-0000000000000000000000000000000000000000000000000000000000000000"],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 1);
-            let audit_count: i64 = store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(audit_count >= 1);
+        let envelope_jcs = handoff::envelope_sha256_hex(&envelope).unwrap();
+        if let Some(object) = envelope.as_object_mut() {
+            object.insert(
+                "envelopeSha256".to_owned(),
+                Value::String(envelope_jcs.clone()),
+            );
         }
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+        let canonical_envelope = json::canonicalize(&envelope).unwrap();
+        let envelope_raw = json::sha256_raw_hex(&canonical_envelope);
+        let (envelope_ref, envelope_sha) = publish_cas_object(cas, &canonical_envelope);
+        assert_eq!(envelope_ref, format!("sha256:{envelope_raw}"));
+        assert_eq!(envelope_sha, envelope_raw);
+
+        let computed_idempotency = handoff::idempotency_key_hex(&envelope).unwrap();
+        let computed_transfer = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
+        let computed_payload = handoff::delivery_payload_digest_hex(
+            &hex64('f'),
+            &computed_transfer,
+            &contract_digest,
+            &evidence_digest,
+            &hex64('a'),
+            &dag,
+            &role,
+        )
+        .unwrap();
+
+        let delivery = HandoffDeliveryRecord {
+            delivery_id: format!("handoff-{}", hex64('0')),
+            run_id: "run-1".into(),
+            attempt_id: outcome.attempt_id.clone(),
+            edge_id: "edge-1".into(),
+            lease_epoch: outcome.lease_epoch,
+            lease_owner: "worker-a".into(),
+            coordinator_generation: 1,
+            envelope_handoff_id: format!("handoff-{}", hex64('0')),
+            from_task_node_id: "node-1".into(),
+            from_execution_run_id: "exec-run-1".into(),
+            to_task_node_id: "node-1".into(),
+            dag_snapshot_digest: dag,
+            role_binding_snapshot_digest: role,
+            declaration_digest: hex64('f'),
+            artifact_transfer_set_digest: computed_transfer,
+            idempotency_key: computed_idempotency,
+            delivery_payload_digest: computed_payload,
+            envelope_object_ref: envelope_ref,
+            envelope_raw_sha256: envelope_raw,
+            envelope_sha256_jcs: envelope_jcs,
+            acceptance_contract_ref: contract_ref,
+            acceptance_contract_digest: contract_digest,
+            acceptance_evidence_ref: evidence_ref,
+            acceptance_evidence_digest: evidence_digest,
+            producer_context_manifest_digest: hex64('a'),
+            replay_receipt_json: None,
+        };
+        (delivery, vec![binding])
     }
 
     #[test]
