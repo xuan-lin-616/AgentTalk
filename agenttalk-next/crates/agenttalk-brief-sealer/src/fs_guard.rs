@@ -8,6 +8,7 @@
 //! `FILE_SYNCHRONOUS_IO_NONALERT` so the exact same handle can be read with
 //! `std::io::Read`. There is no check-then-reopen-by-absolute-path step.
 
+use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io;
 use std::mem::{size_of, zeroed};
@@ -57,7 +58,7 @@ pub(crate) struct TraceEntry {
     pub child_handle: usize,
     pub component: String,
     pub open_directory: bool,
-    pub open_reparse_point: bool,
+    pub create_options: u32,
     pub reparse_checked: bool,
 }
 
@@ -67,12 +68,29 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[derive(Debug)]
+struct ReparsePointError {
+    component: String,
+}
+
+impl Display for ReparsePointError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reparse point forbidden: {}", self.component)
+    }
+}
+
+impl std::error::Error for ReparsePointError {}
+
 pub(crate) fn reparse_io_error(component: &str) -> io::Error {
-    io::Error::other(format!("reparse point forbidden: {component}"))
+    io::Error::other(ReparsePointError {
+        component: component.to_owned(),
+    })
 }
 
 pub(crate) fn is_reparse_error(error: &io::Error) -> bool {
-    error.to_string().contains("reparse point forbidden")
+    error
+        .get_ref()
+        .is_some_and(|source| source.is::<ReparsePointError>())
 }
 
 fn check_reparse(file: &File, component: &str) -> io::Result<()> {
@@ -204,7 +222,7 @@ fn open_child_relative(parent: &File, component: &str, open_directory: bool) -> 
             child_handle: file.as_raw_handle() as usize,
             component: component.to_owned(),
             open_directory,
-            open_reparse_point: true,
+            create_options,
             reparse_checked: false,
         });
     });
@@ -632,12 +650,12 @@ mod tests {
         assert_eq!(trace[0].parent_handle, root_handle.as_raw_handle() as usize);
         assert_eq!(trace[0].component, "plan");
         assert!(trace[0].open_directory);
-        assert!(trace[0].open_reparse_point);
+        assert_ne!(trace[0].create_options & 0x0020_0000, 0);
         assert!(trace[0].reparse_checked);
         assert_eq!(trace[1].parent_handle, trace[0].child_handle);
         assert_eq!(trace[1].component, "roadmap.md");
         assert!(!trace[1].open_directory);
-        assert!(trace[1].open_reparse_point);
+        assert_ne!(trace[1].create_options & 0x0020_0000, 0);
         assert!(trace[1].reparse_checked);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -647,6 +665,11 @@ mod tests {
         let error = reparse_io_error("x");
         assert!(is_reparse_error(&error));
         assert!(!is_reparse_error(&io::Error::other("ordinary io failure")));
+        // A plain io error with the same text is still not a typed reparse
+        // error.
+        assert!(!is_reparse_error(&io::Error::other(
+            "reparse point forbidden: x"
+        )));
     }
 
     #[test]
