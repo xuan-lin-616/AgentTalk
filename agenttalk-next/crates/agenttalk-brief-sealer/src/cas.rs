@@ -7,7 +7,6 @@
 use crate::fs_guard;
 use sha2::{Digest, Sha256};
 use std::fmt::{Display, Formatter};
-use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -139,89 +138,113 @@ impl CoreCas {
         self.cas_root().join(OBJECTS_DIR_NAME)
     }
 
-    fn flush_objects_directory(&self) -> Result<(), CasError> {
+    fn objects_handle(&self) -> Result<std::fs::File, CasError> {
         let root =
             fs_guard::open_root_handle(&self.project_root).map_err(|source| CasError::Io {
                 path: self.project_root.clone(),
                 source,
             })?;
-        fs_guard::flush_directory_relative(&root, &Path::new(CAS_DIR_NAME).join(OBJECTS_DIR_NAME))
-            .map_err(|source| CasError::Io {
+        if fs_guard::handle_is_reparse(&root).map_err(|source| CasError::Io {
+            path: self.project_root.clone(),
+            source,
+        })? {
+            return Err(CasError::ReparsePoint {
+                path: self.project_root.clone(),
+            });
+        }
+        let agenttalk = fs_guard::open_or_create_directory_relative(&root, CAS_DIR_NAME)
+            .map_err(|source| self.traversal_error(Path::new(CAS_DIR_NAME), source))?;
+        if fs_guard::handle_is_reparse(&agenttalk).map_err(|source| CasError::Io {
+            path: self.cas_root(),
+            source,
+        })? {
+            return Err(CasError::ReparsePoint {
+                path: self.cas_root(),
+            });
+        }
+        let objects = fs_guard::open_or_create_directory_relative(&agenttalk, OBJECTS_DIR_NAME)
+            .map_err(|source| {
+                self.traversal_error(&Path::new(CAS_DIR_NAME).join(OBJECTS_DIR_NAME), source)
+            })?;
+        if fs_guard::handle_is_reparse(&objects).map_err(|source| CasError::Io {
+            path: self.objects_root(),
+            source,
+        })? {
+            return Err(CasError::ReparsePoint {
                 path: self.objects_root(),
-                source,
-            })
+            });
+        }
+        Ok(objects)
     }
 
-    fn open_relative(&self, relative: &Path, is_dir: bool) -> Result<std::fs::File, CasError> {
-        let root =
-            fs_guard::open_root_handle(&self.project_root).map_err(|source| CasError::Io {
-                path: self.project_root.clone(),
-                source,
-            })?;
-        fs_guard::open_relative_components(&root, relative, is_dir).map_err(|source| {
-            if source.to_string().contains("reparse point forbidden") {
-                CasError::ReparsePoint {
-                    path: self.project_root.join(relative),
-                }
-            } else {
-                CasError::Io {
-                    path: self.project_root.join(relative),
-                    source,
-                }
+    fn traversal_error(&self, relative: &Path, source: std::io::Error) -> CasError {
+        if source.to_string().contains("reparse point forbidden") {
+            CasError::ReparsePoint {
+                path: self.project_root.join(relative),
             }
+        } else {
+            CasError::Io {
+                path: self.project_root.join(relative),
+                source,
+            }
+        }
+    }
+
+    fn open_existing_object(
+        &self,
+        objects: &std::fs::File,
+        name: &str,
+    ) -> Result<std::fs::File, CasError> {
+        fs_guard::open_relative_components(objects, Path::new(name), false).map_err(|source| {
+            self.traversal_error(
+                &Path::new(CAS_DIR_NAME).join(OBJECTS_DIR_NAME).join(name),
+                source,
+            )
         })
     }
 
-    /// Ensure the CAS root and objects root exist without following reparse
-    /// points. Call this before any publish.
-    pub fn ensure_objects_root(&self) -> Result<(), CasError> {
-        fs::create_dir_all(self.objects_root()).map_err(|source| CasError::Io {
+    fn flush_objects_handle(&self, objects: &std::fs::File) -> Result<(), CasError> {
+        fs_guard::flush_directory_handle(objects).map_err(|source| CasError::Io {
             path: self.objects_root(),
             source,
-        })?;
-        let _ = self.open_relative(Path::new(CAS_DIR_NAME), true)?;
-        let _ = self.open_relative(&Path::new(CAS_DIR_NAME).join(OBJECTS_DIR_NAME), true)?;
-        Ok(())
+        })
     }
 
-    /// Atomic, no-replace publish of exact bytes. Re-publishing the same
-    /// bytes is idempotent and does not create a second object. The temporary
-    /// file is `sync_all`ed, linked into place with a no-replace hard link,
-    /// and the objects directory is then flushed with `FlushFileBuffers`
-    /// through a handle-relative opened directory handle.
+    pub fn ensure_objects_root(&self) -> Result<(), CasError> {
+        let _ = self.objects_handle()?;
+        Ok(())
+    }
     pub fn publish(&self, bytes: &[u8]) -> Result<CasObject, CasError> {
-        self.ensure_objects_root()?;
+        let objects = self.objects_handle()?;
         let sha256 = sha256_hex(bytes);
         let object_ref = object_ref_from_sha256(&sha256);
-        let destination = self.object_path(&object_ref);
+        let object_name = format!("{sha256}.blob");
 
-        match self.open_relative(
-            &Path::new(CAS_DIR_NAME)
-                .join(OBJECTS_DIR_NAME)
-                .join(format!("{sha256}.blob")),
-            false,
-        ) {
+        match self.open_existing_object(&objects, &object_name) {
             Ok(mut file) => {
                 if fs_guard::handle_is_reparse(&file).map_err(|source| CasError::Io {
-                    path: destination.clone(),
+                    path: self.objects_root().join(&object_name),
                     source,
                 })? {
-                    return Err(CasError::ReparsePoint { path: destination });
+                    return Err(CasError::ReparsePoint {
+                        path: self.objects_root().join(object_name),
+                    });
                 }
                 let mut existing = Vec::new();
                 file.read_to_end(&mut existing)
                     .map_err(|source| CasError::Io {
-                        path: destination.clone(),
+                        path: self.objects_root().join(&object_name),
                         source,
                     })?;
-                if existing == bytes {
-                    return Ok(CasObject {
-                        object_ref,
-                        sha256,
-                        size: bytes.len() as u64,
-                    });
+                if existing != bytes {
+                    return Err(CasError::ObjectConflict { object_ref });
                 }
-                return Err(CasError::ObjectConflict { object_ref });
+                self.flush_objects_handle(&objects)?;
+                return Ok(CasObject {
+                    object_ref,
+                    sha256,
+                    size: bytes.len() as u64,
+                });
             }
             Err(error) => match error {
                 CasError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {}
@@ -236,119 +259,100 @@ impl CoreCas {
                 source: std::io::Error::other(source),
             })?
             .as_nanos();
-        let temporary = self
-            .objects_root()
-            .join(format!(".{sha256}.{}.{nonce}.tmp", std::process::id()));
-
+        let temp_name = format!(".{sha256}.{}.{nonce}.tmp", std::process::id());
+        let mut temp =
+            fs_guard::create_file_relative_new(&objects, &temp_name).map_err(|source| {
+                self.traversal_error(
+                    &Path::new(CAS_DIR_NAME)
+                        .join(OBJECTS_DIR_NAME)
+                        .join(&temp_name),
+                    source,
+                )
+            })?;
         let write_result = (|| -> Result<(), std::io::Error> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
+            temp.write_all(bytes)?;
+            fs_guard::flush_file_handle(&temp)?;
             Ok(())
         })();
         if let Err(source) = write_result {
-            let _ = fs::remove_file(&temporary);
+            let _ = fs_guard::delete_file_by_handle(&temp);
             return Err(CasError::Io {
-                path: temporary,
+                path: self.objects_root().join(&temp_name),
                 source,
             });
         }
 
-        match fs::hard_link(&temporary, &destination) {
+        match fs_guard::link_file_relative(&objects, &temp, &object_name) {
             Ok(()) => {
-                let _ = fs::remove_file(&temporary);
-                self.flush_objects_directory()?;
+                let _ = fs_guard::delete_file_by_handle(&temp);
+                self.flush_objects_handle(&objects)?;
                 Ok(CasObject {
                     object_ref,
                     sha256,
                     size: bytes.len() as u64,
                 })
             }
-            Err(source)
-                if source.kind() == std::io::ErrorKind::AlreadyExists
-                    || source.raw_os_error() == Some(80) =>
-            {
-                let _ = fs::remove_file(&temporary);
-                let mut existing_file = self
-                    .open_relative(
-                        &Path::new(CAS_DIR_NAME)
-                            .join(OBJECTS_DIR_NAME)
-                            .join(format!("{sha256}.blob")),
-                        false,
-                    )
-                    .map_err(|error| match error {
-                        CasError::Io { source, .. } => CasError::Io {
-                            path: destination.clone(),
-                            source,
-                        },
-                        other => other,
-                    })?;
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = fs_guard::delete_file_by_handle(&temp);
+                let mut existing_file = self.open_existing_object(&objects, &object_name)?;
                 if fs_guard::handle_is_reparse(&existing_file).map_err(|error| CasError::Io {
-                    path: destination.clone(),
+                    path: self.objects_root().join(&object_name),
                     source: error,
                 })? {
-                    return Err(CasError::ReparsePoint { path: destination });
+                    return Err(CasError::ReparsePoint {
+                        path: self.objects_root().join(object_name),
+                    });
                 }
                 let mut existing = Vec::new();
                 existing_file
                     .read_to_end(&mut existing)
                     .map_err(|error| CasError::Io {
-                        path: destination,
+                        path: self.objects_root().join(&object_name),
                         source: error,
                     })?;
-                if existing == bytes {
-                    Ok(CasObject {
-                        object_ref,
-                        sha256,
-                        size: bytes.len() as u64,
-                    })
-                } else {
-                    Err(CasError::ObjectConflict { object_ref })
+                if existing != bytes {
+                    return Err(CasError::ObjectConflict { object_ref });
                 }
+                self.flush_objects_handle(&objects)?;
+                Ok(CasObject {
+                    object_ref,
+                    sha256,
+                    size: bytes.len() as u64,
+                })
             }
             Err(source) => {
-                let _ = fs::remove_file(&temporary);
-                Err(CasError::Io {
-                    path: destination,
+                let _ = fs_guard::delete_file_by_handle(&temp);
+                Err(self.traversal_error(
+                    &Path::new(CAS_DIR_NAME)
+                        .join(OBJECTS_DIR_NAME)
+                        .join(&object_name),
                     source,
-                })
+                ))
             }
         }
     }
 
-    /// Read an object and fail closed when the bytes no longer match the
-    /// digest embedded in the object reference.
     pub fn read(&self, object_ref: &str) -> Result<Vec<u8>, CasError> {
         let sha256 = parse_object_ref(object_ref).ok_or_else(|| CasError::ObjectRefInvalid {
             object_ref: object_ref.to_owned(),
         })?;
-        let path = self.object_path(object_ref);
-        let mut file = self
-            .open_relative(
-                &Path::new(CAS_DIR_NAME)
-                    .join(OBJECTS_DIR_NAME)
-                    .join(format!("{sha256}.blob")),
-                false,
-            )
-            .map_err(|error| match error {
-                CasError::Io { source, .. } => CasError::Io {
-                    path: path.clone(),
-                    source,
-                },
-                other => other,
-            })?;
+        let objects = self.objects_handle()?;
+        let object_name = format!("{sha256}.blob");
+        let mut file = self.open_existing_object(&objects, &object_name)?;
         if fs_guard::handle_is_reparse(&file).map_err(|source| CasError::Io {
-            path: path.clone(),
+            path: self.objects_root().join(&object_name),
             source,
         })? {
-            return Err(CasError::ReparsePoint { path });
+            return Err(CasError::ReparsePoint {
+                path: self.objects_root().join(object_name),
+            });
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)
-            .map_err(|source| CasError::Io { path, source })?;
+            .map_err(|source| CasError::Io {
+                path: self.objects_root().join(&object_name),
+                source,
+            })?;
         let actual = sha256_hex(&bytes);
         if actual != sha256 {
             return Err(CasError::HashMismatch {
@@ -373,6 +377,7 @@ impl CoreCas {
 mod tests {
     use super::*;
     use crate::fs_guard;
+    use std::fs;
 
     #[test]
     fn flush_directory_handle_succeeds_or_reports_blocked() {

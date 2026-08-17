@@ -23,8 +23,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 #[cfg(windows)]
 use windows_sys::Wdk::Storage::FileSystem::{
-    NtCreateFile, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_FOR_BACKUP_INTENT,
-    FILE_OPEN_REPARSE_POINT as NT_FILE_OPEN_REPARSE_POINT,
+    FileDispositionInformation, FileLinkInformation, NtCreateFile, NtSetInformationFile,
+    FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFORMATION, FILE_LINK_INFORMATION, FILE_OPEN,
+    FILE_OPEN_FOR_BACKUP_INTENT, FILE_OPEN_REPARSE_POINT as NT_FILE_OPEN_REPARSE_POINT,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, UNICODE_STRING};
@@ -41,6 +42,9 @@ const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
 const FILE_READ_DATA: u32 = 0x0001;
 const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+const FILE_ADD_SUBDIRECTORY: u32 = 0x0004;
+const FILE_WRITE_DATA: u32 = 0x0002;
+const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035u32 as i32;
 const FILE_LIST_DIRECTORY: u32 = 0x0001;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
@@ -116,7 +120,7 @@ fn open_child_relative(parent: &File, component: &str, open_directory: bool) -> 
     let mut handle = INVALID_HANDLE_VALUE;
     let (desired_access, create_options) = if open_directory {
         (
-            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_ADD_SUBDIRECTORY | SYNCHRONIZE,
             NT_FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_DIRECTORY_FILE,
         )
     } else {
@@ -159,6 +163,205 @@ fn open_child_relative(parent: &File, component: &str, open_directory: bool) -> 
 #[cfg(not(windows))]
 fn open_child_relative(_parent: &File, component: &str, _open_directory: bool) -> io::Result<File> {
     File::open(component)
+}
+
+#[cfg(windows)]
+pub fn open_or_create_directory_relative(parent: &File, component: &str) -> io::Result<File> {
+    match open_child_relative(parent, component, true) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut wide: Vec<u16> = component.encode_utf16().collect();
+            let mut uni = UNICODE_STRING {
+                Length: (wide.len() * 2) as u16,
+                MaximumLength: (wide.len() * 2) as u16,
+                Buffer: wide.as_mut_ptr(),
+            };
+            let mut obj = OBJECT_ATTRIBUTES {
+                Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+                RootDirectory: parent.as_raw_handle() as _,
+                ObjectName: &mut uni as *mut UNICODE_STRING,
+                Attributes: OBJ_CASE_INSENSITIVE,
+                SecurityDescriptor: std::ptr::null_mut(),
+                SecurityQualityOfService: std::ptr::null_mut(),
+            };
+            let mut io_status: IO_STATUS_BLOCK = unsafe { zeroed() };
+            let mut handle = INVALID_HANDLE_VALUE;
+            let status = unsafe {
+                NtCreateFile(
+                    &mut handle as *mut _,
+                    FILE_LIST_DIRECTORY
+                        | FILE_READ_ATTRIBUTES
+                        | FILE_ADD_SUBDIRECTORY
+                        | SYNCHRONIZE,
+                    &mut obj as *mut OBJECT_ATTRIBUTES,
+                    &mut io_status,
+                    std::ptr::null_mut(),
+                    0,
+                    windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                        | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                        | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+                    windows_sys::Wdk::Storage::FileSystem::FILE_OPEN_IF,
+                    NT_FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_DIRECTORY_FILE,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if status < 0 {
+                return Err(io::Error::other(format!(
+                    "NtCreateFile(open-or-create-directory) failed for {component:?}: NTSTATUS {status:#x}"
+                )));
+            }
+            Ok(unsafe { File::from_raw_handle(handle as _) })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_or_create_directory_relative(_parent: &File, component: &str) -> io::Result<File> {
+    std::fs::create_dir(component)?;
+    File::open(component)
+}
+
+#[cfg(windows)]
+pub fn create_file_relative_new(parent: &File, component: &str) -> io::Result<File> {
+    let mut wide: Vec<u16> = component.encode_utf16().collect();
+    let mut uni = UNICODE_STRING {
+        Length: (wide.len() * 2) as u16,
+        MaximumLength: (wide.len() * 2) as u16,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let mut obj = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.as_raw_handle() as _,
+        ObjectName: &mut uni as *mut UNICODE_STRING,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: std::ptr::null_mut(),
+        SecurityQualityOfService: std::ptr::null_mut(),
+    };
+    let mut io_status: IO_STATUS_BLOCK = unsafe { zeroed() };
+    let mut handle = INVALID_HANDLE_VALUE;
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle as *mut _,
+            FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &mut obj as *mut OBJECT_ATTRIBUTES,
+            &mut io_status,
+            std::ptr::null_mut(),
+            0,
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+            windows_sys::Wdk::Storage::FileSystem::FILE_CREATE,
+            NT_FILE_OPEN_REPARSE_POINT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtCreateFile(create-new-file) failed for {component:?}: NTSTATUS {status:#x}"
+        )));
+    }
+    Ok(unsafe { File::from_raw_handle(handle as _) })
+}
+
+#[cfg(not(windows))]
+pub fn create_file_relative_new(_parent: &File, component: &str) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(component)
+}
+
+#[cfg(windows)]
+pub fn link_file_relative(objects_dir: &File, file_handle: &File, name: &str) -> io::Result<()> {
+    let name_utf16: Vec<u16> = name.encode_utf16().collect();
+    let mut link: Vec<u8> =
+        vec![0; size_of::<FILE_LINK_INFORMATION>() + name_utf16.len().saturating_sub(1) * 2];
+    let link_ptr = link.as_mut_ptr() as *mut FILE_LINK_INFORMATION;
+    unsafe {
+        (*link_ptr).Anonymous.ReplaceIfExists = 0;
+        (*link_ptr).RootDirectory = objects_dir.as_raw_handle() as _;
+        (*link_ptr).FileNameLength = (name_utf16.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(
+            name_utf16.as_ptr(),
+            (*link_ptr).FileName.as_mut_ptr(),
+            name_utf16.len(),
+        );
+    }
+    let mut io_status: IO_STATUS_BLOCK = unsafe { zeroed() };
+    let status = unsafe {
+        NtSetInformationFile(
+            file_handle.as_raw_handle() as _,
+            &mut io_status,
+            link_ptr as *const _,
+            link.len() as u32,
+            FileLinkInformation,
+        )
+    };
+    if status == STATUS_OBJECT_NAME_COLLISION {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "object name collision",
+        ));
+    }
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtSetInformationFile(FileLinkInformation) failed: {status:#x}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn link_file_relative(_objects_dir: &File, _file_handle: &File, _name: &str) -> io::Result<()> {
+    Err(io::Error::other(
+        "handle-relative hard link unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+pub fn delete_file_by_handle(file: &File) -> io::Result<()> {
+    let mut disposition = FILE_DISPOSITION_INFORMATION { DeleteFile: 1 };
+    let mut io_status: IO_STATUS_BLOCK = unsafe { zeroed() };
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle() as _,
+            &mut io_status,
+            &mut disposition as *mut FILE_DISPOSITION_INFORMATION as *const _,
+            size_of::<FILE_DISPOSITION_INFORMATION>() as u32,
+            FileDispositionInformation,
+        )
+    };
+    if status < 0 {
+        return Err(io::Error::other(format!(
+            "NtSetInformationFile(FileDispositionInformation) failed: {status:#x}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn delete_file_by_handle(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn flush_file_handle(file: &File) -> io::Result<()> {
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(file.as_raw_handle() as _)
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn flush_file_handle(_file: &File) -> io::Result<()> {
+    Ok(())
 }
 
 pub fn open_relative_components(
@@ -304,6 +507,23 @@ pub fn identity_from_open_file(file: &File) -> io::Result<Option<FileIdentity>> 
 
 pub fn handle_is_reparse(file: &File) -> io::Result<bool> {
     Ok(is_reparse_point(&file.metadata()?))
+}
+
+#[cfg(windows)]
+pub fn flush_directory_handle(file: &File) -> io::Result<()> {
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(file.as_raw_handle() as _)
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn flush_directory_handle(_file: &File) -> io::Result<()> {
+    Ok(())
 }
 
 pub fn final_path_from_handle(file: &File) -> io::Result<PathBuf> {

@@ -9,8 +9,9 @@
 //!
 //! Status: `C3-A PARTIAL / JOURNAL_PERSISTENCE_BLOCKED`
 //!
-//! CAS publication is atomic no-replace; after the hard link is created the
-//! objects directory handle is flushed with `FlushFileBuffers`.
+//! CAS publication is atomic no-replace. Directory bootstrap, temp create,
+//! link, delete, and flush are performed through handle-relative Windows
+//! APIs; no absolute CAS path is used for I/O.
 
 pub mod cas;
 pub mod error;
