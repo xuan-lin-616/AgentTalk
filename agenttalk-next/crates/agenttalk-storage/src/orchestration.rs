@@ -719,16 +719,17 @@ impl SqliteStore {
         }
         let mut pending_edges = Vec::new();
         for edge_id in &required_edges {
-            let delivered: Option<i64> = tx
+            let delivered = tx
                 .query_row(
-                    "SELECT 1 FROM orchestration_handoff_deliveries
+                    "SELECT acceptance_evidence_digest FROM orchestration_handoff_deliveries
                      WHERE attempt_id = ?1 AND edge_id = ?2 AND lease_epoch = ?3",
                     params![delivery.attempt_id, edge_id, delivery.lease_epoch],
-                    |row| row.get(0),
+                    |row| row.get::<_, String>(0),
                 )
                 .optional()?;
-            if delivered.is_none() {
-                pending_edges.push(edge_id.clone());
+            match delivered {
+                Some(evidence) if !evidence.is_empty() => {}
+                _ => pending_edges.push(edge_id.clone()),
             }
         }
         if !pending_edges.is_empty() {
