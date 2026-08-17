@@ -1904,6 +1904,116 @@ mod tests {
     use super::*;
     use crate::SqliteStore;
 
+    fn prepare_sealed_delivery(
+        store: &mut SqliteStore,
+    ) -> (HandoffDeliveryRecord, TaskReadyToRunningOutcome) {
+        use agenttalk_orchestration_contracts::handoff;
+        use serde_json::{Map, Value};
+
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_edges(
+                   edge_id, run_id, from_node_id, to_node_id,
+                   dag_snapshot_digest, allowed_consumer_json
+                 ) VALUES('edge-1', 'run-1', 'node-1', 'node-1', ?1, '[]')",
+                [hex64('e')],
+            )
+            .unwrap();
+        store.transition_attempt_to_sealing("node-1").unwrap();
+        let envelope = Value::Object(Map::from_iter([
+            (
+                "schemaVersion".to_owned(),
+                Value::String("agenttalk.handoff.envelope.v1".to_owned()),
+            ),
+            (
+                "handoffId".to_owned(),
+                Value::String(format!("handoff-{}", hex64('0'))),
+            ),
+            ("projectRunId".to_owned(), Value::String("run-1".to_owned())),
+            ("edgeId".to_owned(), Value::String("edge-1".to_owned())),
+            ("from".to_owned(), {
+                Value::Object(Map::from_iter([
+                    ("taskNodeId".to_owned(), Value::String("node-1".to_owned())),
+                    (
+                        "attemptId".to_owned(),
+                        Value::String(outcome.attempt_id.clone()),
+                    ),
+                    (
+                        "executionRunId".to_owned(),
+                        Value::String("exec-run-1".to_owned()),
+                    ),
+                ]))
+            }),
+            ("to".to_owned(), {
+                Value::Object(Map::from_iter([(
+                    "taskNodeId".to_owned(),
+                    Value::String("node-1".to_owned()),
+                )]))
+            }),
+            ("leaseEpoch".to_owned(), Value::from(outcome.lease_epoch)),
+            ("artifactBindings".to_owned(), Value::Array(vec![])),
+        ]));
+        let computed_idempotency = handoff::idempotency_key_hex(&envelope).unwrap();
+        let computed_transfer = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
+        let cas_sha = hex_digest(&[0u8; 32]);
+        let declaration = hex64('f');
+        let contract = cas_sha.clone();
+        let evidence = cas_sha.clone();
+        let producer_context = hex64('a');
+        let dag = hex64('b');
+        let role = hex64('c');
+        let computed_payload = handoff::delivery_payload_digest_hex(
+            &declaration,
+            &computed_transfer,
+            &contract,
+            &evidence,
+            &producer_context,
+            &dag,
+            &role,
+        )
+        .unwrap();
+        let delivery = HandoffDeliveryRecord {
+            delivery_id: format!("handoff-{}", hex64('0')),
+            run_id: "run-1".into(),
+            attempt_id: outcome.attempt_id.clone(),
+            edge_id: "edge-1".into(),
+            lease_epoch: outcome.lease_epoch,
+            lease_owner: "worker-a".into(),
+            coordinator_generation: 1,
+            envelope_handoff_id: format!("handoff-{}", hex64('0')),
+            from_task_node_id: "node-1".into(),
+            from_execution_run_id: "exec-run-1".into(),
+            to_task_node_id: "node-1".into(),
+            dag_snapshot_digest: dag,
+            role_binding_snapshot_digest: role,
+            declaration_digest: declaration,
+            artifact_transfer_set_digest: computed_transfer,
+            idempotency_key: computed_idempotency,
+            delivery_payload_digest: computed_payload,
+            envelope_object_ref: format!("sha256:{cas_sha}"),
+            envelope_raw_sha256: cas_sha.clone(),
+            envelope_sha256_jcs: cas_sha,
+            acceptance_contract_ref: format!("sha256:{contract}"),
+            acceptance_contract_digest: contract,
+            acceptance_evidence_ref: format!("sha256:{evidence}"),
+            acceptance_evidence_digest: evidence,
+            producer_context_manifest_digest: producer_context,
+            replay_receipt_json: None,
+        };
+        (delivery, outcome)
+    }
+
     fn seed(run_id: &str) -> OrchestrationRunSeed {
         let hex = "0".repeat(64);
         OrchestrationRunSeed {
@@ -2553,6 +2663,56 @@ mod tests {
     }
 
     #[test]
+    fn v16_preflight_rejects_bad_v15_rows_before_any_rebuild() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE orchestration_task_nodes(
+                   node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_key TEXT NOT NULL,
+                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
+                   active_attempt_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                   max_attempts INTEGER NOT NULL DEFAULT 1, input_artifact_set_digest TEXT,
+                   role_id TEXT, acceptance_contract_ref TEXT, terminal_reason TEXT);
+                 CREATE TABLE orchestration_task_attempts(
+                   attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                   attempt_no INTEGER NOT NULL, from_execution_run_id TEXT, status TEXT NOT NULL,
+                   lease_epoch INTEGER NOT NULL DEFAULT 0, artifact_set_digest TEXT,
+                   acceptance_evidence_digest TEXT, terminal_reason TEXT,
+                   terminal_identity_json TEXT);
+                 CREATE TABLE orchestration_milestones(
+                   milestone_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, milestone_key TEXT NOT NULL,
+                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
+                   brief_tree_digest TEXT, presented_artifact_set_digest TEXT,
+                   acceptance_evidence_digest TEXT, terminal_reason TEXT);
+                 INSERT INTO orchestration_task_nodes(node_id, run_id, node_key, required, status, version)
+                 VALUES('n1','run-1','k1',1,'leased',1);",
+            )
+            .unwrap();
+        let tx = connection.transaction().unwrap();
+        assert!(matches!(
+            SqliteStore::validate_v15_to_v16_state(&tx),
+            Err(StorageError::MigrationInvalidV15State { .. })
+        ));
+        tx.rollback().unwrap();
+        let audit_exists: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='orchestration_audit_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_exists, 0);
+        let original_exists: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='orchestration_task_nodes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(original_exists, 1);
+    }
+
+    #[test]
     fn v16_rejects_unmappable_v15_states_and_null_sealed_digests() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
@@ -2620,6 +2780,212 @@ mod tests {
             )
             .unwrap();
         assert!(connection.execute_batch(crate::MIGRATION_V16_SQL).is_err());
+    }
+
+    #[test]
+    fn restart_after_delivery_reopens_journal_and_audit_facts() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-delivery-restart-{}-{nonce}.sqlite3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut store = SqliteStore::open(&path).unwrap();
+            let (delivery, _outcome) = prepare_sealed_delivery(&mut store);
+            assert!(!store
+                .record_handoff_delivery(delivery.clone(), &[], &TestCas)
+                .unwrap());
+        }
+        {
+            let store = SqliteStore::open(&path).unwrap();
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM orchestration_handoff_deliveries WHERE delivery_id = ?1",
+                    ["handoff-0000000000000000000000000000000000000000000000000000000000000000"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            let audit_count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(audit_count >= 1);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn attempt_remains_sealing_until_all_required_edges_are_delivered() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        store.transition_attempt_to_sealing("node-1").unwrap();
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO orchestration_edges(edge_id, run_id, from_node_id, to_node_id, dag_snapshot_digest, allowed_consumer_json)
+                 VALUES('edge-1','run-1','node-1','node-2','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','[]');
+                 INSERT INTO orchestration_edges(edge_id, run_id, from_node_id, to_node_id, dag_snapshot_digest, allowed_consumer_json)
+                 VALUES('edge-2','run-1','node-1','node-3','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','[]');",
+            )
+            .unwrap();
+        let delivery = HandoffDeliveryRecord {
+            delivery_id: "handoff-0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+            run_id: "run-1".into(),
+            attempt_id: outcome.attempt_id.clone(),
+            edge_id: "edge-1".into(),
+            lease_epoch: outcome.lease_epoch,
+            lease_owner: "worker-a".into(),
+            coordinator_generation: 1,
+            envelope_handoff_id:
+                "handoff-0000000000000000000000000000000000000000000000000000000000000000".into(),
+            from_task_node_id: "node-1".into(),
+            from_execution_run_id: "exec-run-1".into(),
+            to_task_node_id: "node-2".into(),
+            dag_snapshot_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            role_binding_snapshot_digest:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            declaration_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            artifact_transfer_set_digest:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            idempotency_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            delivery_payload_digest:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            envelope_object_ref:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            envelope_raw_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            envelope_sha256_jcs: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .into(),
+            acceptance_contract_ref:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            acceptance_contract_digest:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            acceptance_evidence_ref:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            acceptance_evidence_digest:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            producer_context_manifest_digest:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            replay_receipt_json: None,
+        };
+        let tx = store.connection.transaction().unwrap();
+        SqliteStore::maybe_complete_attempt_sealing(&tx, &delivery).unwrap();
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&outcome.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "sealing");
+        let sql = "INSERT INTO orchestration_handoff_deliveries(delivery_id, run_id, attempt_id, edge_id, lease_epoch, envelope_handoff_id, from_task_node_id, from_execution_run_id, to_task_node_id, lease_owner, coordinator_generation, dag_snapshot_digest, role_binding_snapshot_digest, declaration_digest, artifact_transfer_set_digest, idempotency_key, delivery_payload_digest, envelope_object_ref, envelope_raw_sha256, envelope_sha256_jcs, acceptance_contract_ref, acceptance_contract_digest, acceptance_evidence_ref, acceptance_evidence_digest, producer_context_manifest_digest) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)";
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        tx.execute(
+            sql,
+            params![
+                "d1",
+                "run-1",
+                outcome.attempt_id,
+                "edge-1",
+                outcome.lease_epoch,
+                "h",
+                "node-1",
+                "exec-run-1",
+                "node-2",
+                "worker-a",
+                1,
+                a,
+                a,
+                a,
+                a,
+                a,
+                a,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                a,
+                a,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                a,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                a,
+                a
+            ],
+        )
+        .unwrap();
+        SqliteStore::maybe_complete_attempt_sealing(&tx, &delivery).unwrap();
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&outcome.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "sealing");
+        tx.execute(
+            sql,
+            params![
+                "d2",
+                "run-1",
+                outcome.attempt_id,
+                "edge-2",
+                outcome.lease_epoch,
+                "h2",
+                "node-1",
+                "exec-run-1",
+                "node-3",
+                "worker-a",
+                1,
+                a,
+                a,
+                a,
+                a,
+                a,
+                a,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                a,
+                a,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                a,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                a,
+                a
+            ],
+        )
+        .unwrap();
+        SqliteStore::maybe_complete_attempt_sealing(&tx, &delivery).unwrap();
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&outcome.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        tx.commit().unwrap();
     }
 
     #[test]
