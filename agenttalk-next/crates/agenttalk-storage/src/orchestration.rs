@@ -79,6 +79,16 @@ pub struct HandoffDeliveryRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactBindingInput {
+    pub binding_id: String,
+    pub edge_port_id: String,
+    pub object_ref: String,
+    pub sha256: String,
+    pub size: i64,
+    pub content_schema_ref_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskReadyToRunningOutcome {
     pub node_id: String,
     pub attempt_id: String,
@@ -376,6 +386,24 @@ impl SqliteStore {
                 receipt.core_timestamp,
             ],
         )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&receipt.run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            &receipt.run_id,
+            "human_receipt_recorded",
+            "human_receipt",
+            &receipt.receipt_id,
+            "{\"decision\":\"recorded\"}",
+            &format!(
+                "human_receipt:{}:{}",
+                receipt.milestone_id, receipt.request_id
+            ),
+            generation,
+        )?;
         if receipt.decision == "approve" {
             tx.execute(
                 "UPDATE orchestration_milestones
@@ -383,11 +411,48 @@ impl SqliteStore {
                  WHERE milestone_id = ?1",
                 [&receipt.milestone_id],
             )?;
+            let pending_milestones: i64 = tx.query_row(
+                "SELECT count(*) FROM orchestration_milestones
+                 WHERE run_id = ?1 AND required = 1 AND status != 'approved'",
+                [&receipt.run_id],
+                |row| row.get(0),
+            )?;
+            let pending_nodes: i64 = tx.query_row(
+                "SELECT count(*) FROM orchestration_task_nodes
+                 WHERE run_id = ?1 AND required = 1 AND status != 'completed'",
+                [&receipt.run_id],
+                |row| row.get(0),
+            )?;
+            let next_run_status = if pending_milestones == 0 && pending_nodes == 0 {
+                "completed"
+            } else {
+                "running"
+            };
             tx.execute(
                 "UPDATE orchestration_runs
-                 SET status = 'running', version = version + 1
+                 SET status = ?2, version = version + 1
                  WHERE run_id = ?1",
-                [&receipt.run_id],
+                params![receipt.run_id, next_run_status],
+            )?;
+            append_audit_event(
+                &tx,
+                &receipt.run_id,
+                "milestone_state_changed",
+                "milestone",
+                &receipt.milestone_id,
+                "{\"status\":\"approved\"}",
+                &format!("milestone_approved:{}", receipt.milestone_id),
+                generation,
+            )?;
+            append_audit_event(
+                &tx,
+                &receipt.run_id,
+                "run_state_changed",
+                "run",
+                &receipt.run_id,
+                &format!("{{\"status\":\"{next_run_status}\"}}"),
+                &format!("run_state_changed:{}:{next_run_status}", receipt.run_id),
+                generation,
             )?;
         } else if receipt.decision == "reject" {
             tx.execute(
@@ -403,6 +468,26 @@ impl SqliteStore {
                  WHERE run_id = ?1",
                 [&receipt.run_id],
             )?;
+            append_audit_event(
+                &tx,
+                &receipt.run_id,
+                "milestone_state_changed",
+                "milestone",
+                &receipt.milestone_id,
+                "{\"status\":\"rejected\"}",
+                &format!("milestone_rejected:{}", receipt.milestone_id),
+                generation,
+            )?;
+            append_audit_event(
+                &tx,
+                &receipt.run_id,
+                "run_state_changed",
+                "run",
+                &receipt.run_id,
+                "{\"status\":\"failed\",\"terminal_reason\":\"milestone_rejected\"}",
+                &format!("run_state_changed:{}:failed", receipt.run_id),
+                generation,
+            )?;
         } else {
             return Err(StorageError::OrchestrationMilestoneStateInvalid {
                 milestone_id: receipt.milestone_id,
@@ -416,6 +501,7 @@ impl SqliteStore {
     pub fn record_handoff_delivery(
         &mut self,
         delivery: HandoffDeliveryRecord,
+        bindings: &[ArtifactBindingInput],
     ) -> Result<bool, StorageError> {
         let tx = self
             .connection
@@ -459,6 +545,35 @@ impl SqliteStore {
             tx.commit()?;
             return Ok(true);
         }
+        // New path: authority guards must pass before any row is written.
+        let lease_ok: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM orchestration_leases
+                 WHERE attempt_id = ?1 AND lease_epoch = ?2 AND status = 'active'",
+                params![delivery.attempt_id, delivery.lease_epoch],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if lease_ok.is_none() {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id,
+            });
+        }
+        for binding in bindings {
+            if binding.edge_port_id.is_empty() || binding.content_schema_ref_json.is_empty() {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "edge_port_id and content_schema_ref_json are required".into(),
+                });
+            }
+            if !is_object_ref(&binding.object_ref)
+                || !is_hex64(&binding.sha256)
+                || binding.object_ref != format!("sha256:{}", binding.sha256)
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "object_ref must equal sha256:<sha256>".into(),
+                });
+            }
+        }
         tx.execute(
             "INSERT INTO orchestration_handoff_deliveries(
                delivery_id, run_id, attempt_id, edge_id, lease_epoch,
@@ -490,6 +605,39 @@ impl SqliteStore {
                 delivery.producer_context_manifest_digest,
                 delivery.replay_receipt_json,
             ],
+        )?;
+        for binding in bindings {
+            tx.execute(
+                "INSERT INTO orchestration_artifact_bindings(
+                   binding_id, run_id, delivery_id, edge_port_id,
+                   object_ref, sha256, size, content_schema_ref_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    binding.binding_id,
+                    delivery.run_id,
+                    delivery.delivery_id,
+                    binding.edge_port_id,
+                    binding.object_ref,
+                    binding.sha256,
+                    binding.size,
+                    binding.content_schema_ref_json,
+                ],
+            )?;
+        }
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&delivery.run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            &delivery.run_id,
+            "handoff_delivery_recorded",
+            "handoff_delivery",
+            &delivery.delivery_id,
+            "{\"status\":\"journaled\"}",
+            &format!("handoff_delivery:{}", delivery.delivery_id),
+            generation,
         )?;
         tx.commit()?;
         Ok(false)
@@ -523,20 +671,20 @@ impl SqliteStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let status: String = tx
+        let node = tx
             .query_row(
-                "SELECT status FROM orchestration_task_nodes WHERE node_id = ?1",
+                "SELECT run_id, status FROM orchestration_task_nodes WHERE node_id = ?1",
                 [node_id],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
                 node_id: node_id.to_owned(),
             })?;
-        if status != "pending" {
+        if node.1 != "pending" {
             return Err(StorageError::OrchestrationTaskNotReady {
                 node_id: node_id.to_owned(),
-                status,
+                status: node.1,
             });
         }
         tx.execute(
@@ -551,6 +699,21 @@ impl SqliteStore {
                 role_id,
                 acceptance_contract_ref
             ],
+        )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&node.0],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_node_ready",
+            "task_node",
+            node_id,
+            "{\"status\":\"ready\"}",
+            &format!("task_node_ready:{node_id}"),
+            generation,
         )?;
         tx.commit()?;
         Ok(())
@@ -633,22 +796,38 @@ impl SqliteStore {
                 coordinator_generation,
             ],
         )?;
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_attempt_leased",
+            "task_attempt",
+            &attempt_id,
+            "{\"lease_epoch\":1}",
+            &format!("task_attempt_leased:{attempt_id}:{lease_epoch}"),
+            coordinator_generation,
+        )?;
+        // Node projection is written directly as running; leased is only an
+        // Attempt state.
         tx.execute(
             "UPDATE orchestration_task_nodes
-             SET status = 'leased', active_attempt_id = ?2,
+             SET status = 'running', active_attempt_id = ?2,
                  attempt_count = ?3, version = version + 1
              WHERE node_id = ?1",
             params![node_id, attempt_id, attempt_no],
         )?;
-        // Explicit boundary: leased -> running after the lease is durable.
         tx.execute(
             "UPDATE orchestration_task_attempts SET status = 'running' WHERE attempt_id = ?1",
             [&attempt_id],
         )?;
-        tx.execute(
-            "UPDATE orchestration_task_nodes
-             SET status = 'running' WHERE node_id = ?1",
-            [node_id],
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_attempt_running",
+            "task_attempt",
+            &attempt_id,
+            "{\"status\":\"running\"}",
+            &format!("task_attempt_running:{attempt_id}"),
+            coordinator_generation,
         )?;
         tx.commit()?;
         Ok(TaskReadyToRunningOutcome {
@@ -657,6 +836,154 @@ impl SqliteStore {
             attempt_no,
             lease_epoch,
         })
+    }
+
+    pub fn set_task_max_attempts(
+        &mut self,
+        node_id: &str,
+        max_attempts: i64,
+    ) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE orchestration_task_nodes SET max_attempts = ?2 WHERE node_id = ?1",
+            params![node_id, max_attempts],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn transition_attempt_to_sealing(&mut self, node_id: &str) -> Result<String, StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let node = tx
+            .query_row(
+                "SELECT run_id, status, active_attempt_id FROM orchestration_task_nodes WHERE node_id = ?1",
+                [node_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
+                node_id: node_id.to_owned(),
+            })?;
+        if node.1 != "running" {
+            return Err(StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status: node.1,
+            });
+        }
+        let attempt_id = node
+            .2
+            .ok_or_else(|| StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status: node.1,
+            })?;
+        tx.execute(
+            "UPDATE orchestration_task_attempts SET status = 'sealing' WHERE attempt_id = ?1 AND status = 'running'",
+            [&attempt_id],
+        )?;
+        tx.execute(
+            "UPDATE orchestration_task_nodes SET status = 'sealing' WHERE node_id = ?1",
+            [node_id],
+        )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&node.0],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_attempt_sealing",
+            "task_attempt",
+            &attempt_id,
+            "{\"status\":\"sealing\"}",
+            &format!("task_attempt_sealing:{attempt_id}"),
+            generation,
+        )?;
+        tx.commit()?;
+        Ok(attempt_id)
+    }
+
+    pub fn recover_active_attempt_interrupted(
+        &mut self,
+        node_id: &str,
+    ) -> Result<String, StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let node = tx
+            .query_row(
+                "SELECT run_id, active_attempt_id, attempt_count, max_attempts
+                 FROM orchestration_task_nodes WHERE node_id = ?1",
+                [node_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
+                node_id: node_id.to_owned(),
+            })?;
+        let attempt_id = node
+            .1
+            .ok_or_else(|| StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status: "no active attempt".into(),
+            })?;
+        tx.execute(
+            "UPDATE orchestration_task_attempts
+             SET status = 'interrupted'
+             WHERE attempt_id = ?1 AND status IN ('leased','running','sealing')",
+            [&attempt_id],
+        )?;
+        let next_node_status = if node.2 < node.3 { "ready" } else { "failed" };
+        tx.execute(
+            "UPDATE orchestration_task_nodes
+             SET status = ?2, active_attempt_id = NULL, version = version + 1
+             WHERE node_id = ?1",
+            params![node_id, next_node_status],
+        )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&node.0],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_attempt_interrupted",
+            "task_attempt",
+            &attempt_id,
+            "{\"status\":\"interrupted\"}",
+            &format!("task_attempt_interrupted:{attempt_id}"),
+            generation,
+        )?;
+        append_audit_event(
+            &tx,
+            &node.0,
+            "task_node_recovered",
+            "task_node",
+            node_id,
+            &format!("{{\"status\":\"{next_node_status}\"}}"),
+            &format!("task_node_recovered:{node_id}:{next_node_status}"),
+            generation,
+        )?;
+        tx.commit()?;
+        Ok(attempt_id)
     }
 
     pub fn bump_coordinator_generation(&mut self, run_id: &str) -> Result<i64, StorageError> {
@@ -677,6 +1004,16 @@ impl SqliteStore {
         tx.execute(
             "UPDATE orchestration_runs SET coordinator_generation = ?2 WHERE run_id = ?1",
             params![run_id, next],
+        )?;
+        append_audit_event(
+            &tx,
+            run_id,
+            "coordinator_generation_bumped",
+            "run",
+            run_id,
+            &format!("{{\"coordinator_generation\":{next}}}"),
+            &format!("coordinator_generation_bumped:{run_id}:{next}"),
+            next,
         )?;
         tx.commit()?;
         Ok(next)
@@ -868,6 +1205,48 @@ impl SqliteStore {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_audit_event(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    event_type: &str,
+    subject_kind: &str,
+    subject_id: &str,
+    payload_json: &str,
+    idempotency_key: &str,
+    coordinator_generation: i64,
+) -> Result<(), StorageError> {
+    let sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM orchestration_audit_events WHERE run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let event_id = format!("{run_id}:{sequence}:{event_type}");
+    let payload_sha256 = hex_digest(payload_json.as_bytes());
+    let core_timestamp = crate::orchestration::now_unix()?;
+    tx.execute(
+        "INSERT INTO orchestration_audit_events(
+           event_id, run_id, sequence, event_type, schema_version,
+           subject_kind, subject_id, payload_json, payload_sha256,
+           idempotency_key, coordinator_generation, core_timestamp
+         ) VALUES(?1, ?2, ?3, ?4, 'v1', ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            event_id,
+            run_id,
+            sequence,
+            event_type,
+            subject_kind,
+            subject_id,
+            payload_json,
+            payload_sha256,
+            idempotency_key,
+            coordinator_generation,
+            core_timestamp,
+        ],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn now_unix() -> Result<i64, StorageError> {
     use std::time::{SystemTime, UNIX_EPOCH};
     Ok(SystemTime::now()
@@ -922,9 +1301,9 @@ mod tests {
     }
 
     #[test]
-    fn v15_migration_checksum_version_and_legacy_tables_are_recorded() {
+    fn v16_migration_checksum_version_and_legacy_tables_are_recorded() {
         let store = SqliteStore::open_in_memory().unwrap();
-        assert_eq!(store.orchestration_schema_version(), 15);
+        assert_eq!(store.orchestration_schema_version(), 16);
         assert_eq!(store.orchestration_migration_checksum().len(), 64);
         assert_eq!(
             store.legacy_versions_unchanged().unwrap(),
@@ -938,7 +1317,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(table_count, 12);
+        assert_eq!(table_count, 13);
     }
 
     #[test]
@@ -976,7 +1355,7 @@ mod tests {
         assert!(!store.record_human_receipt(r.clone()).unwrap());
         assert!(store.record_human_receipt(r).unwrap());
         let run = store.orchestration_run("run-1").unwrap();
-        assert_eq!(run.status, "running");
+        assert_eq!(run.status, "completed");
         let milestone_status: String = store
             .connection
             .query_row(
@@ -992,16 +1371,42 @@ mod tests {
         store
             .ensure_orchestration_milestone(
                 "run-2",
-                "milestone-2",
-                "m2",
+                "milestone-2a",
+                "m2a",
                 &hex64('a'),
                 &format!("sha256:{}", hex64('b')),
                 &format!("sha256:{}", hex64('c')),
             )
             .unwrap();
-        let r = receipt("receipt-2", "milestone-2", "run-2", "reject");
+        store
+            .ensure_orchestration_milestone(
+                "run-2",
+                "milestone-2b",
+                "m2b",
+                &hex64('a'),
+                &format!("sha256:{}", hex64('b')),
+                &format!("sha256:{}", hex64('c')),
+            )
+            .unwrap();
+        let r = receipt("receipt-2a", "milestone-2a", "run-2", "approve");
         assert!(!store.record_human_receipt(r).unwrap());
-        let run = store.orchestration_run("run-2").unwrap();
+        assert_eq!(store.orchestration_run("run-2").unwrap().status, "running");
+
+        store.create_orchestration_run(seed("run-3")).unwrap();
+        store.transition_run_to_awaiting_approval("run-3").unwrap();
+        store
+            .ensure_orchestration_milestone(
+                "run-3",
+                "milestone-3",
+                "m3",
+                &hex64('a'),
+                &format!("sha256:{}", hex64('b')),
+                &format!("sha256:{}", hex64('c')),
+            )
+            .unwrap();
+        let r = receipt("receipt-3", "milestone-3", "run-3", "reject");
+        assert!(!store.record_human_receipt(r).unwrap());
+        let run = store.orchestration_run("run-3").unwrap();
         assert_eq!(run.status, "failed");
     }
 
@@ -1103,12 +1508,21 @@ mod tests {
     fn handoff_delivery_replay_and_conflict_are_slot_scoped() {
         let mut store = SqliteStore::open_in_memory().unwrap();
         store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
         let delivery = HandoffDeliveryRecord {
             delivery_id: "delivery-1".into(),
             run_id: "run-1".into(),
-            attempt_id: "attempt-1".into(),
+            attempt_id: outcome.attempt_id.clone(),
             edge_id: "edge-1".into(),
-            lease_epoch: 1,
+            lease_epoch: outcome.lease_epoch,
             declaration_digest: "decl-1".into(),
             artifact_transfer_set_digest: "artifact-set-1".into(),
             idempotency_key: "key-1".into(),
@@ -1123,12 +1537,16 @@ mod tests {
             producer_context_manifest_digest: "context-1".into(),
             replay_receipt_json: None,
         };
-        assert!(!store.record_handoff_delivery(delivery.clone()).unwrap());
-        assert!(store.record_handoff_delivery(delivery.clone()).unwrap());
+        assert!(!store
+            .record_handoff_delivery(delivery.clone(), &[])
+            .unwrap());
+        assert!(store
+            .record_handoff_delivery(delivery.clone(), &[])
+            .unwrap());
         let mut conflicting = delivery;
         conflicting.delivery_payload_digest = "different".into();
         assert!(matches!(
-            store.record_handoff_delivery(conflicting),
+            store.record_handoff_delivery(conflicting, &[]),
             Err(StorageError::HandoffDeliveryConflict { .. })
         ));
     }
@@ -1203,6 +1621,165 @@ mod tests {
             ),
             Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn audit_events_are_append_only_and_transactions_emit_them() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count >= 1);
+
+        let update_rejected = store
+            .connection
+            .execute(
+                "UPDATE orchestration_audit_events SET event_type = 'changed' WHERE run_id = 'run-1'",
+                [],
+            )
+            .is_err();
+        assert!(update_rejected);
+        let delete_rejected = store
+            .connection
+            .execute(
+                "DELETE FROM orchestration_audit_events WHERE run_id = 'run-1'",
+                [],
+            )
+            .is_err();
+        assert!(delete_rejected);
+    }
+
+    #[test]
+    fn failed_receipt_rolls_back_audit_events() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .ensure_orchestration_milestone(
+                "run-1",
+                "milestone-1",
+                "m1",
+                &hex64('a'),
+                &format!("sha256:{}", hex64('b')),
+                &format!("sha256:{}", hex64('c')),
+            )
+            .unwrap();
+        let result =
+            store.record_human_receipt(receipt("receipt-1", "milestone-1", "run-1", "approve"));
+        assert!(matches!(
+            result,
+            Err(StorageError::OrchestrationRunStatusInvalid { .. })
+        ));
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn node_never_persists_leased_and_recovery_interrupts_attempt() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store.set_task_max_attempts("node-1", 2).unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let first = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        let node_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_nodes WHERE node_id = 'node-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(node_status, "running");
+        let sealed_attempt = store.transition_attempt_to_sealing("node-1").unwrap();
+        assert_eq!(sealed_attempt, first.attempt_id);
+        let attempt_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&sealed_attempt],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_status, "sealing");
+        let recovered = store.recover_active_attempt_interrupted("node-1").unwrap();
+        assert_eq!(recovered, sealed_attempt);
+        let attempt_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&recovered],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_status, "interrupted");
+        let node_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_nodes WHERE node_id = 'node-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(node_status, "ready");
+        let leased_node_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_task_nodes WHERE status = 'leased'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leased_node_count, 0);
+        // Retry succeeds after recovery.
+        let second = store
+            .transition_task_ready_to_running("node-1", "exec-run-2", "worker-a")
+            .unwrap();
+        assert_eq!(second.attempt_no, 2);
+    }
+
+    #[test]
+    fn legacy_event_store_is_not_written() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        let legacy_count: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM event_store", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy_count, 0);
     }
 
     #[test]

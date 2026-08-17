@@ -27,7 +27,8 @@ const V12_SCHEMA_VERSION: i64 = 12;
 const V13_SCHEMA_VERSION: i64 = 13;
 const V14_SCHEMA_VERSION: i64 = 14;
 const V15_SCHEMA_VERSION: i64 = 15;
-pub const SCHEMA_VERSION: i64 = 15;
+const V16_SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 16;
 const HISTORICAL_V11_MIGRATION_CHECKSUM: &str =
     "f5a0e07a7de1f53b86aeee16e4908321abf637bae8b5372e019a37a39f6a38c7";
 const MUTATED_V11_MIGRATION_CHECKSUM: &str =
@@ -655,6 +656,120 @@ CREATE TABLE IF NOT EXISTS orchestration_context_manifest_authorities (
   sealed_at INTEGER NOT NULL,
   UNIQUE(attempt_id, producer_context_manifest_digest)
 );
+"#;
+
+// v16 adds the ADR-002 orchestration audit sink and corrects the v15
+// orchestrator status sets. v15 text is preserved; v16 rebuilds only the
+// v15 orchestrator tables that carried provisional status names.
+const MIGRATION_V16_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS orchestration_audit_events (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK(sequence >= 0),
+  event_type TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  subject_kind TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+  payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+  idempotency_key TEXT NOT NULL,
+  coordinator_generation INTEGER NOT NULL CHECK(coordinator_generation >= 0),
+  core_timestamp INTEGER NOT NULL CHECK(core_timestamp >= 0),
+  UNIQUE(run_id, sequence),
+  UNIQUE(run_id, idempotency_key)
+);
+CREATE TRIGGER IF NOT EXISTS orchestration_audit_events_no_update
+BEFORE UPDATE ON orchestration_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'orchestration_audit_events is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS orchestration_audit_events_no_delete
+BEFORE DELETE ON orchestration_audit_events
+BEGIN
+  SELECT RAISE(ABORT, 'orchestration_audit_events is append-only');
+END;
+
+ALTER TABLE orchestration_task_nodes RENAME TO orchestration_task_nodes_v15;
+CREATE TABLE orchestration_task_nodes (
+  node_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_key TEXT NOT NULL,
+  required INTEGER NOT NULL CHECK(required IN (0, 1)),
+  status TEXT NOT NULL CHECK(status IN ('pending','ready','running','sealing','completed','failed','blocked','cancelled')),
+  version INTEGER NOT NULL,
+  active_attempt_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  input_artifact_set_digest TEXT,
+  role_id TEXT,
+  acceptance_contract_ref TEXT,
+  terminal_reason TEXT,
+  UNIQUE(run_id, node_key)
+);
+INSERT INTO orchestration_task_nodes(
+  node_id, run_id, node_key, required, status, version, active_attempt_id,
+  attempt_count, max_attempts, input_artifact_set_digest, role_id,
+  acceptance_contract_ref, terminal_reason
+)
+SELECT
+  node_id, run_id, node_key, required, status, version, active_attempt_id,
+  attempt_count, max_attempts, input_artifact_set_digest, role_id,
+  acceptance_contract_ref, terminal_reason
+FROM orchestration_task_nodes_v15;
+DROP TABLE orchestration_task_nodes_v15;
+
+ALTER TABLE orchestration_task_attempts RENAME TO orchestration_task_attempts_v15;
+CREATE TABLE orchestration_task_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_no INTEGER NOT NULL,
+  from_execution_run_id TEXT,
+  status TEXT NOT NULL CHECK(status IN ('leased','running','sealing','completed','failed','cancelled','interrupted')),
+  lease_epoch INTEGER NOT NULL DEFAULT 0,
+  artifact_set_digest TEXT,
+  acceptance_evidence_digest TEXT,
+  terminal_reason TEXT,
+  terminal_identity_json TEXT,
+  UNIQUE(node_id, attempt_no)
+);
+INSERT INTO orchestration_task_attempts(
+  attempt_id, run_id, node_id, attempt_no, from_execution_run_id, status,
+  lease_epoch, artifact_set_digest, acceptance_evidence_digest,
+  terminal_reason, terminal_identity_json
+)
+SELECT
+  attempt_id, run_id, node_id, attempt_no, from_execution_run_id, status,
+  lease_epoch, artifact_set_digest, acceptance_evidence_digest,
+  terminal_reason, terminal_identity_json
+FROM orchestration_task_attempts_v15;
+DROP TABLE orchestration_task_attempts_v15;
+
+ALTER TABLE orchestration_milestones RENAME TO orchestration_milestones_v15;
+CREATE TABLE orchestration_milestones (
+  milestone_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  milestone_key TEXT NOT NULL,
+  required INTEGER NOT NULL CHECK(required IN (0, 1)),
+  status TEXT NOT NULL CHECK(status IN ('pending','awaiting_approval','approved','rejected','cancelled')),
+  version INTEGER NOT NULL,
+  brief_tree_digest TEXT,
+  presented_artifact_set_digest TEXT,
+  acceptance_evidence_digest TEXT,
+  terminal_reason TEXT,
+  UNIQUE(run_id, milestone_key)
+);
+INSERT INTO orchestration_milestones(
+  milestone_id, run_id, milestone_key, required, status, version,
+  brief_tree_digest, presented_artifact_set_digest, acceptance_evidence_digest,
+  terminal_reason
+)
+SELECT
+  milestone_id, run_id, milestone_key, required, status, version,
+  brief_tree_digest, presented_artifact_set_digest, acceptance_evidence_digest,
+  terminal_reason
+FROM orchestration_milestones_v15;
+DROP TABLE orchestration_milestones_v15;
 "#;
 
 /// Non-secret durable ACP binding metadata. It deliberately has no path,
@@ -1353,7 +1468,8 @@ impl SqliteStore {
         self.migrate_v12()?;
         self.migrate_v13()?;
         self.migrate_v14()?;
-        self.migrate_v15()
+        self.migrate_v15()?;
+        self.migrate_v16()
     }
 
     fn migrate_v12(&mut self) -> Result<(), StorageError> {
@@ -1579,8 +1695,53 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v16(&mut self) -> Result<(), StorageError> {
+        let checksum = hex_digest(MIGRATION_V16_SQL.as_bytes());
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let dirty: Option<i64> = tx
+            .query_row(
+                "SELECT dirty FROM schema_migrations WHERE version = ?1",
+                [V16_SCHEMA_VERSION],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(dirty) = dirty {
+            if dirty != 0 {
+                return Err(StorageError::MigrationDirty {
+                    version: V16_SCHEMA_VERSION,
+                });
+            }
+            let existing: String = tx.query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = ?1",
+                [V16_SCHEMA_VERSION],
+                |row| row.get(0),
+            )?;
+            if existing != checksum {
+                return Err(StorageError::MigrationChecksumMismatch {
+                    version: V16_SCHEMA_VERSION,
+                });
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at, dirty)
+             VALUES(?1, ?2, strftime('%s','now'), 1)",
+            params![V16_SCHEMA_VERSION, checksum],
+        )?;
+        tx.execute_batch(MIGRATION_V16_SQL)?;
+        tx.execute(
+            "UPDATE schema_migrations SET dirty = 0 WHERE version = ?1",
+            [V16_SCHEMA_VERSION],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn migration_checksum(&self) -> String {
-        hex_digest(MIGRATION_V15_SQL.as_bytes())
+        hex_digest(MIGRATION_V16_SQL.as_bytes())
     }
 
     pub fn event_stream_epoch(&mut self) -> Result<String, StorageError> {
@@ -9413,12 +9574,12 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![7, 11, 12, 13, 14, 15]);
+        assert_eq!(versions, vec![7, 11, 12, 13, 14, 15, 16]);
         let checksums: Vec<(i64, String)> = store
             .connection
             .prepare(
                 "SELECT version, checksum FROM schema_migrations
-                 WHERE version IN (?1, ?2, ?3, ?4, ?5) ORDER BY version",
+                 WHERE version IN (?1, ?2, ?3, ?4, ?5, ?6) ORDER BY version",
             )
             .unwrap()
             .query_map(
@@ -9427,6 +9588,7 @@ mod tests {
                     V12_SCHEMA_VERSION,
                     V13_SCHEMA_VERSION,
                     V14_SCHEMA_VERSION,
+                    V15_SCHEMA_VERSION,
                     SCHEMA_VERSION
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -9441,6 +9603,7 @@ mod tests {
                 (V12_SCHEMA_VERSION, hex_digest(MIGRATION_V12_SQL.as_bytes())),
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
                 (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
+                (V15_SCHEMA_VERSION, hex_digest(MIGRATION_V15_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
@@ -9538,6 +9701,7 @@ mod tests {
                 (V12_SCHEMA_VERSION, hex_digest(MIGRATION_V12_SQL.as_bytes())),
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
                 (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
+                (V15_SCHEMA_VERSION, hex_digest(MIGRATION_V15_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
@@ -9573,14 +9737,16 @@ mod tests {
             .connection
             .prepare(
                 "SELECT version, checksum FROM schema_migrations
-                 WHERE version IN (?1, ?2, ?3, ?4) ORDER BY version",
+                 WHERE version IN (?1, ?2, ?3, ?4, ?5, ?6) ORDER BY version",
             )
             .unwrap()
             .query_map(
                 params![
                     V11_SCHEMA_VERSION,
                     V12_SCHEMA_VERSION,
+                    V13_SCHEMA_VERSION,
                     V14_SCHEMA_VERSION,
+                    V15_SCHEMA_VERSION,
                     SCHEMA_VERSION
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -9593,7 +9759,9 @@ mod tests {
             vec![
                 (V11_SCHEMA_VERSION, MUTATED_V11_MIGRATION_CHECKSUM.into()),
                 (V12_SCHEMA_VERSION, hex_digest(MIGRATION_V12_SQL.as_bytes())),
+                (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
                 (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
+                (V15_SCHEMA_VERSION, hex_digest(MIGRATION_V15_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
