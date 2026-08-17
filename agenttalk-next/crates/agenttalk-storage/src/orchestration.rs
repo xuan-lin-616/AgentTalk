@@ -1,8 +1,8 @@
 use crate::{SqliteStore, StorageError, SCHEMA_VERSION, V16_SCHEMA_VERSION};
 use agenttalk_brief_sealer::PreparedBriefSeal;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -66,6 +66,12 @@ pub struct HandoffDeliveryRecord {
     pub lease_epoch: i64,
     pub lease_owner: String,
     pub coordinator_generation: i64,
+    pub envelope_handoff_id: String,
+    pub from_task_node_id: String,
+    pub from_execution_run_id: String,
+    pub to_task_node_id: String,
+    pub dag_snapshot_digest: String,
+    pub role_binding_snapshot_digest: String,
     pub declaration_digest: String,
     pub artifact_transfer_set_digest: String,
     pub idempotency_key: String,
@@ -85,9 +91,16 @@ pub struct HandoffDeliveryRecord {
 pub struct ArtifactBindingInput {
     pub binding_id: String,
     pub edge_port_id: String,
+    pub source_output_port_id: String,
+    pub target_input_port_id: String,
     pub object_ref: String,
     pub sha256: String,
     pub size: i64,
+    pub content_schema_id: String,
+    pub content_schema_version: String,
+    pub content_schema_digest: String,
+    pub normalized_content_type: String,
+    pub normalized_content_type_policy_version: String,
     pub content_schema_ref_json: String,
 }
 
@@ -540,111 +553,16 @@ impl SqliteStore {
                 || existing.6 != delivery.acceptance_evidence_digest
             {
                 return Err(StorageError::HandoffDeliveryConflict {
-                    attempt_id: delivery.attempt_id,
-                    edge_id: delivery.edge_id,
+                    attempt_id: delivery.attempt_id.clone(),
+                    edge_id: delivery.edge_id.clone(),
                     lease_epoch: delivery.lease_epoch,
                 });
             }
             tx.commit()?;
             return Ok(true);
         }
-        // New path: authority guards must pass before any row is written.
-        let attempt = tx
-            .query_row(
-                "SELECT run_id FROM orchestration_task_attempts WHERE attempt_id = ?1",
-                [&delivery.attempt_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::StaleLease {
-                attempt_id: delivery.attempt_id.clone(),
-            })?;
-        let edge_run = tx
-            .query_row(
-                "SELECT run_id FROM orchestration_edges WHERE edge_id = ?1",
-                [&delivery.edge_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::StaleLease {
-                attempt_id: delivery.attempt_id.clone(),
-            })?;
-        if attempt != delivery.run_id || edge_run != delivery.run_id {
-            return Err(StorageError::StaleLease {
-                attempt_id: delivery.attempt_id,
-            });
-        }
-        let lease = tx
-            .query_row(
-                "SELECT run_id, status, deadline, lease_owner, coordinator_generation
-                 FROM orchestration_leases
-                 WHERE attempt_id = ?1 AND lease_epoch = ?2
-                 ORDER BY coordinator_generation DESC LIMIT 1",
-                params![delivery.attempt_id, delivery.lease_epoch],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::StaleLease {
-                attempt_id: delivery.attempt_id.clone(),
-            })?;
-        let current_generation: i64 = tx.query_row(
-            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
-            [&delivery.run_id],
-            |row| row.get(0),
-        )?;
-        let now = crate::orchestration::now_unix()?;
-        if lease.0 != delivery.run_id
-            || lease.1 != "active"
-            || lease.2 <= now
-            || lease.3 != delivery.lease_owner
-            || lease.4 != delivery.coordinator_generation
-            || lease.4 != current_generation
-        {
-            return Err(StorageError::StaleLease {
-                attempt_id: delivery.attempt_id,
-            });
-        }
-        if !is_object_ref(&delivery.envelope_object_ref)
-            || !is_hex64(&delivery.envelope_raw_sha256)
-            || !is_hex64(&delivery.envelope_sha256_jcs)
-            || delivery.envelope_object_ref != format!("sha256:{}", delivery.envelope_raw_sha256)
-        {
-            return Err(StorageError::HandoffDeliveryConflict {
-                attempt_id: delivery.attempt_id,
-                edge_id: delivery.edge_id,
-                lease_epoch: delivery.lease_epoch,
-            });
-        }
-        if delivery.acceptance_contract_ref
-            != format!("sha256:{}", delivery.acceptance_contract_digest)
-            || delivery.acceptance_evidence_ref
-                != format!("sha256:{}", delivery.acceptance_evidence_digest)
-        {
-            return Err(StorageError::HandoffDeliveryConflict {
-                attempt_id: delivery.attempt_id,
-                edge_id: delivery.edge_id,
-                lease_epoch: delivery.lease_epoch,
-            });
-        }
-        if !is_hex64(&delivery.delivery_payload_digest)
-            || delivery.idempotency_key.is_empty()
-            || delivery.declaration_digest.is_empty()
-            || delivery.artifact_transfer_set_digest.is_empty()
-        {
-            return Err(StorageError::HandoffDeliveryConflict {
-                attempt_id: delivery.attempt_id,
-                edge_id: delivery.edge_id,
-                lease_epoch: delivery.lease_epoch,
-            });
-        }
+        // New path: full authority closure in one Immediate transaction.
+        Self::validate_handoff_authority(&tx, &delivery, bindings)?;
         for binding in bindings {
             if binding.edge_port_id.is_empty() || binding.content_schema_ref_json.is_empty() {
                 return Err(StorageError::OrchestrationArtifactBindingInvalid {
@@ -727,6 +645,356 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(false)
+    }
+
+    fn validate_handoff_authority(
+        tx: &rusqlite::Transaction<'_>,
+        delivery: &HandoffDeliveryRecord,
+        bindings: &[ArtifactBindingInput],
+    ) -> Result<(), StorageError> {
+        use agenttalk_orchestration_contracts::handoff;
+        use serde_json::{Map, Value};
+
+        let attempt = tx
+            .query_row(
+                "SELECT run_id, node_id, from_execution_run_id, status
+             FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&delivery.attempt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
+        if attempt.0 != delivery.run_id
+            || attempt.1 != delivery.from_task_node_id
+            || attempt.2.as_deref() != Some(delivery.from_execution_run_id.as_str())
+            || attempt.3 != "sealing"
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            });
+        }
+
+        let edge = tx
+        .query_row(
+            "SELECT run_id, from_node_id, to_node_id FROM orchestration_edges WHERE edge_id = ?1",
+            [&delivery.edge_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::StaleLease {
+            attempt_id: delivery.attempt_id.clone(),
+        })?;
+        if edge.0 != delivery.run_id
+            || edge.1 != attempt.1
+            || edge.1 != delivery.from_task_node_id
+            || edge.2 != delivery.to_task_node_id
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            });
+        }
+
+        let lease = tx
+            .query_row(
+                "SELECT run_id, status, deadline, lease_owner, coordinator_generation
+             FROM orchestration_leases
+             WHERE attempt_id = ?1 AND lease_epoch = ?2
+             ORDER BY coordinator_generation DESC LIMIT 1",
+                params![delivery.attempt_id, delivery.lease_epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
+        let current_generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&delivery.run_id],
+            |row| row.get(0),
+        )?;
+        let now = crate::orchestration::now_unix()?;
+        if lease.0 != delivery.run_id
+            || lease.1 != "active"
+            || lease.2 <= now
+            || lease.3 != delivery.lease_owner
+            || lease.4 != delivery.coordinator_generation
+            || lease.4 != current_generation
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            });
+        }
+
+        if delivery.delivery_id != delivery.envelope_handoff_id
+            || !delivery
+                .delivery_id
+                .strip_prefix("handoff-")
+                .is_some_and(is_hex64)
+        {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+
+        if !is_object_ref(&delivery.envelope_object_ref)
+            || !is_hex64(&delivery.envelope_raw_sha256)
+            || !is_hex64(&delivery.envelope_sha256_jcs)
+            || delivery.envelope_object_ref != format!("sha256:{}", delivery.envelope_raw_sha256)
+            || delivery.acceptance_contract_ref
+                != format!("sha256:{}", delivery.acceptance_contract_digest)
+            || delivery.acceptance_evidence_ref
+                != format!("sha256:{}", delivery.acceptance_evidence_digest)
+        {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+
+        let mut seen_bindings = HashSet::new();
+        for binding in bindings {
+            if binding.edge_port_id.is_empty()
+                || binding.content_schema_ref_json.is_empty()
+                || binding.content_schema_id.is_empty()
+                || binding.content_schema_digest.is_empty()
+                || binding.normalized_content_type.is_empty()
+                || binding.normalized_content_type_policy_version.is_empty()
+                || !is_hex64(&binding.content_schema_digest)
+                || binding.size < 0
+                || !is_object_ref(&binding.object_ref)
+                || !is_hex64(&binding.sha256)
+                || binding.object_ref != format!("sha256:{}", binding.sha256)
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "sealed artifact binding fields are invalid".into(),
+                });
+            }
+            if !seen_bindings.insert(binding.edge_port_id.clone()) {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!("duplicate edge_port binding: {}", binding.edge_port_id),
+                });
+            }
+            let port = tx
+                .query_row(
+                    "SELECT edge_id, source_output_port_id, target_input_port_id
+                 FROM orchestration_edge_ports WHERE edge_port_id = ?1",
+                    [&binding.edge_port_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!("unknown edge_port: {}", binding.edge_port_id),
+                })?;
+            if port.0 != delivery.edge_id
+                || port.1 != binding.source_output_port_id
+                || port.2 != binding.target_input_port_id
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "edge port does not match sealed edge authority".into(),
+                });
+            }
+        }
+
+        let bindings_json: Vec<Value> = bindings
+            .iter()
+            .map(|binding| {
+                Value::Object(Map::from_iter([
+                    ("sourceOutput".to_owned(), {
+                        Value::Object(Map::from_iter([(
+                            "portId".to_owned(),
+                            Value::String(binding.source_output_port_id.clone()),
+                        )]))
+                    }),
+                    ("targetInput".to_owned(), {
+                        Value::Object(Map::from_iter([(
+                            "portId".to_owned(),
+                            Value::String(binding.target_input_port_id.clone()),
+                        )]))
+                    }),
+                    ("artifactRef".to_owned(), {
+                        Value::Object(Map::from_iter([
+                            (
+                                "objectRef".to_owned(),
+                                Value::String(binding.object_ref.clone()),
+                            ),
+                            ("sha256".to_owned(), Value::String(binding.sha256.clone())),
+                            ("size".to_owned(), Value::from(binding.size)),
+                            ("contentSchemaRef".to_owned(), {
+                                Value::Object(Map::from_iter([
+                                    (
+                                        "id".to_owned(),
+                                        Value::String(binding.content_schema_id.clone()),
+                                    ),
+                                    (
+                                        "version".to_owned(),
+                                        Value::String(binding.content_schema_version.clone()),
+                                    ),
+                                    (
+                                        "digest".to_owned(),
+                                        Value::String(binding.content_schema_digest.clone()),
+                                    ),
+                                ]))
+                            }),
+                            (
+                                "normalizedContentType".to_owned(),
+                                Value::String(binding.normalized_content_type.clone()),
+                            ),
+                            (
+                                "normalizedContentTypePolicyVersion".to_owned(),
+                                Value::String(
+                                    binding.normalized_content_type_policy_version.clone(),
+                                ),
+                            ),
+                        ]))
+                    }),
+                ]))
+            })
+            .collect();
+
+        let envelope = Value::Object(Map::from_iter([
+            (
+                "schemaVersion".to_owned(),
+                Value::String("agenttalk.handoff.envelope.v1".to_owned()),
+            ),
+            (
+                "handoffId".to_owned(),
+                Value::String(delivery.envelope_handoff_id.clone()),
+            ),
+            (
+                "projectRunId".to_owned(),
+                Value::String(delivery.run_id.clone()),
+            ),
+            ("edgeId".to_owned(), Value::String(delivery.edge_id.clone())),
+            ("from".to_owned(), {
+                Value::Object(Map::from_iter([
+                    (
+                        "taskNodeId".to_owned(),
+                        Value::String(delivery.from_task_node_id.clone()),
+                    ),
+                    (
+                        "attemptId".to_owned(),
+                        Value::String(delivery.attempt_id.clone()),
+                    ),
+                    (
+                        "executionRunId".to_owned(),
+                        Value::String(delivery.from_execution_run_id.clone()),
+                    ),
+                ]))
+            }),
+            ("to".to_owned(), {
+                Value::Object(Map::from_iter([(
+                    "taskNodeId".to_owned(),
+                    Value::String(delivery.to_task_node_id.clone()),
+                )]))
+            }),
+            ("leaseEpoch".to_owned(), Value::from(delivery.lease_epoch)),
+            ("artifactBindings".to_owned(), Value::Array(bindings_json)),
+        ]));
+
+        let computed_idempotency = handoff::idempotency_key_hex(&envelope).map_err(|_| {
+            StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            }
+        })?;
+        if computed_idempotency != delivery.idempotency_key {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+
+        let computed_payload = handoff::delivery_payload_digest_hex(
+            &delivery.declaration_digest,
+            &delivery.artifact_transfer_set_digest,
+            &delivery.acceptance_contract_digest,
+            &delivery.acceptance_evidence_digest,
+            &delivery.producer_context_manifest_digest,
+            &delivery.dag_snapshot_digest,
+            &delivery.role_binding_snapshot_digest,
+        )
+        .map_err(|_| StorageError::HandoffDeliveryConflict {
+            attempt_id: delivery.attempt_id.clone(),
+            edge_id: delivery.edge_id.clone(),
+            lease_epoch: delivery.lease_epoch,
+        })?;
+        if computed_payload != delivery.delivery_payload_digest {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+
+        let computed_transfer =
+            handoff::artifact_transfer_set_digest_hex(&envelope).map_err(|_| {
+                StorageError::HandoffDeliveryConflict {
+                    attempt_id: delivery.attempt_id.clone(),
+                    edge_id: delivery.edge_id.clone(),
+                    lease_epoch: delivery.lease_epoch,
+                }
+            })?;
+        if computed_transfer != delivery.artifact_transfer_set_digest {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+
+        for digest in [
+            &delivery.declaration_digest,
+            &delivery.artifact_transfer_set_digest,
+            &delivery.acceptance_contract_digest,
+            &delivery.acceptance_evidence_digest,
+            &delivery.producer_context_manifest_digest,
+            &delivery.dag_snapshot_digest,
+            &delivery.role_binding_snapshot_digest,
+        ] {
+            if !is_hex64(digest) {
+                return Err(StorageError::HandoffDeliveryConflict {
+                    attempt_id: delivery.attempt_id.clone(),
+                    edge_id: delivery.edge_id.clone(),
+                    lease_epoch: delivery.lease_epoch,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     pub fn insert_orchestration_task_node(
@@ -1291,105 +1559,48 @@ impl SqliteStore {
     }
 }
 
-#[derive(Debug)]
-struct CanonicalJson(serde_json::Value);
-
-impl<'de> Deserialize<'de> for CanonicalJson {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct Visitor;
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = serde_json::Value;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a JSON value without duplicate object keys")
+fn canonicalize_audit_payload(payload: &str) -> Result<String, StorageError> {
+    let value = agenttalk_orchestration_contracts::json::parse_duplicate_safe_str(payload)
+        .map_err(|error| StorageError::AuditPayloadCanonicalization {
+            reason: error.to_string(),
+        })?;
+    // The frozen contract rule set rejects duplicate keys and non-NFC
+    // strings. Audit payloads add one stricter rule: every number must be a
+    // literal safe integer, not a floating-point representation such as 2.0.
+    reject_non_integer_numbers(&value, "$")?;
+    let canonical =
+        agenttalk_orchestration_contracts::json::canonicalize(&value).map_err(|error| {
+            StorageError::AuditPayloadCanonicalization {
+                reason: error.to_string(),
             }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Bool(value))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Number(value.into()))
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Number(value.into()))
-            }
-
-            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                serde_json::Number::from_f64(value)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| serde::de::Error::custom("invalid JSON number"))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(serde_json::Value::String(value.to_owned()))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::String(value))
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Null)
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(serde_json::Value::Null)
-            }
-
-            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                CanonicalJson::deserialize(deserializer).map(|value| value.0)
-            }
-
-            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<CanonicalJson>()? {
-                    values.push(value.0);
-                }
-                Ok(serde_json::Value::Array(values))
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let mut object = serde_json::Map::new();
-                while let Some((key, value)) = map.next_entry::<String, CanonicalJson>()? {
-                    if object.contains_key(&key) {
-                        return Err(serde::de::Error::custom(format!(
-                            "duplicate object key: {key}"
-                        )));
-                    }
-                    object.insert(key, value.0);
-                }
-                Ok(serde_json::Value::Object(object))
-            }
-        }
-
-        deserializer.deserialize_any(Visitor).map(CanonicalJson)
-    }
+        })?;
+    Ok(String::from_utf8(canonical).expect("RFC 8785 canonical JSON is valid UTF-8"))
 }
 
-fn canonicalize_audit_payload(payload: &str) -> Result<String, StorageError> {
-    let canonical: CanonicalJson = serde_json::from_str(payload)?;
-    Ok(serde_json::to_string(&canonical.0)?)
+fn reject_non_integer_numbers(value: &serde_json::Value, path: &str) -> Result<(), StorageError> {
+    match value {
+        serde_json::Value::Number(number) => {
+            if number.as_i64().is_none() && number.as_u64().is_none() {
+                return Err(StorageError::AuditPayloadCanonicalization {
+                    reason: format!("non-integer number at {path}"),
+                });
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            for (index, item) in values.iter().enumerate() {
+                reject_non_integer_numbers(item, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(object) => {
+            for (key, item) in object {
+                reject_non_integer_numbers(item, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1727,26 +1938,86 @@ mod tests {
                 [hex64('e')],
             )
             .unwrap();
+        store.transition_attempt_to_sealing("node-1").unwrap();
+        use agenttalk_orchestration_contracts::handoff;
+        use serde_json::{Map, Value};
+        let envelope = Value::Object(Map::from_iter([
+            (
+                "schemaVersion".to_owned(),
+                Value::String("agenttalk.handoff.envelope.v1".to_owned()),
+            ),
+            (
+                "handoffId".to_owned(),
+                Value::String(format!("handoff-{}", hex64('0'))),
+            ),
+            ("projectRunId".to_owned(), Value::String("run-1".to_owned())),
+            ("edgeId".to_owned(), Value::String("edge-1".to_owned())),
+            ("from".to_owned(), {
+                Value::Object(Map::from_iter([
+                    ("taskNodeId".to_owned(), Value::String("node-1".to_owned())),
+                    (
+                        "attemptId".to_owned(),
+                        Value::String(outcome.attempt_id.clone()),
+                    ),
+                    (
+                        "executionRunId".to_owned(),
+                        Value::String("exec-run-1".to_owned()),
+                    ),
+                ]))
+            }),
+            ("to".to_owned(), {
+                Value::Object(Map::from_iter([(
+                    "taskNodeId".to_owned(),
+                    Value::String("node-1".to_owned()),
+                )]))
+            }),
+            ("leaseEpoch".to_owned(), Value::from(outcome.lease_epoch)),
+            ("artifactBindings".to_owned(), Value::Array(vec![])),
+        ]));
+        let computed_idempotency = handoff::idempotency_key_hex(&envelope).unwrap();
+        let computed_transfer = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
+        let declaration = hex64('f');
+        let contract = hex64('d');
+        let evidence = hex64('e');
+        let producer_context = hex64('a');
+        let dag = hex64('b');
+        let role = hex64('c');
+        let computed_payload = handoff::delivery_payload_digest_hex(
+            &declaration,
+            &computed_transfer,
+            &contract,
+            &evidence,
+            &producer_context,
+            &dag,
+            &role,
+        )
+        .unwrap();
         let delivery = HandoffDeliveryRecord {
-            delivery_id: "delivery-1".into(),
+            delivery_id: format!("handoff-{}", hex64('0')),
             run_id: "run-1".into(),
             attempt_id: outcome.attempt_id.clone(),
             edge_id: "edge-1".into(),
             lease_epoch: outcome.lease_epoch,
             lease_owner: "worker-a".into(),
             coordinator_generation: 1,
-            declaration_digest: hex64('f'),
-            artifact_transfer_set_digest: hex64('a'),
-            idempotency_key: "key-1".into(),
-            delivery_payload_digest: hex64('b'),
+            envelope_handoff_id: format!("handoff-{}", hex64('0')),
+            from_task_node_id: "node-1".into(),
+            from_execution_run_id: "exec-run-1".into(),
+            to_task_node_id: "node-1".into(),
+            dag_snapshot_digest: dag,
+            role_binding_snapshot_digest: role,
+            declaration_digest: declaration,
+            artifact_transfer_set_digest: computed_transfer,
+            idempotency_key: computed_idempotency,
+            delivery_payload_digest: computed_payload,
             envelope_object_ref: format!("sha256:{}", hex64('c')),
             envelope_raw_sha256: hex64('c'),
             envelope_sha256_jcs: hex64('c'),
-            acceptance_contract_ref: format!("sha256:{}", hex64('d')),
-            acceptance_contract_digest: hex64('d'),
-            acceptance_evidence_ref: format!("sha256:{}", hex64('e')),
-            acceptance_evidence_digest: hex64('e'),
-            producer_context_manifest_digest: "context-1".into(),
+            acceptance_contract_ref: format!("sha256:{contract}"),
+            acceptance_contract_digest: contract,
+            acceptance_evidence_ref: format!("sha256:{evidence}"),
+            acceptance_evidence_digest: evidence,
+            producer_context_manifest_digest: producer_context,
             replay_receipt_json: None,
         };
         assert!(!store
@@ -1997,10 +2268,12 @@ mod tests {
     #[test]
     fn canonical_audit_payload_is_deterministic_and_duplicate_safe() {
         let canonical =
-            canonicalize_audit_payload(" { \"b\": 1, \"a\": [true, null, 2.0] } ").unwrap();
-        assert_eq!(canonical, "{\"a\":[true,null,2.0],\"b\":1}");
+            canonicalize_audit_payload(" { \"b\": 1, \"a\": [true, null, 2] } ").unwrap();
+        assert_eq!(canonical, "{\"a\":[true,null,2],\"b\":1}");
         assert!(canonicalize_audit_payload("{\"a\":1,\"a\":2}").is_err());
         assert!(canonicalize_audit_payload("{not json}").is_err());
+        assert!(canonicalize_audit_payload("{\"a\":2.0}").is_err());
+        assert!(canonicalize_audit_payload("{\"a\":9007199254740992}").is_err());
     }
 
     #[test]

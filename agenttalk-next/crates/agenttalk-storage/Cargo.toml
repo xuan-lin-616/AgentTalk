@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 agenttalk-brief-sealer = { path = "../agenttalk-brief-sealer" }
 agenttalk-domain = { path = "../agenttalk-domain" }
+agenttalk-orchestration-contracts = { path = "../agenttalk-orchestration-contracts" }
 agenttalk-events = { path = "../agenttalk-events" }
 agenttalk-permissions = { path = "../agenttalk-permissions" }
 rusqlite = { version = "0.32", features = ["bundled"] }

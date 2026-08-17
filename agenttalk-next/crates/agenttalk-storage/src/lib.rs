@@ -934,6 +934,8 @@ pub enum StorageError {
     OrchestrationTaskNotReady { node_id: String, status: String },
     #[error("orchestration artifact binding is invalid: {reason}")]
     OrchestrationArtifactBindingInvalid { reason: String },
+    #[error("orchestration audit payload canonicalization failed: {reason}")]
+    AuditPayloadCanonicalization { reason: String },
     #[error("artifact body is not registered: {id}")]
     ArtifactBodyNotFound { id: String },
     #[error("artifact body does not match its registered metadata")]

@@ -138,6 +138,7 @@ dependencies = [
  "agenttalk-brief-sealer",
  "agenttalk-domain",
  "agenttalk-events",
+ "agenttalk-orchestration-contracts",
  "agenttalk-permissions",
  "rusqlite",
  "serde",
