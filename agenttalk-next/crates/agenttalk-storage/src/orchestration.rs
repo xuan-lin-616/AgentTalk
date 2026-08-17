@@ -821,26 +821,72 @@ impl SqliteStore {
         }
 
         let edge = tx
-        .query_row(
-            "SELECT run_id, from_node_id, to_node_id FROM orchestration_edges WHERE edge_id = ?1",
-            [&delivery.edge_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()?
-        .ok_or_else(|| StorageError::StaleLease {
-            attempt_id: delivery.attempt_id.clone(),
-        })?;
+            .query_row(
+                "SELECT run_id, from_node_id, to_node_id, dag_snapshot_digest
+             FROM orchestration_edges WHERE edge_id = ?1",
+                [&delivery.edge_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
         if edge.0 != delivery.run_id
             || edge.1 != attempt.1
             || edge.1 != delivery.from_task_node_id
             || edge.2 != delivery.to_task_node_id
+            || edge.3 != delivery.dag_snapshot_digest
         {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            });
+        }
+        let run_authority = tx.query_row(
+            "SELECT dag_snapshot_digest, role_binding_snapshot_digest
+                 FROM orchestration_runs WHERE run_id = ?1",
+            [&delivery.run_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        if run_authority.0 != delivery.dag_snapshot_digest
+            || run_authority.1 != delivery.role_binding_snapshot_digest
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            });
+        }
+        let role_binding_ok: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM orchestration_role_binding_snapshots
+                 WHERE run_id = ?1 AND digest = ?2 LIMIT 1",
+                params![delivery.run_id, delivery.role_binding_snapshot_digest],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if role_binding_ok.is_none() {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            });
+        }
+        let context_ok: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM orchestration_context_manifest_authorities
+                 WHERE run_id = ?1 AND attempt_id = ?2 AND producer_context_manifest_digest = ?3 LIMIT 1",
+                params![
+                    delivery.run_id,
+                    delivery.attempt_id,
+                    delivery.producer_context_manifest_digest
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if context_ok.is_none() {
             return Err(StorageError::StaleLease {
                 attempt_id: delivery.attempt_id.clone(),
             });
@@ -1927,10 +1973,39 @@ mod tests {
                    edge_id, run_id, from_node_id, to_node_id,
                    dag_snapshot_digest, allowed_consumer_json
                  ) VALUES('edge-1', 'run-1', 'node-1', 'node-1', ?1, '[]')",
-                [hex64('e')],
+                [hex64('b')],
             )
             .unwrap();
         store.transition_attempt_to_sealing("node-1").unwrap();
+        let dag = hex64('b');
+        let role = hex64('c');
+        store
+            .connection
+            .execute(
+                "UPDATE orchestration_runs SET dag_snapshot_digest = ?1, role_binding_snapshot_digest = ?2 WHERE run_id = 'run-1'",
+                params![dag, role],
+            )
+            .unwrap();
+        store
+            .record_role_binding_snapshot(
+                "run-1",
+                "snapshot-1",
+                &role,
+                "role-a",
+                "agent-a",
+                "read-write",
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_context_manifest_authorities(
+                   context_manifest_ref_id, run_id, attempt_id,
+                   producer_context_manifest_digest, sealed_at
+                 ) VALUES('ctx-1','run-1',?1,?2,1)",
+                params![outcome.attempt_id, hex64('a')],
+            )
+            .unwrap();
         let envelope = Value::Object(Map::from_iter([
             (
                 "schemaVersion".to_owned(),
@@ -1971,8 +2046,6 @@ mod tests {
         let contract = cas_sha.clone();
         let evidence = cas_sha.clone();
         let producer_context = hex64('a');
-        let dag = hex64('b');
-        let role = hex64('c');
         let computed_payload = handoff::delivery_payload_digest_hex(
             &declaration,
             &computed_transfer,
@@ -2333,127 +2406,6 @@ mod tests {
         assert!(matches!(
             store.transition_task_ready_to_running("node-1", "exec-run-2", "worker-b"),
             Err(StorageError::OrchestrationTaskNotReady { .. })
-        ));
-    }
-
-    #[test]
-    fn handoff_delivery_replay_and_conflict_are_slot_scoped() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        let outcome = store
-            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
-            .unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT INTO orchestration_edges(
-                   edge_id, run_id, from_node_id, to_node_id,
-                   dag_snapshot_digest, allowed_consumer_json
-                 ) VALUES('edge-1', 'run-1', 'node-1', 'node-1', ?1, '[]')",
-                [hex64('e')],
-            )
-            .unwrap();
-        store.transition_attempt_to_sealing("node-1").unwrap();
-        use agenttalk_orchestration_contracts::handoff;
-        use serde_json::{Map, Value};
-        let envelope = Value::Object(Map::from_iter([
-            (
-                "schemaVersion".to_owned(),
-                Value::String("agenttalk.handoff.envelope.v1".to_owned()),
-            ),
-            (
-                "handoffId".to_owned(),
-                Value::String(format!("handoff-{}", hex64('0'))),
-            ),
-            ("projectRunId".to_owned(), Value::String("run-1".to_owned())),
-            ("edgeId".to_owned(), Value::String("edge-1".to_owned())),
-            ("from".to_owned(), {
-                Value::Object(Map::from_iter([
-                    ("taskNodeId".to_owned(), Value::String("node-1".to_owned())),
-                    (
-                        "attemptId".to_owned(),
-                        Value::String(outcome.attempt_id.clone()),
-                    ),
-                    (
-                        "executionRunId".to_owned(),
-                        Value::String("exec-run-1".to_owned()),
-                    ),
-                ]))
-            }),
-            ("to".to_owned(), {
-                Value::Object(Map::from_iter([(
-                    "taskNodeId".to_owned(),
-                    Value::String("node-1".to_owned()),
-                )]))
-            }),
-            ("leaseEpoch".to_owned(), Value::from(outcome.lease_epoch)),
-            ("artifactBindings".to_owned(), Value::Array(vec![])),
-        ]));
-        let computed_idempotency = handoff::idempotency_key_hex(&envelope).unwrap();
-        let computed_transfer = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
-        let cas_sha = hex_digest(&[0u8; 32]);
-        let declaration = hex64('f');
-        let contract = cas_sha.clone();
-        let evidence = cas_sha.clone();
-        let producer_context = hex64('a');
-        let dag = hex64('b');
-        let role = hex64('c');
-        let computed_payload = handoff::delivery_payload_digest_hex(
-            &declaration,
-            &computed_transfer,
-            &contract,
-            &evidence,
-            &producer_context,
-            &dag,
-            &role,
-        )
-        .unwrap();
-        let cas = TestCas;
-        let delivery = HandoffDeliveryRecord {
-            delivery_id: format!("handoff-{}", hex64('0')),
-            run_id: "run-1".into(),
-            attempt_id: outcome.attempt_id.clone(),
-            edge_id: "edge-1".into(),
-            lease_epoch: outcome.lease_epoch,
-            lease_owner: "worker-a".into(),
-            coordinator_generation: 1,
-            envelope_handoff_id: format!("handoff-{}", hex64('0')),
-            from_task_node_id: "node-1".into(),
-            from_execution_run_id: "exec-run-1".into(),
-            to_task_node_id: "node-1".into(),
-            dag_snapshot_digest: dag,
-            role_binding_snapshot_digest: role,
-            declaration_digest: declaration,
-            artifact_transfer_set_digest: computed_transfer,
-            idempotency_key: computed_idempotency,
-            delivery_payload_digest: computed_payload,
-            envelope_object_ref: format!("sha256:{cas_sha}"),
-            envelope_raw_sha256: cas_sha.clone(),
-            envelope_sha256_jcs: cas_sha,
-            acceptance_contract_ref: format!("sha256:{contract}"),
-            acceptance_contract_digest: contract,
-            acceptance_evidence_ref: format!("sha256:{evidence}"),
-            acceptance_evidence_digest: evidence,
-            producer_context_manifest_digest: producer_context,
-            replay_receipt_json: None,
-        };
-        assert!(!store
-            .record_handoff_delivery(delivery.clone(), &[], &cas)
-            .unwrap());
-        assert!(store
-            .record_handoff_delivery(delivery.clone(), &[], &cas)
-            .unwrap());
-        let mut conflicting = delivery;
-        conflicting.delivery_payload_digest = "different".into();
-        assert!(matches!(
-            store.record_handoff_delivery(conflicting, &[], &cas),
-            Err(StorageError::HandoffDeliveryConflict { .. })
         ));
     }
 

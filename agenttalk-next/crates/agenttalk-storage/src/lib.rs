@@ -508,21 +508,23 @@ const MIGRATION_V15_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS orchestration_runs (
   run_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending','running','awaiting_approval','cancelling','completed','failed','cancelled')),
+  status TEXT NOT NULL,
   version INTEGER NOT NULL,
   brief_snapshot_id TEXT NOT NULL,
   brief_tree_digest TEXT NOT NULL,
   dag_snapshot_digest TEXT NOT NULL,
   role_binding_snapshot_digest TEXT NOT NULL,
   coordinator_generation INTEGER NOT NULL DEFAULT 1,
-  terminal_reason TEXT
+  terminal_reason TEXT,
+  UNIQUE(run_id, coordinator_generation),
+  UNIQUE(brief_snapshot_id)
 );
 CREATE TABLE IF NOT EXISTS orchestration_task_nodes (
   node_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   node_key TEXT NOT NULL,
   required INTEGER NOT NULL CHECK(required IN (0, 1)),
-  status TEXT NOT NULL CHECK(status IN ('pending','ready','blocked','leased','running','completed','failed','cancelled')),
+  status TEXT NOT NULL,
   version INTEGER NOT NULL,
   active_attempt_id TEXT,
   attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -539,7 +541,7 @@ CREATE TABLE IF NOT EXISTS orchestration_task_attempts (
   node_id TEXT NOT NULL,
   attempt_no INTEGER NOT NULL,
   from_execution_run_id TEXT,
-  status TEXT NOT NULL CHECK(status IN ('leased','running','completed','failed','cancelled')),
+  status TEXT NOT NULL,
   lease_epoch INTEGER NOT NULL DEFAULT 0,
   artifact_set_digest TEXT,
   acceptance_evidence_digest TEXT,
@@ -552,7 +554,7 @@ CREATE TABLE IF NOT EXISTS orchestration_milestones (
   run_id TEXT NOT NULL,
   milestone_key TEXT NOT NULL,
   required INTEGER NOT NULL CHECK(required IN (0, 1)),
-  status TEXT NOT NULL CHECK(status IN ('awaiting_approval','approved','rejected')),
+  status TEXT NOT NULL,
   version INTEGER NOT NULL,
   brief_tree_digest TEXT,
   presented_artifact_set_digest TEXT,
@@ -580,25 +582,20 @@ CREATE TABLE IF NOT EXISTS orchestration_edge_ports (
 CREATE TABLE IF NOT EXISTS orchestration_artifact_bindings (
   binding_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  delivery_id TEXT NOT NULL,
-  edge_port_id TEXT NOT NULL,
-  source_output_port_id TEXT NOT NULL,
-  target_input_port_id TEXT NOT NULL,
+  delivery_id TEXT,
+  edge_port_id TEXT,
   object_ref TEXT NOT NULL,
   sha256 TEXT NOT NULL,
-  size INTEGER NOT NULL CHECK(size >= 0),
-  content_schema_id TEXT NOT NULL,
-  content_schema_version TEXT NOT NULL,
-  content_schema_digest TEXT NOT NULL,
-  normalized_content_type TEXT NOT NULL,
-  normalized_content_type_policy_version TEXT NOT NULL,
-  content_schema_ref_json TEXT NOT NULL CHECK(json_valid(content_schema_ref_json)),
+  size INTEGER NOT NULL,
+  normalized_content_type TEXT,
+  normalized_content_type_policy_version TEXT,
+  content_schema_ref_json TEXT,
   UNIQUE(delivery_id, edge_port_id)
 );
 CREATE TABLE IF NOT EXISTS orchestration_role_binding_snapshots (
   role_binding_snapshot_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
-  digest TEXT NOT NULL,
+  digest TEXT NOT NULL UNIQUE,
   sealed_at INTEGER NOT NULL,
   role_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
@@ -611,7 +608,7 @@ CREATE TABLE IF NOT EXISTS orchestration_human_receipts (
   milestone_id TEXT NOT NULL,
   request_id TEXT NOT NULL,
   semantic_payload_hash TEXT NOT NULL,
-  decision TEXT NOT NULL CHECK(decision IN ('approve','reject')),
+  decision TEXT NOT NULL,
   expected_version INTEGER NOT NULL,
   brief_tree_digest TEXT NOT NULL,
   presented_artifact_set_digest TEXT NOT NULL,
@@ -629,7 +626,7 @@ CREATE TABLE IF NOT EXISTS orchestration_leases (
   heartbeat_at INTEGER NOT NULL,
   deadline INTEGER NOT NULL,
   coordinator_generation INTEGER NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('active','expired','released','fenced')),
+  status TEXT NOT NULL,
   PRIMARY KEY(attempt_id, lease_epoch, coordinator_generation)
 );
 CREATE TABLE IF NOT EXISTS orchestration_handoff_deliveries (
@@ -638,14 +635,6 @@ CREATE TABLE IF NOT EXISTS orchestration_handoff_deliveries (
   attempt_id TEXT NOT NULL,
   edge_id TEXT NOT NULL,
   lease_epoch INTEGER NOT NULL,
-  envelope_handoff_id TEXT NOT NULL,
-  from_task_node_id TEXT NOT NULL,
-  from_execution_run_id TEXT NOT NULL,
-  to_task_node_id TEXT NOT NULL,
-  lease_owner TEXT NOT NULL,
-  coordinator_generation INTEGER NOT NULL,
-  dag_snapshot_digest TEXT NOT NULL,
-  role_binding_snapshot_digest TEXT NOT NULL,
   declaration_digest TEXT NOT NULL,
   artifact_transfer_set_digest TEXT NOT NULL,
   idempotency_key TEXT NOT NULL,
@@ -701,6 +690,50 @@ BEFORE DELETE ON orchestration_audit_events
 BEGIN
   SELECT RAISE(ABORT, 'orchestration_audit_events is append-only');
 END;
+
+ALTER TABLE orchestration_runs RENAME TO orchestration_runs_v15;
+CREATE TABLE orchestration_runs (
+  run_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','running','awaiting_approval','cancelling','completed','failed','cancelled')),
+  version INTEGER NOT NULL,
+  brief_snapshot_id TEXT NOT NULL,
+  brief_tree_digest TEXT NOT NULL,
+  dag_snapshot_digest TEXT NOT NULL,
+  role_binding_snapshot_digest TEXT NOT NULL,
+  coordinator_generation INTEGER NOT NULL DEFAULT 1,
+  terminal_reason TEXT
+);
+INSERT INTO orchestration_runs(
+  run_id, project_id, status, version, brief_snapshot_id,
+  brief_tree_digest, dag_snapshot_digest, role_binding_snapshot_digest,
+  coordinator_generation, terminal_reason
+)
+SELECT run_id, project_id, status, version, brief_snapshot_id,
+  brief_tree_digest, dag_snapshot_digest, role_binding_snapshot_digest,
+  coordinator_generation, terminal_reason
+FROM orchestration_runs_v15;
+DROP TABLE orchestration_runs_v15;
+
+ALTER TABLE orchestration_role_binding_snapshots RENAME TO orchestration_role_binding_snapshots_v15;
+CREATE TABLE orchestration_role_binding_snapshots (
+  role_binding_snapshot_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  sealed_at INTEGER NOT NULL,
+  role_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  workspace_access TEXT NOT NULL,
+  UNIQUE(run_id, role_id, agent_id)
+);
+INSERT INTO orchestration_role_binding_snapshots(
+  role_binding_snapshot_id, run_id, digest, sealed_at,
+  role_id, agent_id, workspace_access
+)
+SELECT role_binding_snapshot_id, run_id, digest, sealed_at,
+  role_id, agent_id, workspace_access
+FROM orchestration_role_binding_snapshots_v15;
+DROP TABLE orchestration_role_binding_snapshots_v15;
 
 ALTER TABLE orchestration_task_nodes RENAME TO orchestration_task_nodes_v15;
 CREATE TABLE orchestration_task_nodes (
@@ -807,6 +840,56 @@ SELECT
 FROM orchestration_milestones_v15;
 DROP TRIGGER orchestration_milestones_v15_guard;
 DROP TABLE orchestration_milestones_v15;
+
+DROP TABLE orchestration_handoff_deliveries;
+CREATE TABLE orchestration_handoff_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  edge_id TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL,
+  envelope_handoff_id TEXT NOT NULL,
+  from_task_node_id TEXT NOT NULL,
+  from_execution_run_id TEXT NOT NULL,
+  to_task_node_id TEXT NOT NULL,
+  lease_owner TEXT NOT NULL,
+  coordinator_generation INTEGER NOT NULL,
+  dag_snapshot_digest TEXT NOT NULL,
+  role_binding_snapshot_digest TEXT NOT NULL,
+  declaration_digest TEXT NOT NULL,
+  artifact_transfer_set_digest TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  delivery_payload_digest TEXT NOT NULL,
+  envelope_object_ref TEXT NOT NULL,
+  envelope_raw_sha256 TEXT NOT NULL,
+  envelope_sha256_jcs TEXT NOT NULL,
+  acceptance_contract_ref TEXT NOT NULL,
+  acceptance_contract_digest TEXT NOT NULL,
+  acceptance_evidence_ref TEXT NOT NULL,
+  acceptance_evidence_digest TEXT NOT NULL,
+  producer_context_manifest_digest TEXT NOT NULL,
+  replay_receipt_json TEXT,
+  UNIQUE(attempt_id, edge_id, lease_epoch)
+);
+DROP TABLE orchestration_artifact_bindings;
+CREATE TABLE orchestration_artifact_bindings (
+  binding_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL,
+  edge_port_id TEXT NOT NULL,
+  source_output_port_id TEXT NOT NULL,
+  target_input_port_id TEXT NOT NULL,
+  object_ref TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL CHECK(size >= 0),
+  content_schema_id TEXT NOT NULL,
+  content_schema_version TEXT NOT NULL,
+  content_schema_digest TEXT NOT NULL,
+  normalized_content_type TEXT NOT NULL,
+  normalized_content_type_policy_version TEXT NOT NULL,
+  content_schema_ref_json TEXT NOT NULL CHECK(json_valid(content_schema_ref_json)),
+  UNIQUE(delivery_id, edge_port_id)
+);
 "#;
 
 /// Non-secret durable ACP binding metadata. It deliberately has no path,
@@ -1782,6 +1865,29 @@ impl SqliteStore {
                 detail: format!(
                     "milestone {milestone_id} has an unmappable v15 status or NULL sealed digest"
                 ),
+            });
+        }
+        let handoff_rows: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_handoff_deliveries",
+            [],
+            |row| row.get(0),
+        )?;
+        if handoff_rows > 0 {
+            return Err(StorageError::MigrationInvalidV15State {
+                detail:
+                    "v15 handoff deliveries exist and cannot derive authority columns automatically"
+                        .into(),
+            });
+        }
+        let artifact_rows: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_artifact_bindings",
+            [],
+            |row| row.get(0),
+        )?;
+        if artifact_rows > 0 {
+            return Err(StorageError::MigrationInvalidV15State {
+                detail: "v15 artifact bindings exist and cannot derive sealed binding columns automatically"
+                    .into(),
             });
         }
         Ok(())
