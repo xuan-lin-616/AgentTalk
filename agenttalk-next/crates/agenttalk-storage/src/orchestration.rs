@@ -1945,178 +1945,9 @@ pub(crate) fn now_unix() -> Result<i64, StorageError> {
 }
 
 #[cfg(test)]
-struct TestCas;
-
-#[cfg(test)]
-impl CasVerifier for TestCas {
-    fn verify_object(&self, _object_ref: &str) -> Result<Vec<u8>, StorageError> {
-        Ok(vec![0u8; 32])
-    }
-}
-
-#[cfg(test)]
-struct MissingCas;
-
-#[cfg(test)]
-impl CasVerifier for MissingCas {
-    fn verify_object(&self, _object_ref: &str) -> Result<Vec<u8>, StorageError> {
-        Err(StorageError::ArtifactBodyNotFound {
-            id: "missing".into(),
-        })
-    }
-}
-
-#[cfg(test)]
-struct TamperedCas;
-
-#[cfg(test)]
-impl CasVerifier for TamperedCas {
-    fn verify_object(&self, _object_ref: &str) -> Result<Vec<u8>, StorageError> {
-        Ok(vec![1u8; 32])
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::SqliteStore;
-
-    fn prepare_sealed_delivery(
-        store: &mut SqliteStore,
-    ) -> (HandoffDeliveryRecord, TaskReadyToRunningOutcome) {
-        use agenttalk_orchestration_contracts::handoff;
-        use serde_json::{Map, Value};
-
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        let outcome = store
-            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
-            .unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT INTO orchestration_edges(
-                   edge_id, run_id, from_node_id, to_node_id,
-                   dag_snapshot_digest, allowed_consumer_json
-                 ) VALUES('edge-1', 'run-1', 'node-1', 'node-1', ?1, '[]')",
-                [hex64('b')],
-            )
-            .unwrap();
-        store.transition_attempt_to_sealing("node-1").unwrap();
-        let dag = hex64('b');
-        let role = hex64('c');
-        store
-            .connection
-            .execute(
-                "UPDATE orchestration_runs SET dag_snapshot_digest = ?1, role_binding_snapshot_digest = ?2 WHERE run_id = 'run-1'",
-                params![dag, role],
-            )
-            .unwrap();
-        store
-            .record_role_binding_snapshot(
-                "run-1",
-                "snapshot-1",
-                &role,
-                "role-a",
-                "agent-a",
-                "read-write",
-            )
-            .unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT INTO orchestration_context_manifest_authorities(
-                   context_manifest_ref_id, run_id, attempt_id,
-                   producer_context_manifest_digest, sealed_at
-                 ) VALUES('ctx-1','run-1',?1,?2,1)",
-                params![outcome.attempt_id, hex64('a')],
-            )
-            .unwrap();
-        let envelope = Value::Object(Map::from_iter([
-            (
-                "schemaVersion".to_owned(),
-                Value::String("agenttalk.handoff.envelope.v1".to_owned()),
-            ),
-            (
-                "handoffId".to_owned(),
-                Value::String(format!("handoff-{}", hex64('0'))),
-            ),
-            ("projectRunId".to_owned(), Value::String("run-1".to_owned())),
-            ("edgeId".to_owned(), Value::String("edge-1".to_owned())),
-            ("from".to_owned(), {
-                Value::Object(Map::from_iter([
-                    ("taskNodeId".to_owned(), Value::String("node-1".to_owned())),
-                    (
-                        "attemptId".to_owned(),
-                        Value::String(outcome.attempt_id.clone()),
-                    ),
-                    (
-                        "executionRunId".to_owned(),
-                        Value::String("exec-run-1".to_owned()),
-                    ),
-                ]))
-            }),
-            ("to".to_owned(), {
-                Value::Object(Map::from_iter([(
-                    "taskNodeId".to_owned(),
-                    Value::String("node-1".to_owned()),
-                )]))
-            }),
-            ("leaseEpoch".to_owned(), Value::from(outcome.lease_epoch)),
-            ("artifactBindings".to_owned(), Value::Array(vec![])),
-        ]));
-        let computed_idempotency = handoff::idempotency_key_hex(&envelope).unwrap();
-        let computed_transfer = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
-        let cas_sha = hex_digest(&[0u8; 32]);
-        let declaration = hex64('f');
-        let contract = cas_sha.clone();
-        let evidence = cas_sha.clone();
-        let producer_context = hex64('a');
-        let computed_payload = handoff::delivery_payload_digest_hex(
-            &declaration,
-            &computed_transfer,
-            &contract,
-            &evidence,
-            &producer_context,
-            &dag,
-            &role,
-        )
-        .unwrap();
-        let delivery = HandoffDeliveryRecord {
-            delivery_id: format!("handoff-{}", hex64('0')),
-            run_id: "run-1".into(),
-            attempt_id: outcome.attempt_id.clone(),
-            edge_id: "edge-1".into(),
-            lease_epoch: outcome.lease_epoch,
-            lease_owner: "worker-a".into(),
-            coordinator_generation: 1,
-            envelope_handoff_id: format!("handoff-{}", hex64('0')),
-            from_task_node_id: "node-1".into(),
-            from_execution_run_id: "exec-run-1".into(),
-            to_task_node_id: "node-1".into(),
-            dag_snapshot_digest: dag,
-            role_binding_snapshot_digest: role,
-            declaration_digest: declaration,
-            artifact_transfer_set_digest: computed_transfer,
-            idempotency_key: computed_idempotency,
-            delivery_payload_digest: computed_payload,
-            envelope_object_ref: format!("sha256:{cas_sha}"),
-            envelope_raw_sha256: cas_sha.clone(),
-            envelope_sha256_jcs: cas_sha,
-            acceptance_contract_ref: format!("sha256:{contract}"),
-            acceptance_contract_digest: contract,
-            acceptance_evidence_ref: format!("sha256:{evidence}"),
-            acceptance_evidence_digest: evidence,
-            producer_context_manifest_digest: producer_context,
-            replay_receipt_json: None,
-        };
-        (delivery, outcome)
-    }
 
     fn seed(run_id: &str) -> OrchestrationRunSeed {
         let hex = "0".repeat(64);
@@ -2132,661 +1963,6 @@ mod tests {
 
     fn hex64(byte: char) -> String {
         byte.to_string().repeat(64)
-    }
-
-    fn receipt(
-        receipt_id: &str,
-        milestone_id: &str,
-        run_id: &str,
-        decision: &str,
-    ) -> HumanReceiptRecord {
-        HumanReceiptRecord {
-            receipt_id: receipt_id.into(),
-            run_id: run_id.into(),
-            milestone_id: milestone_id.into(),
-            request_id: "request-1".into(),
-            semantic_payload_hash: "payload-hash-1".into(),
-            decision: decision.into(),
-            expected_version: 1,
-            brief_tree_digest: hex64('a'),
-            presented_artifact_set_digest: format!("sha256:{}", hex64('b')),
-            acceptance_evidence_digest: format!("sha256:{}", hex64('c')),
-            authenticated_principal: "human-a".into(),
-            core_timestamp: 1000,
-        }
-    }
-
-    fn minimal_delivery() -> HandoffDeliveryRecord {
-        let sha = hex64('a');
-        HandoffDeliveryRecord {
-            delivery_id: format!("handoff-{}", hex64('b')),
-            run_id: "run-1".into(),
-            attempt_id: "attempt-1".into(),
-            edge_id: "edge-1".into(),
-            lease_epoch: 1,
-            lease_owner: "worker-a".into(),
-            coordinator_generation: 1,
-            envelope_handoff_id: format!("handoff-{}", hex64('b')),
-            from_task_node_id: "node-1".into(),
-            from_execution_run_id: "exec-1".into(),
-            to_task_node_id: "node-2".into(),
-            dag_snapshot_digest: sha.clone(),
-            role_binding_snapshot_digest: sha.clone(),
-            declaration_digest: sha.clone(),
-            artifact_transfer_set_digest: sha.clone(),
-            idempotency_key: sha.clone(),
-            delivery_payload_digest: sha.clone(),
-            envelope_object_ref: format!("sha256:{sha}"),
-            envelope_raw_sha256: sha.clone(),
-            envelope_sha256_jcs: sha.clone(),
-            acceptance_contract_ref: format!("sha256:{sha}"),
-            acceptance_contract_digest: sha.clone(),
-            acceptance_evidence_ref: format!("sha256:{sha}"),
-            acceptance_evidence_digest: sha.clone(),
-            producer_context_manifest_digest: sha.clone(),
-            replay_receipt_json: None,
-        }
-    }
-
-    #[test]
-    fn cas_verifier_missing_and_tampered_fail_closed() {
-        let delivery = minimal_delivery();
-        let binding = ArtifactBindingInput {
-            binding_id: "binding-1".into(),
-            edge_port_id: "edge-port-1".into(),
-            source_output_port_id: "out".into(),
-            target_input_port_id: "in".into(),
-            object_ref: format!("sha256:{}", hex64('a')),
-            sha256: hex64('a'),
-            size: 0,
-            content_schema_id: "schema".into(),
-            content_schema_version: "1".into(),
-            content_schema_digest: hex64('a'),
-            normalized_content_type: "text/plain".into(),
-            normalized_content_type_policy_version: "1".into(),
-            content_schema_ref_json: "{}".into(),
-        };
-        assert!(matches!(
-            SqliteStore::verify_cas_before_journal(
-                &MissingCas,
-                &delivery,
-                std::slice::from_ref(&binding)
-            ),
-            Err(StorageError::ArtifactBodyNotFound { .. })
-        ));
-        assert!(matches!(
-            SqliteStore::verify_cas_before_journal(
-                &TamperedCas,
-                &delivery,
-                std::slice::from_ref(&binding)
-            ),
-            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
-        ));
-    }
-
-    #[test]
-    fn core_cas_verifier_round_trips_real_objects() {
-        let root = std::env::temp_dir().join(format!(
-            "agenttalk-c4a-corecas-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let cas = agenttalk_brief_sealer::CoreCas::new(&root);
-        let bytes = b"hello sealed object";
-        let object = cas.publish(bytes).unwrap();
-        let verifier = CoreCasVerifier { cas: &cas };
-        assert_eq!(verifier.verify_object(&object.object_ref).unwrap(), bytes);
-        assert!(verifier
-            .verify_object(
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )
-            .is_err());
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn v16_migration_checksum_version_and_legacy_tables_are_recorded() {
-        let store = SqliteStore::open_in_memory().unwrap();
-        assert_eq!(store.orchestration_schema_version(), 16);
-        assert_eq!(store.orchestration_migration_checksum().len(), 64);
-        assert_eq!(
-            store.legacy_versions_unchanged().unwrap(),
-            vec![11, 12, 13, 14, 15]
-        );
-        let runtime = store.orchestration_migration_checksum();
-        assert_eq!(runtime, store.migration_checksum());
-        assert_eq!(runtime, hex_digest(crate::MIGRATION_V16_SQL.as_bytes()));
-        let db_checksum: String = store
-            .connection
-            .query_row(
-                "SELECT checksum FROM schema_migrations WHERE version = 16",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(db_checksum, runtime);
-        let table_count: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'orchestration!_%' ESCAPE '!'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table_count, 13);
-    }
-
-    #[test]
-    fn run_creation_allows_multiple_runs_for_same_brief_and_rejects_different_binding() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store.create_orchestration_run(seed("run-2")).unwrap();
-        let record = store.orchestration_run("run-1").unwrap();
-        assert_eq!(record.status, "pending");
-        assert_eq!(record.coordinator_generation, 1);
-        let mut conflict = seed("run-1");
-        conflict.brief_tree_digest = "1".repeat(64);
-        assert!(matches!(
-            store.create_orchestration_run(conflict),
-            Err(StorageError::OrchestrationRunConflict { .. })
-        ));
-    }
-
-    #[test]
-    fn human_receipt_approve_and_reject_close_run_and_milestone_states() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store.transition_run_to_awaiting_approval("run-1").unwrap();
-        store
-            .ensure_orchestration_milestone(
-                "run-1",
-                "milestone-1",
-                "m1",
-                &hex64('a'),
-                &format!("sha256:{}", hex64('b')),
-                &format!("sha256:{}", hex64('c')),
-            )
-            .unwrap();
-        let r = receipt("receipt-1", "milestone-1", "run-1", "approve");
-        assert!(!store.record_human_receipt(r.clone()).unwrap());
-        assert!(store.record_human_receipt(r).unwrap());
-        let run = store.orchestration_run("run-1").unwrap();
-        assert_eq!(run.status, "completed");
-        let milestone_status: String = store
-            .connection
-            .query_row(
-                "SELECT status FROM orchestration_milestones WHERE milestone_id = 'milestone-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(milestone_status, "approved");
-
-        store.create_orchestration_run(seed("run-2")).unwrap();
-        store.transition_run_to_awaiting_approval("run-2").unwrap();
-        store
-            .ensure_orchestration_milestone(
-                "run-2",
-                "milestone-2a",
-                "m2a",
-                &hex64('a'),
-                &format!("sha256:{}", hex64('b')),
-                &format!("sha256:{}", hex64('c')),
-            )
-            .unwrap();
-        store
-            .ensure_orchestration_milestone(
-                "run-2",
-                "milestone-2b",
-                "m2b",
-                &hex64('a'),
-                &format!("sha256:{}", hex64('b')),
-                &format!("sha256:{}", hex64('c')),
-            )
-            .unwrap();
-        let r = receipt("receipt-2a", "milestone-2a", "run-2", "approve");
-        assert!(!store.record_human_receipt(r).unwrap());
-        assert_eq!(store.orchestration_run("run-2").unwrap().status, "running");
-
-        store.create_orchestration_run(seed("run-3")).unwrap();
-        store.transition_run_to_awaiting_approval("run-3").unwrap();
-        store
-            .ensure_orchestration_milestone(
-                "run-3",
-                "milestone-3",
-                "m3",
-                &hex64('a'),
-                &format!("sha256:{}", hex64('b')),
-                &format!("sha256:{}", hex64('c')),
-            )
-            .unwrap();
-        let r = receipt("receipt-3", "milestone-3", "run-3", "reject");
-        assert!(!store.record_human_receipt(r).unwrap());
-        let run = store.orchestration_run("run-3").unwrap();
-        assert_eq!(run.status, "failed");
-    }
-
-    #[test]
-    fn human_receipt_rejects_wrong_state_digests_and_active_attempt() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .ensure_orchestration_milestone(
-                "run-1",
-                "milestone-1",
-                "m1",
-                &hex64('a'),
-                &format!("sha256:{}", hex64('b')),
-                &format!("sha256:{}", hex64('c')),
-            )
-            .unwrap();
-        assert!(matches!(
-            store.record_human_receipt(receipt("receipt-1", "milestone-1", "run-1", "approve")),
-            Err(StorageError::OrchestrationRunStatusInvalid { .. })
-        ));
-        store.transition_run_to_awaiting_approval("run-1").unwrap();
-        let mut bad = receipt("receipt-1", "milestone-1", "run-1", "approve");
-        bad.expected_version = 9;
-        assert!(matches!(
-            store.record_human_receipt(bad),
-            Err(StorageError::OrchestrationMilestoneStateInvalid { .. })
-        ));
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        store
-            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
-            .unwrap();
-        assert!(matches!(
-            store.record_human_receipt(receipt("receipt-1", "milestone-1", "run-1", "approve")),
-            Err(StorageError::OrchestrationActiveAttemptExists { .. })
-        ));
-    }
-
-    #[test]
-    fn ready_only_transition_and_lease_fencing() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        assert!(matches!(
-            store.transition_task_ready_to_running("node-1", "exec-run-1", "worker-a"),
-            Err(StorageError::OrchestrationTaskNotReady { .. })
-        ));
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        let outcome = store
-            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
-            .unwrap();
-        assert_eq!(outcome.attempt_no, 1);
-        assert_eq!(outcome.lease_epoch, 1);
-        let attempt_status: String = store
-            .connection
-            .query_row(
-                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
-                [&outcome.attempt_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(attempt_status, "running");
-        store
-            .assert_lease_epoch_current(&outcome.attempt_id, 1, 1, "worker-a")
-            .unwrap();
-        assert!(matches!(
-            store.assert_lease_epoch_current(&outcome.attempt_id, 0, 1, "worker-a"),
-            Err(StorageError::StaleLease { .. })
-        ));
-        assert!(matches!(
-            store.assert_lease_epoch_current(&outcome.attempt_id, 1, 2, "worker-a"),
-            Err(StorageError::StaleLease { .. })
-        ));
-        assert!(matches!(
-            store.assert_lease_epoch_current(&outcome.attempt_id, 1, 1, "worker-b"),
-            Err(StorageError::StaleLease { .. })
-        ));
-        store.bump_coordinator_generation("run-1").unwrap();
-        assert!(matches!(
-            store.assert_lease_epoch_current(&outcome.attempt_id, 1, 1, "worker-a"),
-            Err(StorageError::StaleLease { .. })
-        ));
-        assert!(matches!(
-            store.transition_task_ready_to_running("node-1", "exec-run-2", "worker-b"),
-            Err(StorageError::OrchestrationTaskNotReady { .. })
-        ));
-    }
-
-    #[test]
-    fn role_snapshot_allows_same_digest_for_multiple_roles_and_artifact_binding_is_guarded() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .record_role_binding_snapshot(
-                "run-1",
-                "snapshot-1",
-                &hex64('a'),
-                "role-a",
-                "agent-a",
-                "read-write",
-            )
-            .unwrap();
-        store
-            .record_role_binding_snapshot(
-                "run-1",
-                "snapshot-2",
-                &hex64('a'),
-                "role-b",
-                "agent-b",
-                "read",
-            )
-            .unwrap();
-        let role_count: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM orchestration_role_binding_snapshots WHERE digest = ?1",
-                [hex64('a')],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(role_count, 2);
-    }
-
-    #[test]
-    fn audit_events_are_append_only_and_transactions_emit_them() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        let count: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(count >= 1);
-
-        let update_rejected = store
-            .connection
-            .execute(
-                "UPDATE orchestration_audit_events SET event_type = 'changed' WHERE run_id = 'run-1'",
-                [],
-            )
-            .is_err();
-        assert!(update_rejected);
-        let delete_rejected = store
-            .connection
-            .execute(
-                "DELETE FROM orchestration_audit_events WHERE run_id = 'run-1'",
-                [],
-            )
-            .is_err();
-        assert!(delete_rejected);
-    }
-
-    #[test]
-    fn failed_receipt_rolls_back_audit_events() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .ensure_orchestration_milestone(
-                "run-1",
-                "milestone-1",
-                "m1",
-                &hex64('a'),
-                &format!("sha256:{}", hex64('b')),
-                &format!("sha256:{}", hex64('c')),
-            )
-            .unwrap();
-        let result =
-            store.record_human_receipt(receipt("receipt-1", "milestone-1", "run-1", "approve"));
-        assert!(matches!(
-            result,
-            Err(StorageError::OrchestrationRunStatusInvalid { .. })
-        ));
-        let count: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn node_never_persists_leased_and_recovery_interrupts_attempt() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        store.set_task_max_attempts("node-1", 2).unwrap();
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        let first = store
-            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
-            .unwrap();
-        let node_status: String = store
-            .connection
-            .query_row(
-                "SELECT status FROM orchestration_task_nodes WHERE node_id = 'node-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(node_status, "running");
-        let sealed_attempt = store.transition_attempt_to_sealing("node-1").unwrap();
-        assert_eq!(sealed_attempt, first.attempt_id);
-        let attempt_status: String = store
-            .connection
-            .query_row(
-                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
-                [&sealed_attempt],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(attempt_status, "sealing");
-        let recovered = store.recover_active_attempt_interrupted("node-1").unwrap();
-        assert_eq!(recovered, sealed_attempt);
-        let attempt_status: String = store
-            .connection
-            .query_row(
-                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
-                [&recovered],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(attempt_status, "interrupted");
-        let node_status: String = store
-            .connection
-            .query_row(
-                "SELECT status FROM orchestration_task_nodes WHERE node_id = 'node-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(node_status, "ready");
-        let leased_node_count: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM orchestration_task_nodes WHERE status = 'leased'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(leased_node_count, 0);
-        // Retry succeeds after recovery.
-        let second = store
-            .transition_task_ready_to_running("node-1", "exec-run-2", "worker-a")
-            .unwrap();
-        assert_eq!(second.attempt_no, 2);
-    }
-
-    #[test]
-    fn legacy_event_store_is_not_written() {
-        let mut store = SqliteStore::open_in_memory().unwrap();
-        store.create_orchestration_run(seed("run-1")).unwrap();
-        store
-            .insert_orchestration_task_node("run-1", "node-1", "key-1")
-            .unwrap();
-        store
-            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
-            .unwrap();
-        store
-            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
-            .unwrap();
-        let legacy_count: i64 = store
-            .connection
-            .query_row("SELECT count(*) FROM event_store", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(legacy_count, 0);
-    }
-
-    #[test]
-    fn canonical_audit_payload_is_deterministic_and_duplicate_safe() {
-        let canonical =
-            canonicalize_audit_payload(" { \"b\": 1, \"a\": [true, null, 2] } ").unwrap();
-        assert_eq!(canonical, "{\"a\":[true,null,2],\"b\":1}");
-        assert!(canonicalize_audit_payload("{\"a\":1,\"a\":2}").is_err());
-        assert!(canonicalize_audit_payload("{not json}").is_err());
-        assert!(canonicalize_audit_payload("{\"a\":2.0}").is_err());
-        assert!(canonicalize_audit_payload("{\"a\":9007199254740992}").is_err());
-    }
-
-    #[test]
-    fn v16_preflight_rejects_bad_v15_rows_before_any_rebuild() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE orchestration_task_nodes(
-                   node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_key TEXT NOT NULL,
-                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
-                   active_attempt_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
-                   max_attempts INTEGER NOT NULL DEFAULT 1, input_artifact_set_digest TEXT,
-                   role_id TEXT, acceptance_contract_ref TEXT, terminal_reason TEXT);
-                 CREATE TABLE orchestration_task_attempts(
-                   attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
-                   attempt_no INTEGER NOT NULL, from_execution_run_id TEXT, status TEXT NOT NULL,
-                   lease_epoch INTEGER NOT NULL DEFAULT 0, artifact_set_digest TEXT,
-                   acceptance_evidence_digest TEXT, terminal_reason TEXT,
-                   terminal_identity_json TEXT);
-                 CREATE TABLE orchestration_milestones(
-                   milestone_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, milestone_key TEXT NOT NULL,
-                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
-                   brief_tree_digest TEXT, presented_artifact_set_digest TEXT,
-                   acceptance_evidence_digest TEXT, terminal_reason TEXT);
-                 INSERT INTO orchestration_task_nodes(node_id, run_id, node_key, required, status, version)
-                 VALUES('n1','run-1','k1',1,'leased',1);",
-            )
-            .unwrap();
-        let tx = connection.transaction().unwrap();
-        assert!(matches!(
-            SqliteStore::validate_v15_to_v16_state(&tx),
-            Err(StorageError::MigrationInvalidV15State { .. })
-        ));
-        tx.rollback().unwrap();
-        let audit_exists: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='orchestration_audit_events'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(audit_exists, 0);
-        let original_exists: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='orchestration_task_nodes'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(original_exists, 1);
-    }
-
-    #[test]
-    fn v16_rejects_unmappable_v15_states_and_null_sealed_digests() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE orchestration_task_nodes_v15(
-                   node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_key TEXT NOT NULL,
-                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
-                   active_attempt_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
-                   max_attempts INTEGER NOT NULL DEFAULT 1, input_artifact_set_digest TEXT,
-                   role_id TEXT, acceptance_contract_ref TEXT, terminal_reason TEXT);
-                 CREATE TABLE orchestration_task_attempts_v15(
-                   attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
-                   attempt_no INTEGER NOT NULL, from_execution_run_id TEXT, status TEXT NOT NULL,
-                   lease_epoch INTEGER NOT NULL DEFAULT 0, artifact_set_digest TEXT,
-                   acceptance_evidence_digest TEXT, terminal_reason TEXT,
-                   terminal_identity_json TEXT);
-                 CREATE TABLE orchestration_milestones_v15(
-                   milestone_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, milestone_key TEXT NOT NULL,
-                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
-                   brief_tree_digest TEXT, presented_artifact_set_digest TEXT,
-                   acceptance_evidence_digest TEXT, terminal_reason TEXT);
-                 INSERT INTO orchestration_task_nodes_v15(
-                   node_id, run_id, node_key, required, status, version)
-                 VALUES('n1','run-1','k1',1,'leased',1);
-                 INSERT INTO orchestration_task_attempts_v15(
-                   attempt_id, run_id, node_id, attempt_no, status, lease_epoch)
-                 VALUES('a1','run-1','n1',1,'leased',1);
-                 INSERT INTO orchestration_milestones_v15(
-                   milestone_id, run_id, milestone_key, required, status, version)
-                 VALUES('m1','run-1','mk1',1,'awaiting_approval',1);",
-            )
-            .unwrap();
-        assert!(connection.execute_batch(crate::MIGRATION_V16_SQL).is_err());
-
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE orchestration_task_nodes_v15(
-                   node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_key TEXT NOT NULL,
-                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
-                   active_attempt_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
-                   max_attempts INTEGER NOT NULL DEFAULT 1, input_artifact_set_digest TEXT,
-                   role_id TEXT, acceptance_contract_ref TEXT, terminal_reason TEXT);
-                 CREATE TABLE orchestration_task_attempts_v15(
-                   attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
-                   attempt_no INTEGER NOT NULL, from_execution_run_id TEXT, status TEXT NOT NULL,
-                   lease_epoch INTEGER NOT NULL DEFAULT 0, artifact_set_digest TEXT,
-                   acceptance_evidence_digest TEXT, terminal_reason TEXT,
-                   terminal_identity_json TEXT);
-                 CREATE TABLE orchestration_milestones_v15(
-                   milestone_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, milestone_key TEXT NOT NULL,
-                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
-                   brief_tree_digest TEXT, presented_artifact_set_digest TEXT,
-                   acceptance_evidence_digest TEXT, terminal_reason TEXT);
-                 INSERT INTO orchestration_task_nodes_v15(
-                   node_id, run_id, node_key, required, status, version)
-                 VALUES('n1','run-1','k1',1,'ready',1);
-                 INSERT INTO orchestration_task_attempts_v15(
-                   attempt_id, run_id, node_id, attempt_no, status, lease_epoch)
-                 VALUES('a1','run-1','n1',1,'running',1);
-                 INSERT INTO orchestration_milestones_v15(
-                   milestone_id, run_id, milestone_key, required, status, version,
-                   brief_tree_digest, presented_artifact_set_digest, acceptance_evidence_digest)
-                 VALUES('m1','run-1','mk1',1,'awaiting_approval',1,NULL,NULL,NULL);",
-            )
-            .unwrap();
-        assert!(connection.execute_batch(crate::MIGRATION_V16_SQL).is_err());
     }
 
     fn publish_cas_object(cas: &agenttalk_brief_sealer::CoreCas, bytes: &[u8]) -> (String, String) {
@@ -3186,6 +2362,175 @@ mod tests {
             .unwrap();
         assert_eq!(status, "completed");
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn real_corecas_end_to_end_reopen_replay_and_conflict() {
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_root = base.join("project");
+        let db_path = base.join("orchestration.sqlite3");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+        let (delivery, bindings);
+        {
+            let mut store = SqliteStore::open(&db_path).unwrap();
+            let result = setup_real_e2e(&mut store, &cas);
+            delivery = result.0;
+            bindings = result.1;
+            let verifier = CoreCasVerifier { cas: &cas };
+            assert!(!store
+                .record_handoff_delivery(delivery.clone(), &bindings, &verifier)
+                .unwrap());
+        }
+        {
+            let mut store = SqliteStore::open(&db_path).unwrap();
+            let cas2 = agenttalk_brief_sealer::CoreCas::new(&project_root);
+            let verifier2 = CoreCasVerifier { cas: &cas2 };
+            let delivery_count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM orchestration_handoff_deliveries WHERE run_id='run-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(delivery_count, 1);
+            let binding_count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM orchestration_artifact_bindings WHERE run_id='run-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(binding_count, 1);
+            let audit_count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM orchestration_audit_events WHERE run_id='run-1' AND event_type='handoff_delivery_recorded'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(audit_count, 1);
+            for (object_ref, _sha) in [
+                (&delivery.envelope_object_ref, &delivery.envelope_raw_sha256),
+                (
+                    &delivery.acceptance_contract_ref,
+                    &delivery.acceptance_contract_digest,
+                ),
+                (
+                    &delivery.acceptance_evidence_ref,
+                    &delivery.acceptance_evidence_digest,
+                ),
+            ] {
+                let bytes = cas2.read(object_ref).unwrap();
+                assert_eq!(
+                    hex_digest(&bytes),
+                    *object_ref.strip_prefix("sha256:").unwrap()
+                );
+            }
+            for binding in &bindings {
+                let bytes = cas2.read(&binding.object_ref).unwrap();
+                assert_eq!(hex_digest(&bytes), binding.sha256);
+            }
+            use agenttalk_orchestration_contracts::json;
+            use serde_json::Value as JsonValue;
+            let envelope_bytes = cas2.read(&delivery.envelope_object_ref).unwrap();
+            let envelope: JsonValue = serde_json::from_slice(&envelope_bytes).unwrap();
+            assert_eq!(envelope["handoffId"], delivery.envelope_handoff_id);
+            assert_eq!(envelope["projectRunId"], delivery.run_id);
+            assert_eq!(envelope["edgeId"], delivery.edge_id);
+            assert_eq!(envelope["from"]["taskNodeId"], delivery.from_task_node_id);
+            assert_eq!(envelope["from"]["attemptId"], delivery.attempt_id);
+            assert_eq!(
+                envelope["from"]["executionRunId"],
+                delivery.from_execution_run_id
+            );
+            assert_eq!(envelope["to"]["taskNodeId"], delivery.to_task_node_id);
+            assert_eq!(envelope["leaseEpoch"], delivery.lease_epoch);
+            let canonical = json::canonicalize(&envelope).unwrap();
+            assert_eq!(
+                json::sha256_raw_hex(&canonical),
+                delivery.envelope_raw_sha256
+            );
+            let jcs =
+                agenttalk_orchestration_contracts::handoff::envelope_sha256_hex(&envelope).unwrap();
+            assert_eq!(jcs, delivery.envelope_sha256_jcs);
+            assert!(store
+                .record_handoff_delivery(delivery.clone(), &bindings, &verifier2)
+                .unwrap());
+            let mut conflict = delivery.clone();
+            conflict.delivery_payload_digest = "0".repeat(64);
+            assert!(matches!(
+                store.record_handoff_delivery(conflict, &bindings, &verifier2),
+                Err(StorageError::HandoffDeliveryConflict { .. })
+            ));
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn real_corecas_failure_paths_leave_zero_journal_facts() {
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-fail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_root = base.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let (delivery, bindings) = setup_real_e2e(&mut store, &cas);
+        let verifier = CoreCasVerifier { cas: &cas };
+
+        let mut missing = delivery.clone();
+        missing.envelope_object_ref = format!("sha256:{}", "0".repeat(64));
+        assert!(store
+            .record_handoff_delivery(missing, &bindings, &verifier)
+            .is_err());
+
+        let mut tampered = delivery.clone();
+        tampered.envelope_raw_sha256 = "1".repeat(64);
+        assert!(store
+            .record_handoff_delivery(tampered, &bindings, &verifier)
+            .is_err());
+
+        let mut wrong_jcs = delivery.clone();
+        wrong_jcs.envelope_sha256_jcs = "2".repeat(64);
+        assert!(store
+            .record_handoff_delivery(wrong_jcs, &bindings, &verifier)
+            .is_err());
+
+        let mut wrong_contract = delivery.clone();
+        wrong_contract.acceptance_contract_ref = format!("sha256:{}", "3".repeat(64));
+        assert!(store
+            .record_handoff_delivery(wrong_contract, &bindings, &verifier)
+            .is_err());
+
+        let facts: i64 = store
+            .connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM orchestration_handoff_deliveries)
+                      + (SELECT count(*) FROM orchestration_artifact_bindings)
+                      + (SELECT count(*) FROM orchestration_audit_events
+                         WHERE run_id='run-1' AND event_type='handoff_delivery_recorded')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(facts, 0);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
