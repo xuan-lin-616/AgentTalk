@@ -3099,6 +3099,79 @@ fn handle_command(
                 }
             }
         }
+        "orchestration.lease.renew" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "attemptId",
+                        "leaseEpoch",
+                        "coordinatorGeneration",
+                        "leaseOwner",
+                        "extensionSeconds",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let attempt_id = required_string(&command.payload, "attemptId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let lease_epoch = required_i64(&command.payload, "leaseEpoch")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let generation = required_i64(&command.payload, "coordinatorGeneration")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let owner = required_string(&command.payload, "leaseOwner")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let extension = required_i64(&command.payload, "extensionSeconds")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let deadline = core
+                    .renew_orchestration_lease(
+                        &attempt_id,
+                        lease_epoch,
+                        generation,
+                        &owner,
+                        extension,
+                    )
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"renewed": true, "attemptId": attempt_id, "deadline": deadline}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.lease.release" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "attemptId",
+                        "leaseEpoch",
+                        "coordinatorGeneration",
+                        "leaseOwner",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let attempt_id = required_string(&command.payload, "attemptId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let lease_epoch = required_i64(&command.payload, "leaseEpoch")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let generation = required_i64(&command.payload, "coordinatorGeneration")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let owner = required_string(&command.payload, "leaseOwner")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let replayed = core
+                    .release_orchestration_lease(&attempt_id, lease_epoch, generation, &owner)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"released": true, "replayed": replayed, "attemptId": attempt_id}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
         "orchestration.delivery.record" => {
             let result = (|| -> Result<Value, (&str, String, bool)> {
                 reject_unknown_fields(&command.payload, &["delivery", "bindings"])
@@ -5495,6 +5568,56 @@ fn handle_query(
                 }
             };
             match core.orchestration_projection(&run_id) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    write_error(
+                        connection,
+                        "QUERY_REJECTED",
+                        &error.to_string(),
+                        false,
+                        &query.request_id,
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
+        "orchestration.audit.events" => {
+            if let Err(message) =
+                reject_unknown_fields(&query.payload, &["runId", "afterSequence", "limit"])
+            {
+                write_error(
+                    connection,
+                    "INVALID_QUERY",
+                    &message.to_string(),
+                    false,
+                    &query.request_id,
+                )?;
+                return Ok(());
+            }
+            let run_id = match required_string(&query.payload, "runId") {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    write_error(
+                        connection,
+                        "INVALID_QUERY",
+                        &error.to_string(),
+                        false,
+                        &query.request_id,
+                    )?;
+                    return Ok(());
+                }
+            };
+            let after_sequence = query
+                .payload
+                .get("afterSequence")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1);
+            let limit = query
+                .payload
+                .get("limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(100);
+            match core.orchestration_audit_events_since(&run_id, after_sequence, limit) {
                 Ok(payload) => payload,
                 Err(error) => {
                     write_error(

@@ -985,6 +985,22 @@ impl PersistentCore {
         Ok(self.storage.orchestration_projection(run_id)?)
     }
 
+    pub fn orchestration_audit_events_since(
+        &self,
+        run_id: &str,
+        after_sequence: i64,
+        limit: i64,
+    ) -> Result<Value, CoreError> {
+        Ok(json!({
+            "runId": run_id,
+            "events": self
+                .storage
+                .orchestration_audit_events_since(run_id, after_sequence, limit)?,
+            "afterSequence": after_sequence,
+            "limit": limit,
+        }))
+    }
+
     /// Create a Run from a previously sealed brief snapshot. IPC callers pass
     /// only sealed facts; Core resolves the authoritative project root from
     /// its own project journal and re-reads the snapshot descriptor from CAS
@@ -1110,6 +1126,38 @@ impl PersistentCore {
         Ok(())
     }
 
+    pub fn renew_orchestration_lease(
+        &mut self,
+        attempt_id: &str,
+        lease_epoch: i64,
+        coordinator_generation: i64,
+        lease_owner: &str,
+        extension_seconds: i64,
+    ) -> Result<i64, CoreError> {
+        Ok(self.storage.renew_orchestration_lease(
+            attempt_id,
+            lease_epoch,
+            coordinator_generation,
+            lease_owner,
+            extension_seconds,
+        )?)
+    }
+
+    pub fn release_orchestration_lease(
+        &mut self,
+        attempt_id: &str,
+        lease_epoch: i64,
+        coordinator_generation: i64,
+        lease_owner: &str,
+    ) -> Result<bool, CoreError> {
+        Ok(self.storage.release_orchestration_lease(
+            attempt_id,
+            lease_epoch,
+            coordinator_generation,
+            lease_owner,
+        )?)
+    }
+
     pub fn record_orchestration_handoff_delivery(
         &mut self,
         delivery: HandoffDeliveryRecord,
@@ -1159,7 +1207,10 @@ impl PersistentCore {
         acceptance.verifier_id = "core.machine.acceptance".into();
         acceptance.verifier_version = "v1".into();
         acceptance.result_digest = hex_sha256(&result_input);
-        acceptance.core_timestamp = unix_timestamp()?;
+        acceptance.core_timestamp = self
+            .storage
+            .orchestration_machine_acceptance_timestamp(&acceptance.delivery_id)?
+            .unwrap_or(unix_timestamp()?);
         Ok(self
             .storage
             .record_machine_acceptance(acceptance, &verifier)?)

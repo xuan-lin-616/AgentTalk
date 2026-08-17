@@ -651,6 +651,69 @@ impl SqliteStore {
         }))
     }
 
+    pub fn orchestration_machine_acceptance_timestamp(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT core_timestamp FROM orchestration_machine_acceptances
+                 WHERE delivery_id = ?1",
+                [delivery_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn orchestration_audit_events_since(
+        &self,
+        run_id: &str,
+        after_sequence: i64,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        if after_sequence < -1 || !(1..=500).contains(&limit) {
+            return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                reason: "audit cursor or limit is invalid".into(),
+            });
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT event_id, sequence, event_type, schema_version,
+                    subject_kind, subject_id, payload_json, payload_sha256,
+                    idempotency_key, coordinator_generation, core_timestamp
+             FROM orchestration_audit_events
+             WHERE run_id = ?1 AND sequence > ?2
+             ORDER BY sequence LIMIT ?3",
+        )?;
+        let rows = statement
+            .query_map(params![run_id, after_sequence, limit], |row| {
+                let payload_json: String = row.get(6)?;
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                Ok(serde_json::json!({
+                    "eventId": row.get::<_, String>(0)?,
+                    "sequence": row.get::<_, i64>(1)?,
+                    "eventType": row.get::<_, String>(2)?,
+                    "schemaVersion": row.get::<_, String>(3)?,
+                    "subjectKind": row.get::<_, String>(4)?,
+                    "subjectId": row.get::<_, String>(5)?,
+                    "payload": payload,
+                    "payloadSha256": row.get::<_, String>(7)?,
+                    "idempotencyKey": row.get::<_, String>(8)?,
+                    "coordinatorGeneration": row.get::<_, i64>(9)?,
+                    "coreTimestamp": row.get::<_, i64>(10)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn ensure_orchestration_milestone(
         &mut self,
         run_id: &str,
@@ -693,13 +756,52 @@ impl SqliteStore {
                 run_id: run_id.to_owned(),
             });
         }
+        let existing = tx
+            .query_row(
+                "SELECT run_id, milestone_key, required, status, version,
+                        brief_tree_digest, presented_artifact_set_digest,
+                        acceptance_evidence_digest
+                 FROM orchestration_milestones WHERE milestone_id = ?1",
+                [milestone_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 != run_id
+                || existing.1 != milestone_key
+                || existing.2 != 1
+                || existing.3 != "awaiting_approval"
+                || existing.4 != 1
+                || existing.5 != brief_tree_digest
+                || existing.6 != presented_artifact_set_digest
+                || existing.7 != acceptance_evidence_digest
+            {
+                return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                    milestone_id: milestone_id.to_owned(),
+                    status: "immutable milestone conflict".into(),
+                });
+            }
+            tx.commit()?;
+            return Ok(());
+        }
         let inserted = tx.execute(
             "INSERT INTO orchestration_milestones(
                milestone_id, run_id, milestone_key, required, status, version,
                brief_tree_digest, presented_artifact_set_digest,
                acceptance_evidence_digest
              ) VALUES(?1, ?2, ?3, 1, 'awaiting_approval', 1, ?4, ?5, ?6)
-             ON CONFLICT(milestone_id) DO NOTHING",
+             ",
             params![
                 milestone_id,
                 run_id,
@@ -1017,10 +1119,16 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = tx
             .query_row(
-                "SELECT delivery_id, delivery_payload_digest,
-                        envelope_object_ref, envelope_raw_sha256,
-                        envelope_sha256_jcs, acceptance_contract_digest,
-                        acceptance_evidence_digest
+                "SELECT delivery_id, run_id, attempt_id, edge_id, lease_epoch,
+                        lease_owner, coordinator_generation, envelope_handoff_id,
+                        from_task_node_id, from_execution_run_id, to_task_node_id,
+                        dag_snapshot_digest, role_binding_snapshot_digest,
+                        declaration_digest, artifact_transfer_set_digest,
+                        idempotency_key, delivery_payload_digest,
+                        envelope_object_ref, envelope_raw_sha256, envelope_sha256_jcs,
+                        acceptance_contract_ref, acceptance_contract_digest,
+                        acceptance_evidence_ref, acceptance_evidence_digest,
+                        producer_context_manifest_digest, replay_receipt_json
                  FROM orchestration_handoff_deliveries
                  WHERE attempt_id = ?1 AND edge_id = ?2 AND lease_epoch = ?3",
                 params![delivery.attempt_id, delivery.edge_id, delivery.lease_epoch],
@@ -1030,21 +1138,112 @@ impl SqliteStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, String>(14)?,
+                        row.get::<_, String>(15)?,
+                        row.get::<_, String>(16)?,
+                        row.get::<_, String>(17)?,
+                        row.get::<_, String>(18)?,
+                        row.get::<_, String>(19)?,
+                        row.get::<_, String>(20)?,
+                        row.get::<_, String>(21)?,
+                        row.get::<_, String>(22)?,
+                        row.get::<_, String>(23)?,
+                        row.get::<_, String>(24)?,
+                        row.get::<_, Option<String>>(25)?,
                     ))
                 },
             )
             .optional()?;
         if let Some(existing) = existing {
-            if existing.1 != delivery.delivery_payload_digest
-                || existing.2 != delivery.envelope_object_ref
-                || existing.3 != delivery.envelope_raw_sha256
-                || existing.4 != delivery.envelope_sha256_jcs
-                || existing.5 != delivery.acceptance_contract_digest
-                || existing.6 != delivery.acceptance_evidence_digest
-            {
+            let immutable_same = existing.0 == delivery.delivery_id
+                && existing.1 == delivery.run_id
+                && existing.2 == delivery.attempt_id
+                && existing.3 == delivery.edge_id
+                && existing.4 == delivery.lease_epoch
+                && existing.5 == delivery.lease_owner
+                && existing.6 == delivery.coordinator_generation
+                && existing.7 == delivery.envelope_handoff_id
+                && existing.8 == delivery.from_task_node_id
+                && existing.9 == delivery.from_execution_run_id
+                && existing.10 == delivery.to_task_node_id
+                && existing.11 == delivery.dag_snapshot_digest
+                && existing.12 == delivery.role_binding_snapshot_digest
+                && existing.13 == delivery.declaration_digest
+                && existing.14 == delivery.artifact_transfer_set_digest
+                && existing.15 == delivery.idempotency_key
+                && existing.16 == delivery.delivery_payload_digest
+                && existing.17 == delivery.envelope_object_ref
+                && existing.18 == delivery.envelope_raw_sha256
+                && existing.19 == delivery.envelope_sha256_jcs
+                && existing.20 == delivery.acceptance_contract_ref
+                && existing.21 == delivery.acceptance_contract_digest
+                && existing.22 == delivery.acceptance_evidence_ref
+                && existing.23 == delivery.acceptance_evidence_digest
+                && existing.24 == delivery.producer_context_manifest_digest
+                && existing.25 == delivery.replay_receipt_json;
+            let existing_binding_count: i64 = tx.query_row(
+                "SELECT count(*) FROM orchestration_artifact_bindings WHERE delivery_id = ?1",
+                [&delivery.delivery_id],
+                |row| row.get(0),
+            )?;
+            let mut bindings_same = existing_binding_count == bindings.len() as i64;
+            for binding in bindings {
+                if !bindings_same {
+                    break;
+                }
+                let existing = tx
+                    .query_row(
+                        "SELECT binding_id, source_output_port_id, target_input_port_id, object_ref,
+                                sha256, size, content_schema_id, content_schema_version,
+                                content_schema_digest, normalized_content_type,
+                                normalized_content_type_policy_version, content_schema_ref_json
+                         FROM orchestration_artifact_bindings
+                         WHERE delivery_id = ?1 AND edge_port_id = ?2",
+                        params![delivery.delivery_id, binding.edge_port_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, i64>(5)?,
+                                row.get::<_, String>(6)?,
+                                row.get::<_, String>(7)?,
+                                row.get::<_, String>(8)?,
+                                row.get::<_, String>(9)?,
+                                row.get::<_, String>(10)?,
+                                row.get::<_, String>(11)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                bindings_same = existing.is_some_and(|existing| {
+                    existing.0 == binding.binding_id
+                        && existing.1 == binding.source_output_port_id
+                        && existing.2 == binding.target_input_port_id
+                        && existing.3 == binding.object_ref
+                        && existing.4 == binding.sha256
+                        && existing.5 == binding.size
+                        && existing.6 == binding.content_schema_id
+                        && existing.7 == binding.content_schema_version
+                        && existing.8 == binding.content_schema_digest
+                        && existing.9 == binding.normalized_content_type
+                        && existing.10 == binding.normalized_content_type_policy_version
+                        && existing.11 == binding.content_schema_ref_json
+                });
+            }
+            if !immutable_same || !bindings_same {
                 return Err(StorageError::HandoffDeliveryConflict {
                     attempt_id: delivery.attempt_id.clone(),
                     edge_id: delivery.edge_id.clone(),
@@ -1510,6 +1709,170 @@ impl SqliteStore {
             &format!("task_node_completed:{}", attempt.0),
             generation,
         )?;
+        tx.execute(
+            "UPDATE orchestration_leases
+             SET status = 'released'
+             WHERE attempt_id = ?1 AND status = 'active'",
+            [&delivery.attempt_id],
+        )?;
+        append_audit_event(
+            tx,
+            &delivery.run_id,
+            "lease_released",
+            "lease",
+            &delivery.attempt_id,
+            "{\"status\":\"released\"}",
+            &format!("lease_released:{}", delivery.attempt_id),
+            generation,
+        )?;
+        Self::ensure_completion_milestone_in_tx(tx, &delivery.run_id, generation)?;
+        Ok(())
+    }
+
+    fn ensure_completion_milestone_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        run_id: &str,
+        generation: i64,
+    ) -> Result<(), StorageError> {
+        let (required_nodes, pending_nodes): (i64, i64) = tx.query_row(
+            "SELECT count(*),
+                    COALESCE(sum(CASE WHEN status = 'completed' THEN 0 ELSE 1 END), 0)
+             FROM orchestration_task_nodes
+             WHERE run_id = ?1 AND required = 1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if required_nodes == 0 || pending_nodes != 0 {
+            return Ok(());
+        }
+
+        let milestone_id = format!("milestone:{run_id}:completion");
+        let brief_tree_digest: String = tx.query_row(
+            "SELECT brief_tree_digest FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        let mut artifact_material = String::new();
+        let mut statement = tx.prepare(
+            "SELECT edge_id, lease_epoch, artifact_transfer_set_digest
+             FROM orchestration_handoff_deliveries
+             WHERE run_id = ?1 ORDER BY edge_id, lease_epoch",
+        )?;
+        for row in statement.query_map([run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (edge_id, lease_epoch, digest) = row?;
+            artifact_material.push_str(&edge_id);
+            artifact_material.push('\0');
+            artifact_material.push_str(&lease_epoch.to_string());
+            artifact_material.push('\0');
+            artifact_material.push_str(&digest);
+            artifact_material.push('\0');
+        }
+        let mut evidence_material = String::new();
+        let mut statement = tx.prepare(
+            "SELECT acceptance_id, result_digest
+             FROM orchestration_machine_acceptances
+             WHERE run_id = ?1 AND verdict = 'accepted'
+             ORDER BY acceptance_id",
+        )?;
+        for row in statement.query_map([run_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (acceptance_id, digest) = row?;
+            evidence_material.push_str(&acceptance_id);
+            evidence_material.push('\0');
+            evidence_material.push_str(&digest);
+            evidence_material.push('\0');
+        }
+        let presented_artifact_set_digest = hex_digest(artifact_material.as_bytes());
+        let acceptance_evidence_digest = hex_digest(evidence_material.as_bytes());
+
+        let existing: Option<(String, i64, String, String, String)> = tx
+            .query_row(
+                "SELECT status, version, brief_tree_digest,
+                        presented_artifact_set_digest, acceptance_evidence_digest
+                 FROM orchestration_milestones WHERE milestone_id = ?1",
+                [&milestone_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.2 != brief_tree_digest
+                || existing.3 != presented_artifact_set_digest
+                || existing.4 != acceptance_evidence_digest
+            {
+                return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                    milestone_id,
+                    status: "completion milestone conflict".into(),
+                });
+            }
+            if existing.0 == "awaiting_approval" {
+                return Ok(());
+            }
+            if existing.0 == "approved" {
+                return Ok(());
+            }
+            return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                milestone_id,
+                status: existing.0,
+            });
+        }
+        tx.execute(
+            "INSERT INTO orchestration_milestones(
+               milestone_id, run_id, milestone_key, required, status, version,
+               brief_tree_digest, presented_artifact_set_digest,
+               acceptance_evidence_digest
+             ) VALUES(?1, ?2, 'orchestration-completion', 1,
+                      'awaiting_approval', 1, ?3, ?4, ?5)",
+            params![
+                milestone_id,
+                run_id,
+                brief_tree_digest,
+                presented_artifact_set_digest,
+                acceptance_evidence_digest,
+            ],
+        )?;
+        append_audit_event(
+            tx,
+            run_id,
+            "milestone_created",
+            "milestone",
+            &milestone_id,
+            "{\"status\":\"awaiting_approval\",\"kind\":\"completion\"}",
+            &format!("milestone_created:{milestone_id}"),
+            generation,
+        )?;
+        let changed = tx.execute(
+            "UPDATE orchestration_runs
+             SET status = 'awaiting_approval', version = version + 1
+             WHERE run_id = ?1 AND status IN ('pending', 'running')",
+            [run_id],
+        )?;
+        if changed > 0 {
+            append_audit_event(
+                tx,
+                run_id,
+                "run_state_changed",
+                "run",
+                run_id,
+                "{\"status\":\"awaiting_approval\"}",
+                &format!("run_state_changed:{run_id}:awaiting_approval"),
+                generation,
+            )?;
+        }
         Ok(())
     }
 
@@ -2120,12 +2483,41 @@ impl SqliteStore {
                     });
                 }
             }
+            let existing = tx
+                .query_row(
+                    "SELECT run_id, from_node_id, to_node_id, dag_snapshot_digest,
+                            allowed_consumer_json
+                     FROM orchestration_edges WHERE edge_id = ?1",
+                    [&edge.edge_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing.0 != run_id
+                    || existing.1 != edge.from_node_id
+                    || existing.2 != edge.to_node_id
+                    || existing.3 != edge.dag_snapshot_digest
+                    || existing.4 != edge.allowed_consumer_json
+                {
+                    return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                        reason: format!("edge {} conflicts with sealed authority", edge.edge_id),
+                    });
+                }
+                continue;
+            }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_edges(
                    edge_id, run_id, from_node_id, to_node_id,
                    dag_snapshot_digest, allowed_consumer_json
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(edge_id) DO NOTHING",
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     edge.edge_id,
                     run_id,
@@ -2163,12 +2555,42 @@ impl SqliteStore {
                     reason: "edge port is not owned by run or policy is invalid".into(),
                 });
             }
+            let existing = tx
+                .query_row(
+                    "SELECT edge_id, source_output_port_id, target_input_port_id,
+                            port_policy_json
+                     FROM orchestration_edge_ports WHERE edge_port_id = ?1",
+                    [&port.edge_port_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing.0 != port.edge_id
+                    || existing.1 != port.source_output_port_id
+                    || existing.2 != port.target_input_port_id
+                    || existing.3 != port.port_policy_json
+                {
+                    return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                        reason: format!(
+                            "edge port {} conflicts with sealed authority",
+                            port.edge_port_id
+                        ),
+                    });
+                }
+                continue;
+            }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_edge_ports(
                    edge_port_id, edge_id, source_output_port_id,
                    target_input_port_id, port_policy_json
-                 ) VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(edge_port_id) DO NOTHING",
+                 ) VALUES(?1, ?2, ?3, ?4, ?5)",
                 params![
                     port.edge_port_id,
                     port.edge_id,
@@ -2199,12 +2621,44 @@ impl SqliteStore {
                     reason: "role binding authority facts do not match sealed run".into(),
                 });
             }
+            let existing = tx
+                .query_row(
+                    "SELECT run_id, digest, role_id, agent_id, workspace_access
+                     FROM orchestration_role_binding_snapshots
+                     WHERE role_binding_snapshot_id = ?1",
+                    [&binding.role_binding_snapshot_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing.0 != run_id
+                    || existing.1 != binding.digest
+                    || existing.2 != binding.role_id
+                    || existing.3 != binding.agent_id
+                    || existing.4 != binding.workspace_access
+                {
+                    return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                        reason: format!(
+                            "role binding {} conflicts with sealed authority",
+                            binding.role_binding_snapshot_id
+                        ),
+                    });
+                }
+                continue;
+            }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_role_binding_snapshots(
                    role_binding_snapshot_id, run_id, digest, sealed_at,
                    role_id, agent_id, workspace_access
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(role_binding_snapshot_id) DO NOTHING",
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     binding.role_binding_snapshot_id,
                     run_id,
@@ -2248,12 +2702,40 @@ impl SqliteStore {
                     reason: "context authority attempt is not owned by run".into(),
                 });
             }
+            let existing = tx
+                .query_row(
+                    "SELECT run_id, attempt_id, producer_context_manifest_digest
+                     FROM orchestration_context_manifest_authorities
+                     WHERE context_manifest_ref_id = ?1",
+                    [&context.context_manifest_ref_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing.0 != run_id
+                    || existing.1 != context.attempt_id
+                    || existing.2 != context.producer_context_manifest_digest
+                {
+                    return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                        reason: format!(
+                            "context authority {} conflicts with sealed authority",
+                            context.context_manifest_ref_id
+                        ),
+                    });
+                }
+                continue;
+            }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_context_manifest_authorities(
                    context_manifest_ref_id, run_id, attempt_id,
                    producer_context_manifest_digest, sealed_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(context_manifest_ref_id) DO NOTHING",
+                 ) VALUES(?1, ?2, ?3, ?4, ?5)",
                 params![
                     context.context_manifest_ref_id,
                     run_id,
@@ -2307,6 +2789,51 @@ impl SqliteStore {
                 node_id: node_id.to_owned(),
                 status: node.1,
             });
+        }
+        if input_artifact_set_digest.is_empty() || acceptance_contract_ref.is_empty() {
+            return Err(StorageError::OrchestrationTaskNotReady {
+                node_id: node_id.to_owned(),
+                status: "sealed input/contract authority is missing".into(),
+            });
+        }
+        let predecessor_count: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_edges
+             WHERE run_id = ?1 AND to_node_id = ?2 AND from_node_id != to_node_id",
+            params![node.0, node_id],
+            |row| row.get(0),
+        )?;
+        if predecessor_count > 0 {
+            let incomplete_predecessor: Option<String> = tx
+                .query_row(
+                    "SELECT e.from_node_id
+                     FROM orchestration_edges e
+                     JOIN orchestration_task_nodes n ON n.node_id = e.from_node_id
+                     WHERE e.run_id = ?1 AND e.to_node_id = ?2
+                       AND e.from_node_id != e.to_node_id
+                       AND n.status != 'completed'
+                     LIMIT 1",
+                    params![node.0, node_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(predecessor) = incomplete_predecessor {
+                return Err(StorageError::OrchestrationTaskNotReady {
+                    node_id: node_id.to_owned(),
+                    status: format!("predecessor {predecessor} is not completed"),
+                });
+            }
+            let role_bound: i64 = tx.query_row(
+                "SELECT count(*) FROM orchestration_role_binding_snapshots
+                 WHERE run_id = ?1 AND role_id = ?2",
+                params![node.0, role_id],
+                |row| row.get(0),
+            )?;
+            if role_bound == 0 {
+                return Err(StorageError::OrchestrationTaskNotReady {
+                    node_id: node_id.to_owned(),
+                    status: format!("role {role_id} has no sealed binding"),
+                });
+            }
         }
         tx.execute(
             "UPDATE orchestration_task_nodes
@@ -2700,6 +3227,149 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(next)
+    }
+
+    pub fn renew_orchestration_lease(
+        &mut self,
+        attempt_id: &str,
+        lease_epoch: i64,
+        coordinator_generation: i64,
+        lease_owner: &str,
+        extension_seconds: i64,
+    ) -> Result<i64, StorageError> {
+        if !(1..=3600).contains(&extension_seconds) {
+            return Err(StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT l.run_id, l.status, l.deadline, l.lease_owner,
+                        l.coordinator_generation, r.coordinator_generation
+                 FROM orchestration_leases l
+                 JOIN orchestration_runs r ON r.run_id = l.run_id
+                 WHERE l.attempt_id = ?1 AND l.lease_epoch = ?2",
+                params![attempt_id, lease_epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            })?;
+        let now = now_unix()?;
+        if current.1 != "active"
+            || current.2 <= now
+            || current.3 != lease_owner
+            || current.4 != coordinator_generation
+            || current.4 != current.5
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            });
+        }
+        let deadline = now.saturating_add(extension_seconds);
+        tx.execute(
+            "UPDATE orchestration_leases
+             SET heartbeat_at = ?2, deadline = ?3
+             WHERE attempt_id = ?1 AND lease_epoch = ?4 AND status = 'active'",
+            params![attempt_id, now, deadline, lease_epoch],
+        )?;
+        append_audit_event(
+            &tx,
+            &current.0,
+            "lease_renewed",
+            "lease",
+            attempt_id,
+            &format!("{{\"leaseEpoch\":{lease_epoch},\"deadline\":{deadline}}}"),
+            &format!("lease_renewed:{attempt_id}:{lease_epoch}:{deadline}"),
+            coordinator_generation,
+        )?;
+        tx.commit()?;
+        Ok(deadline)
+    }
+
+    pub fn release_orchestration_lease(
+        &mut self,
+        attempt_id: &str,
+        lease_epoch: i64,
+        coordinator_generation: i64,
+        lease_owner: &str,
+    ) -> Result<bool, StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT l.run_id, l.status, l.lease_owner,
+                        l.coordinator_generation, r.coordinator_generation
+                 FROM orchestration_leases l
+                 JOIN orchestration_runs r ON r.run_id = l.run_id
+                 WHERE l.attempt_id = ?1 AND l.lease_epoch = ?2",
+                params![attempt_id, lease_epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            })?;
+        if current.1 == "released" {
+            if current.2 == lease_owner
+                && current.3 == coordinator_generation
+                && current.3 == current.4
+            {
+                tx.commit()?;
+                return Ok(true);
+            }
+            return Err(StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            });
+        }
+        if current.1 != "active"
+            || current.2 != lease_owner
+            || current.3 != coordinator_generation
+            || current.3 != current.4
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: attempt_id.to_owned(),
+            });
+        }
+        tx.execute(
+            "UPDATE orchestration_leases SET status = 'released'
+             WHERE attempt_id = ?1 AND lease_epoch = ?2 AND status = 'active'",
+            params![attempt_id, lease_epoch],
+        )?;
+        append_audit_event(
+            &tx,
+            &current.0,
+            "lease_released",
+            "lease",
+            attempt_id,
+            &format!("{{\"leaseEpoch\":{lease_epoch},\"status\":\"released\"}}"),
+            &format!("lease_released:{attempt_id}:{lease_epoch}"),
+            coordinator_generation,
+        )?;
+        tx.commit()?;
+        Ok(false)
     }
 
     /// Returns the durable orchestration runs and their current status for
@@ -4186,5 +4856,40 @@ mod tests {
         store.recover_active_attempt_interrupted("node-1").unwrap();
         let state = store.orchestration_recovery_state("run-1").unwrap();
         assert_eq!(state[0].1, "ready");
+    }
+
+    #[test]
+    fn lease_renew_and_release_are_owner_and_generation_fenced() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .mark_orchestration_task_ready("node-1", "input-1", "role-1", "contract-1")
+            .unwrap();
+        let outcome = store
+            .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
+            .unwrap();
+        let deadline = store
+            .renew_orchestration_lease(&outcome.attempt_id, outcome.lease_epoch, 1, "worker-a", 60)
+            .unwrap();
+        assert!(deadline > 0);
+        assert!(matches!(
+            store.renew_orchestration_lease(
+                &outcome.attempt_id,
+                outcome.lease_epoch,
+                1,
+                "wrong-owner",
+                60,
+            ),
+            Err(StorageError::StaleLease { .. })
+        ));
+        assert!(!store
+            .release_orchestration_lease(&outcome.attempt_id, outcome.lease_epoch, 1, "worker-a",)
+            .unwrap());
+        assert!(store
+            .release_orchestration_lease(&outcome.attempt_id, outcome.lease_epoch, 1, "worker-a",)
+            .unwrap());
     }
 }

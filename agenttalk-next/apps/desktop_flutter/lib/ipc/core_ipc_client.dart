@@ -2095,6 +2095,39 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> queryOrchestrationAuditEvents({
+    required String sessionId,
+    required String runId,
+    int afterSequence = -1,
+    int limit = 100,
+  }) async {
+    _requireNonEmpty('runId', runId);
+    if (afterSequence < -1 || limit < 1 || limit > 500) {
+      throw const CoreIpcException('audit query cursor or limit is invalid');
+    }
+    final response = await request({
+      'kind': 'query',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-audit-events'),
+      'sessionId': sessionId,
+      'query': orchestrationAuditEventsQuery,
+      'payload': {
+        'runId': runId,
+        'afterSequence': afterSequence,
+        'limit': limit,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['runId'] != runId ||
+        payload['events'] is! List) {
+      throw const CoreIpcException(
+        'orchestration.audit.events payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> createOrchestrationRun({
     required String sessionId,
     required String projectId,
@@ -2263,6 +2296,79 @@ class CoreIpcClient {
         payload['status'] != 'sealing') {
       throw const CoreIpcException(
         'orchestration.task.seal response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> renewOrchestrationLease({
+    required String sessionId,
+    required String attemptId,
+    required int leaseEpoch,
+    required int coordinatorGeneration,
+    required String leaseOwner,
+    required int extensionSeconds,
+  }) async {
+    _requireNonEmpty('attemptId', attemptId);
+    _requireNonEmpty('leaseOwner', leaseOwner);
+    if (leaseEpoch < 1 || coordinatorGeneration < 1 || extensionSeconds < 1) {
+      throw const CoreIpcException('lease renewal values are invalid');
+    }
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-lease-renew'),
+      'sessionId': sessionId,
+      'command': orchestrationLeaseRenewCommand,
+      'payload': {
+        'attemptId': attemptId,
+        'leaseEpoch': leaseEpoch,
+        'coordinatorGeneration': coordinatorGeneration,
+        'leaseOwner': leaseOwner,
+        'extensionSeconds': extensionSeconds,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['renewed'] != true ||
+        payload['attemptId'] != attemptId ||
+        payload['deadline'] is! int) {
+      throw const CoreIpcException(
+        'orchestration.lease.renew response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> releaseOrchestrationLease({
+    required String sessionId,
+    required String attemptId,
+    required int leaseEpoch,
+    required int coordinatorGeneration,
+    required String leaseOwner,
+  }) async {
+    _requireNonEmpty('attemptId', attemptId);
+    _requireNonEmpty('leaseOwner', leaseOwner);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-lease-release'),
+      'sessionId': sessionId,
+      'command': orchestrationLeaseReleaseCommand,
+      'payload': {
+        'attemptId': attemptId,
+        'leaseEpoch': leaseEpoch,
+        'coordinatorGeneration': coordinatorGeneration,
+        'leaseOwner': leaseOwner,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['released'] != true ||
+        payload['attemptId'] != attemptId ||
+        payload['replayed'] is! bool) {
+      throw const CoreIpcException(
+        'orchestration.lease.release response payload is invalid',
       );
     }
     return payload;

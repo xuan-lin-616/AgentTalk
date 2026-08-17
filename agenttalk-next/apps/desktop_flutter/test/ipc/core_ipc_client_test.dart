@@ -534,6 +534,26 @@ void main() {
       );
       expect(recovery['coordinatorGeneration'], 2);
       expect(recoveryPipe.writtenQueries, ['orchestration.run.recovery_state']);
+
+      final auditPipe = _FakePipe(
+        responsePayload: const {
+          'runId': 'run-1',
+          'afterSequence': -1,
+          'limit': 10,
+          'events': <dynamic>[
+            {'sequence': 0, 'eventType': 'run_created'},
+          ],
+        },
+      );
+      final auditClient = _clientFor(auditPipe);
+      addTearDown(auditClient.close);
+      final audit = await auditClient.queryOrchestrationAuditEvents(
+        sessionId: 'session-test-123456',
+        runId: 'run-1',
+        limit: 10,
+      );
+      expect(audit['events'], isA<List<dynamic>>());
+      expect(auditPipe.writtenQueries, ['orchestration.audit.events']);
     },
   );
 
@@ -742,6 +762,47 @@ void main() {
       ]);
     },
   );
+
+  test('orchestration lease lifecycle clients preserve fencing fields', () async {
+    final renewPipe = _FakePipe(
+      responsePayload: const {
+        'renewed': true,
+        'attemptId': 'node-1:attempt:1',
+        'deadline': 123,
+      },
+    );
+    final renewClient = _clientFor(renewPipe);
+    addTearDown(renewClient.close);
+    final renewed = await renewClient.renewOrchestrationLease(
+      sessionId: 'session-test-123456',
+      attemptId: 'node-1:attempt:1',
+      leaseEpoch: 1,
+      coordinatorGeneration: 1,
+      leaseOwner: 'core-instance-1',
+      extensionSeconds: 60,
+    );
+    expect(renewed['deadline'], 123);
+    expect(renewPipe.writtenCommands, ['orchestration.lease.renew']);
+
+    final releasePipe = _FakePipe(
+      responsePayload: const {
+        'released': true,
+        'replayed': false,
+        'attemptId': 'node-1:attempt:1',
+      },
+    );
+    final releaseClient = _clientFor(releasePipe);
+    addTearDown(releaseClient.close);
+    final released = await releaseClient.releaseOrchestrationLease(
+      sessionId: 'session-test-123456',
+      attemptId: 'node-1:attempt:1',
+      leaseEpoch: 1,
+      coordinatorGeneration: 1,
+      leaseOwner: 'core-instance-1',
+    );
+    expect(released['released'], true);
+    expect(releasePipe.writtenCommands, ['orchestration.lease.release']);
+  });
 
   test(
     'orchestration milestone and receipt clients validate sealed facts',

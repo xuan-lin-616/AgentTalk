@@ -6,11 +6,14 @@ const int defaultMaxMessageBytes = 1024 * 1024;
 const String orchestrationRunSnapshotQuery = 'orchestration.run.snapshot';
 const String orchestrationRunRecoveryStateQuery =
     'orchestration.run.recovery_state';
+const String orchestrationAuditEventsQuery = 'orchestration.audit.events';
 const String orchestrationRunCreateCommand = 'orchestration.run.create';
 const String orchestrationTaskInsertCommand = 'orchestration.task.insert';
 const String orchestrationTaskReadyCommand = 'orchestration.task.ready';
 const String orchestrationTaskStartCommand = 'orchestration.task.start';
 const String orchestrationTaskSealCommand = 'orchestration.task.seal';
+const String orchestrationLeaseRenewCommand = 'orchestration.lease.renew';
+const String orchestrationLeaseReleaseCommand = 'orchestration.lease.release';
 const String orchestrationDeliveryRecordCommand =
     'orchestration.delivery.record';
 const String orchestrationAcceptanceRecordCommand =
