@@ -210,6 +210,23 @@ impl CoreCas {
         })
     }
 
+    fn delete_temp_checked(&self, temp: &std::fs::File, temp_name: &str) -> Result<(), CasError> {
+        if crate::test_support::should_fail_temp_delete() {
+            return Err(CasError::Io {
+                path: self.objects_root().join(temp_name),
+                source: std::io::Error::other("injected temp delete failure"),
+            });
+        }
+        fs_guard::delete_file_by_handle(temp).map_err(|source| CasError::Io {
+            path: self.objects_root().join(temp_name),
+            source,
+        })
+    }
+
+    fn cleanup_temp_best_effort(&self, temp: &std::fs::File) {
+        let _ = fs_guard::delete_file_by_handle(temp);
+    }
+
     pub fn ensure_objects_root(&self) -> Result<(), CasError> {
         let _ = self.objects_handle()?;
         Ok(())
@@ -275,7 +292,7 @@ impl CoreCas {
             Ok(())
         })();
         if let Err(source) = write_result {
-            let _ = fs_guard::delete_file_by_handle(&temp);
+            self.cleanup_temp_best_effort(&temp);
             return Err(CasError::Io {
                 path: self.objects_root().join(&temp_name),
                 source,
@@ -284,7 +301,10 @@ impl CoreCas {
 
         match fs_guard::link_file_relative(&objects, &temp, &object_name) {
             Ok(()) => {
-                let _ = fs_guard::delete_file_by_handle(&temp);
+                if let Err(error) = self.delete_temp_checked(&temp, &temp_name) {
+                    let _ = self.flush_objects_handle(&objects);
+                    return Err(error);
+                }
                 self.flush_objects_handle(&objects)?;
                 Ok(CasObject {
                     object_ref,
@@ -293,7 +313,7 @@ impl CoreCas {
                 })
             }
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = fs_guard::delete_file_by_handle(&temp);
+                self.delete_temp_checked(&temp, &temp_name)?;
                 let mut existing_file = self.open_existing_object(&objects, &object_name)?;
                 if fs_guard::handle_is_reparse(&existing_file).map_err(|error| CasError::Io {
                     path: self.objects_root().join(&object_name),
@@ -321,7 +341,7 @@ impl CoreCas {
                 })
             }
             Err(source) => {
-                let _ = fs_guard::delete_file_by_handle(&temp);
+                self.cleanup_temp_best_effort(&temp);
                 Err(self.traversal_error(
                     &Path::new(CAS_DIR_NAME)
                         .join(OBJECTS_DIR_NAME)

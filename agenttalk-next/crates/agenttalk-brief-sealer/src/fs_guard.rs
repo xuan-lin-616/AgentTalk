@@ -42,6 +42,7 @@ const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
 const FILE_READ_DATA: u32 = 0x0001;
 const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+const FILE_DELETE_ACCESS: u32 = 0x0001_0000;
 const FILE_ADD_SUBDIRECTORY: u32 = 0x0004;
 const FILE_WRITE_DATA: u32 = 0x0002;
 const STATUS_OBJECT_NAME_COLLISION: i32 = 0xC000_0035u32 as i32;
@@ -244,7 +245,7 @@ pub fn create_file_relative_new(parent: &File, component: &str) -> io::Result<Fi
     let status = unsafe {
         NtCreateFile(
             &mut handle as *mut _,
-            FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE | FILE_DELETE_ACCESS,
             &mut obj as *mut OBJECT_ATTRIBUTES,
             &mut io_status,
             std::ptr::null_mut(),
