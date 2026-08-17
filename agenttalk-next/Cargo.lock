@@ -27,10 +27,12 @@ dependencies = [
 name = "agenttalk-core"
 version = "0.1.0"
 dependencies = [
+ "agenttalk-brief-sealer",
  "agenttalk-context",
  "agenttalk-domain",
  "agenttalk-events",
  "agenttalk-ipc",
+ "agenttalk-orchestration-contracts",
  "agenttalk-permissions",
  "agenttalk-protocols",
  "agenttalk-runtime-host",

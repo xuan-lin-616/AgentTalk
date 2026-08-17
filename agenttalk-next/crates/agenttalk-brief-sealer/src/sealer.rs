@@ -7,8 +7,8 @@
 //! the Core-owned CAS, and computes the frozen `briefTreeDigest` through the
 //! contracts crate.
 //!
-//! It intentionally does **not** create an OrchestrationRun. That step
-//! belongs to the orchestration journal (C4 migration/storage work package).
+//! It intentionally does **not** create an OrchestrationRun. Core owns that
+//! final journal step and invokes storage only after this seal succeeds.
 
 use crate::cas::{sha256_hex, CasObject, CoreCas};
 use crate::error::BriefSealError;

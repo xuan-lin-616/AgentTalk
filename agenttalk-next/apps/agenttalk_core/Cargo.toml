@@ -4,10 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+agenttalk-brief-sealer = { path = "../../crates/agenttalk-brief-sealer" }
 agenttalk-context = { path = "../../crates/agenttalk-context" }
 agenttalk-domain = { path = "../../crates/agenttalk-domain" }
 agenttalk-events = { path = "../../crates/agenttalk-events" }
 agenttalk-ipc = { path = "../../crates/agenttalk-ipc" }
+agenttalk-orchestration-contracts = { path = "../../crates/agenttalk-orchestration-contracts" }
 agenttalk-permissions = { path = "../../crates/agenttalk-permissions" }
 agenttalk-runtime-host = { path = "../runtime_host" }
 agenttalk-protocols = { path = "../../crates/agenttalk-protocols" }

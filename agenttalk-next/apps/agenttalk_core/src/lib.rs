@@ -1,3 +1,4 @@
+use agenttalk_brief_sealer::{BriefSealer, PreparedBriefSeal};
 use agenttalk_context::{
     AssembledContext, AttachmentContextSource, ContextAssembler, ContextInput,
 };
@@ -12,6 +13,7 @@ use agenttalk_domain::{
     WorkspaceAccess, WorkspaceAuthorization,
 };
 use agenttalk_events::{EventStore, EventStoreError, InMemoryEventStore, RuntimeEvent};
+use agenttalk_orchestration_contracts::registry::SchemaRegistry;
 use agenttalk_permissions::FileReadGrant;
 use agenttalk_runtime_host::{
     connector_runtime_failure, LocalConnectorCandidate, RuntimeAdapter, RuntimeCapabilities,
@@ -19,7 +21,7 @@ use agenttalk_runtime_host::{
 };
 use agenttalk_storage::{
     AgentModelBinding, AgentModelBindingPatch, ArtifactBodyChunk, CommandReceipt,
-    CommandReceiptKey, LocalAgentImportOutcome, LocalAgentImportRequest,
+    CommandReceiptKey, LocalAgentImportOutcome, LocalAgentImportRequest, OrchestrationRunRecord,
     RetrievalEmbeddingProvider, RetrievalPreviewRequest, SqliteStore, StorageError,
     StoredModelSelection,
 };
@@ -39,6 +41,8 @@ use agenttalk_storage::CommandReceiptState;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error(transparent)]
+    BriefSeal(#[from] agenttalk_brief_sealer::BriefSealError),
     #[error("agent is not assigned to the current Project")]
     AgentNotAssigned,
     #[error("execution run id already exists")]
@@ -209,6 +213,24 @@ pub struct GenerateSummaryCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportLocalAgentCommand {
     pub request: LocalAgentImportRequest,
+}
+
+/// Core-owned input for the ADR-001 brief seal → journal Run boundary.
+/// `project_root` is an explicit filesystem authority selected by the host;
+/// the sealer never reads a mutable authoring path after this call returns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateOrchestrationRunFromBriefCommand {
+    pub project_id: String,
+    pub run_id: String,
+    pub project_root: PathBuf,
+    pub dag_snapshot_digest: String,
+    pub role_binding_snapshot_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedOrchestrationRun {
+    pub run: OrchestrationRunRecord,
+    pub seal: PreparedBriefSeal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -897,6 +919,29 @@ fn default_runtime() -> Box<dyn RuntimeAdapter> {
 impl PersistentCore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, CoreError> {
         Self::open_with_runtime(path, default_runtime())
+    }
+
+    /// Seal the mutable brief first, then create the immutable journal Run
+    /// binding in the final step of ADR-001 §2.  CAS publication belongs to
+    /// the sealer; the SQLite writer stores only the sealed snapshot refs and
+    /// digests.  If journal creation fails, the published objects remain
+    /// orphan candidates and no partial Run is returned.
+    pub fn create_orchestration_run_from_brief(
+        &mut self,
+        command: CreateOrchestrationRunFromBriefCommand,
+        schema_registry: &dyn SchemaRegistry,
+    ) -> Result<CreatedOrchestrationRun, CoreError> {
+        let seal = BriefSealer::new(command.project_root).seal(schema_registry)?;
+        self.storage
+            .create_orchestration_run_from_prepared_brief_seal(
+                &command.project_id,
+                &command.run_id,
+                &seal,
+                &command.dag_snapshot_digest,
+                &command.role_binding_snapshot_digest,
+            )?;
+        let run = self.storage.orchestration_run(&command.run_id)?;
+        Ok(CreatedOrchestrationRun { run, seal })
     }
 
     pub fn open_with_runtime(
@@ -6649,8 +6694,84 @@ fn runtime_catalog_fixture_runtime() -> impl RuntimeAdapter {
 mod tests {
     use super::*;
     use agenttalk_domain::CollaborationStatus;
+    use agenttalk_orchestration_contracts::registry::InMemorySchemaRegistry;
     use agenttalk_runtime_host::{CodexAppServerRuntime, RuntimeEventStream};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn core_seals_brief_before_creating_orchestration_run() {
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-core-orchestration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("project");
+        std::fs::create_dir_all(root.join("plan")).unwrap();
+        let body = b"# sealed roadmap\n";
+        std::fs::write(root.join("plan/roadmap.md"), body).unwrap();
+        let manifest = json!({
+            "schemaVersion": "agenttalk.brief.manifest.v1",
+            "projectId": "project-1",
+            "title": "Core orchestration fixture",
+            "roles": [{"roleId": "owner", "displayName": "Owner"}],
+            "files": [{
+                "path": "plan/roadmap.md",
+                "kind": "plan",
+                "format": "markdown",
+                "contentSchemaRef": null,
+                "required": true,
+                "sha256": agenttalk_brief_sealer::cas::sha256_hex(body),
+                "size": body.len(),
+                "context": {"layer": "shared", "roleIds": ["owner"], "retention": "run", "workspaceAccess": "read_only"},
+                "declaredOwnerRoleId": "owner"
+            }]
+        });
+        std::fs::write(
+            root.join("agenttalk-brief.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let mut core = PersistentCore::open(":memory:").unwrap();
+        let created = core
+            .create_orchestration_run_from_brief(
+                CreateOrchestrationRunFromBriefCommand {
+                    project_id: "project-1".into(),
+                    run_id: "orchestration-run-1".into(),
+                    project_root: root.clone(),
+                    dag_snapshot_digest: "a".repeat(64),
+                    role_binding_snapshot_digest: "b".repeat(64),
+                },
+                &InMemorySchemaRegistry::new(),
+            )
+            .unwrap();
+        assert_eq!(created.run.status, "pending");
+        assert_eq!(
+            created.run.brief_snapshot_id,
+            created.seal.brief_snapshot_id()
+        );
+        assert_eq!(
+            created.run.brief_tree_digest,
+            created.seal.brief_tree_digest()
+        );
+
+        // The snapshot remains readable from CAS after the mutable authoring
+        // files are removed; the Run never re-reads those paths.
+        std::fs::remove_file(root.join("agenttalk-brief.json")).unwrap();
+        std::fs::remove_file(root.join("plan/roadmap.md")).unwrap();
+        let descriptor = agenttalk_brief_sealer::BriefSealer::new(&root)
+            .read_snapshot_descriptor(&created.run.brief_snapshot_id)
+            .unwrap();
+        assert_eq!(
+            descriptor.brief_tree_digest(),
+            created.run.brief_tree_digest
+        );
+        assert_eq!(descriptor.files().len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     struct ShutdownProbeRuntime {
         id: &'static str,
