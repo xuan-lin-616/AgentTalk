@@ -496,6 +496,44 @@ void main() {
     expect(pipe.writtenRequestIds, hasLength(1));
   });
 
+  test('orchestration snapshot and recovery queries stay metadata-only', () async {
+    final pipe = _FakePipe(
+      responsePayload: const {
+        'run': {'runId': 'run-1', 'status': 'pending'},
+        'nodes': <dynamic>[],
+        'attempts': <dynamic>[],
+        'machineAcceptances': <dynamic>[],
+        'artifactBindings': <dynamic>[],
+      },
+    );
+    final client = _clientFor(pipe);
+    addTearDown(client.close);
+
+    final snapshot = await client.queryOrchestrationRunSnapshot(
+      sessionId: 'session-test-123456',
+      runId: 'run-1',
+    );
+    expect(snapshot['run'], isA<Map<String, dynamic>>());
+    expect(pipe.writtenQueries, ['orchestration.run.snapshot']);
+    expect(pipe.writtenPayloads.single, {'runId': 'run-1'});
+
+    final recoveryPipe = _FakePipe(
+      responsePayload: const {
+        'runId': 'run-1',
+        'coordinatorGeneration': 2,
+        'nodes': <dynamic>[],
+      },
+    );
+    final recoveryClient = _clientFor(recoveryPipe);
+    addTearDown(recoveryClient.close);
+    final recovery = await recoveryClient.queryOrchestrationRecoveryState(
+      sessionId: 'session-test-123456',
+      runId: 'run-1',
+    );
+    expect(recovery['coordinatorGeneration'], 2);
+    expect(recoveryPipe.writtenQueries, ['orchestration.run.recovery_state']);
+  });
+
   test(
     'local discovery queries use empty payloads and reject extra fields',
     () async {

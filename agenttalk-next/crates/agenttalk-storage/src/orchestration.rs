@@ -270,6 +270,326 @@ impl SqliteStore {
             })
     }
 
+    /// Read-only renderer projection for the orchestration journal.  It
+    /// contains control-plane metadata and digest/object references only;
+    /// sealed envelope, artifact, contract, and evidence bytes remain behind
+    /// Core/CAS authority boundaries.
+    pub fn orchestration_projection(
+        &self,
+        run_id: &str,
+    ) -> Result<serde_json::Value, StorageError> {
+        let run = self.orchestration_run(run_id)?;
+        let nodes = {
+            let mut statement = self.connection.prepare(
+                "SELECT node_id, node_key, required, status, version,
+                        active_attempt_id, attempt_count, max_attempts,
+                        input_artifact_set_digest, role_id,
+                        acceptance_contract_ref, terminal_reason
+                 FROM orchestration_task_nodes WHERE run_id = ?1 ORDER BY node_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "nodeId": row.get::<_, String>(0)?,
+                        "nodeKey": row.get::<_, String>(1)?,
+                        "required": row.get::<_, i64>(2)? != 0,
+                        "status": row.get::<_, String>(3)?,
+                        "version": row.get::<_, i64>(4)?,
+                        "activeAttemptId": row.get::<_, Option<String>>(5)?,
+                        "attemptCount": row.get::<_, i64>(6)?,
+                        "maxAttempts": row.get::<_, i64>(7)?,
+                        "inputArtifactSetDigest": row.get::<_, Option<String>>(8)?,
+                        "roleId": row.get::<_, Option<String>>(9)?,
+                        "acceptanceContractRef": row.get::<_, Option<String>>(10)?,
+                        "terminalReason": row.get::<_, Option<String>>(11)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let attempts = {
+            let mut statement = self.connection.prepare(
+                "SELECT attempt_id, node_id, attempt_no, from_execution_run_id,
+                        status, lease_epoch, artifact_set_digest,
+                        acceptance_evidence_digest, terminal_reason
+                 FROM orchestration_task_attempts WHERE run_id = ?1 ORDER BY node_id, attempt_no",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "attemptId": row.get::<_, String>(0)?,
+                        "nodeId": row.get::<_, String>(1)?,
+                        "attemptNo": row.get::<_, i64>(2)?,
+                        "fromExecutionRunId": row.get::<_, Option<String>>(3)?,
+                        "status": row.get::<_, String>(4)?,
+                        "leaseEpoch": row.get::<_, i64>(5)?,
+                        "artifactSetDigest": row.get::<_, Option<String>>(6)?,
+                        "acceptanceEvidenceDigest": row.get::<_, Option<String>>(7)?,
+                        "terminalReason": row.get::<_, Option<String>>(8)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let milestones = {
+            let mut statement = self.connection.prepare(
+                "SELECT milestone_id, milestone_key, required, status, version,
+                        brief_tree_digest, presented_artifact_set_digest,
+                        acceptance_evidence_digest, terminal_reason
+                 FROM orchestration_milestones WHERE run_id = ?1 ORDER BY milestone_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "milestoneId": row.get::<_, String>(0)?,
+                        "milestoneKey": row.get::<_, String>(1)?,
+                        "required": row.get::<_, i64>(2)? != 0,
+                        "status": row.get::<_, String>(3)?,
+                        "version": row.get::<_, i64>(4)?,
+                        "briefTreeDigest": row.get::<_, String>(5)?,
+                        "presentedArtifactSetDigest": row.get::<_, String>(6)?,
+                        "acceptanceEvidenceDigest": row.get::<_, String>(7)?,
+                        "terminalReason": row.get::<_, Option<String>>(8)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let edges = {
+            let mut statement = self.connection.prepare(
+                "SELECT edge_id, from_node_id, to_node_id, dag_snapshot_digest,
+                        allowed_consumer_json
+                 FROM orchestration_edges WHERE run_id = ?1 ORDER BY edge_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    let allowed: String = row.get(4)?;
+                    let allowed = serde_json::from_str::<serde_json::Value>(&allowed)
+                        .unwrap_or(serde_json::Value::Null);
+                    Ok(serde_json::json!({
+                        "edgeId": row.get::<_, String>(0)?,
+                        "fromNodeId": row.get::<_, String>(1)?,
+                        "toNodeId": row.get::<_, String>(2)?,
+                        "dagSnapshotDigest": row.get::<_, String>(3)?,
+                        "allowedConsumer": allowed,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let edge_ports = {
+            let mut statement = self.connection.prepare(
+                "SELECT edge_port_id, edge_id, source_output_port_id,
+                        target_input_port_id, port_policy_json
+                 FROM orchestration_edge_ports ORDER BY edge_port_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    let policy: String = row.get(4)?;
+                    let policy = serde_json::from_str::<serde_json::Value>(&policy)
+                        .unwrap_or(serde_json::Value::Null);
+                    Ok(serde_json::json!({
+                        "edgePortId": row.get::<_, String>(0)?,
+                        "edgeId": row.get::<_, String>(1)?,
+                        "sourceOutputPortId": row.get::<_, String>(2)?,
+                        "targetInputPortId": row.get::<_, String>(3)?,
+                        "portPolicy": policy,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let role_bindings = {
+            let mut statement = self.connection.prepare(
+                "SELECT role_binding_snapshot_id, digest, sealed_at,
+                        role_id, agent_id, workspace_access
+                 FROM orchestration_role_binding_snapshots WHERE run_id = ?1
+                 ORDER BY role_id, agent_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "snapshotId": row.get::<_, String>(0)?,
+                        "digest": row.get::<_, String>(1)?,
+                        "sealedAt": row.get::<_, i64>(2)?,
+                        "roleId": row.get::<_, String>(3)?,
+                        "agentId": row.get::<_, String>(4)?,
+                        "workspaceAccess": row.get::<_, String>(5)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let leases = {
+            let mut statement = self.connection.prepare(
+                "SELECT attempt_id, node_id, lease_epoch, lease_owner,
+                        heartbeat_at, deadline, coordinator_generation, status
+                 FROM orchestration_leases WHERE run_id = ?1
+                 ORDER BY attempt_id, lease_epoch, coordinator_generation",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "attemptId": row.get::<_, String>(0)?,
+                        "nodeId": row.get::<_, String>(1)?,
+                        "leaseEpoch": row.get::<_, i64>(2)?,
+                        "leaseOwner": row.get::<_, String>(3)?,
+                        "heartbeatAt": row.get::<_, i64>(4)?,
+                        "deadline": row.get::<_, i64>(5)?,
+                        "coordinatorGeneration": row.get::<_, i64>(6)?,
+                        "status": row.get::<_, String>(7)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let deliveries = {
+            let mut statement = self.connection.prepare(
+                "SELECT delivery_id, attempt_id, edge_id, lease_epoch,
+                        envelope_handoff_id, from_task_node_id,
+                        from_execution_run_id, to_task_node_id,
+                        coordinator_generation, envelope_object_ref,
+                        envelope_raw_sha256, envelope_sha256_jcs,
+                        artifact_transfer_set_digest, delivery_payload_digest,
+                        acceptance_contract_digest, acceptance_evidence_digest
+                 FROM orchestration_handoff_deliveries WHERE run_id = ?1
+                 ORDER BY delivery_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "deliveryId": row.get::<_, String>(0)?,
+                        "attemptId": row.get::<_, String>(1)?,
+                        "edgeId": row.get::<_, String>(2)?,
+                        "leaseEpoch": row.get::<_, i64>(3)?,
+                        "envelopeHandoffId": row.get::<_, String>(4)?,
+                        "fromTaskNodeId": row.get::<_, String>(5)?,
+                        "fromExecutionRunId": row.get::<_, String>(6)?,
+                        "toTaskNodeId": row.get::<_, String>(7)?,
+                        "coordinatorGeneration": row.get::<_, i64>(8)?,
+                        "envelopeObjectRef": row.get::<_, String>(9)?,
+                        "envelopeRawSha256": row.get::<_, String>(10)?,
+                        "envelopeSha256Jcs": row.get::<_, String>(11)?,
+                        "artifactTransferSetDigest": row.get::<_, String>(12)?,
+                        "deliveryPayloadDigest": row.get::<_, String>(13)?,
+                        "acceptanceContractDigest": row.get::<_, String>(14)?,
+                        "acceptanceEvidenceDigest": row.get::<_, String>(15)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let artifact_bindings = {
+            let mut statement = self.connection.prepare(
+                "SELECT binding_id, delivery_id, edge_port_id,
+                        source_output_port_id, target_input_port_id,
+                        object_ref, sha256, size, normalized_content_type,
+                        normalized_content_type_policy_version,
+                        content_schema_ref_json
+                 FROM orchestration_artifact_bindings WHERE run_id = ?1
+                 ORDER BY binding_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    let schema_ref: String = row.get(10)?;
+                    let schema_ref = serde_json::from_str::<serde_json::Value>(&schema_ref)
+                        .unwrap_or(serde_json::Value::Null);
+                    Ok(serde_json::json!({
+                        "bindingId": row.get::<_, String>(0)?,
+                        "deliveryId": row.get::<_, String>(1)?,
+                        "edgePortId": row.get::<_, String>(2)?,
+                        "sourceOutputPortId": row.get::<_, String>(3)?,
+                        "targetInputPortId": row.get::<_, String>(4)?,
+                        "objectRef": row.get::<_, String>(5)?,
+                        "sha256": row.get::<_, String>(6)?,
+                        "size": row.get::<_, i64>(7)?,
+                        "normalizedContentType": row.get::<_, String>(8)?,
+                        "normalizedContentTypePolicyVersion": row.get::<_, String>(9)?,
+                        "contentSchemaRef": schema_ref,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let acceptances = {
+            let mut statement = self.connection.prepare(
+                "SELECT acceptance_id, attempt_id, edge_id, lease_epoch,
+                        delivery_id, verifier_id, verifier_version, verdict,
+                        result_digest, coordinator_generation, core_timestamp
+                 FROM orchestration_machine_acceptances WHERE run_id = ?1
+                 ORDER BY acceptance_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "acceptanceId": row.get::<_, String>(0)?,
+                        "attemptId": row.get::<_, String>(1)?,
+                        "edgeId": row.get::<_, String>(2)?,
+                        "leaseEpoch": row.get::<_, i64>(3)?,
+                        "deliveryId": row.get::<_, String>(4)?,
+                        "verifierId": row.get::<_, String>(5)?,
+                        "verifierVersion": row.get::<_, String>(6)?,
+                        "verdict": row.get::<_, String>(7)?,
+                        "resultDigest": row.get::<_, String>(8)?,
+                        "coordinatorGeneration": row.get::<_, i64>(9)?,
+                        "coreTimestamp": row.get::<_, i64>(10)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let context_authorities = {
+            let mut statement = self.connection.prepare(
+                "SELECT context_manifest_ref_id, attempt_id,
+                        producer_context_manifest_digest, sealed_at
+                 FROM orchestration_context_manifest_authorities WHERE run_id = ?1
+                 ORDER BY context_manifest_ref_id",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| {
+                    Ok(serde_json::json!({
+                        "contextManifestRefId": row.get::<_, String>(0)?,
+                        "attemptId": row.get::<_, String>(1)?,
+                        "producerContextManifestDigest": row.get::<_, String>(2)?,
+                        "sealedAt": row.get::<_, i64>(3)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let audit_event_count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM orchestration_audit_events WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        Ok(serde_json::json!({
+            "run": {
+                "runId": run.run_id,
+                "projectId": run.project_id,
+                "status": run.status,
+                "version": run.version,
+                "briefSnapshotId": run.brief_snapshot_id,
+                "briefTreeDigest": run.brief_tree_digest,
+                "dagSnapshotDigest": run.dag_snapshot_digest,
+                "roleBindingSnapshotDigest": run.role_binding_snapshot_digest,
+                "coordinatorGeneration": run.coordinator_generation,
+                "terminalReason": run.terminal_reason,
+            },
+            "nodes": nodes,
+            "attempts": attempts,
+            "milestones": milestones,
+            "edges": edges,
+            "edgePorts": edge_ports,
+            "roleBindings": role_bindings,
+            "leases": leases,
+            "deliveries": deliveries,
+            "artifactBindings": artifact_bindings,
+            "machineAcceptances": acceptances,
+            "contextAuthorities": context_authorities,
+            "auditEventCount": audit_event_count,
+        }))
+    }
+
     pub fn ensure_orchestration_milestone(
         &mut self,
         run_id: &str,
@@ -3342,6 +3662,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(facts, 0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn orchestration_projection_is_metadata_only_and_restart_readable() {
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-projection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_root = base.join("project");
+        let database = base.join("journal.sqlite3");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+        let (delivery, bindings) = {
+            let mut store = SqliteStore::open(&database).unwrap();
+            let (delivery, bindings) = setup_real_e2e(&mut store, &cas);
+            let verifier = CoreCasVerifier { cas: &cas };
+            store
+                .record_handoff_delivery(delivery.clone(), &bindings, &verifier)
+                .unwrap();
+            (delivery, bindings)
+        };
+        let reopened = SqliteStore::open(&database).unwrap();
+        let projection = reopened.orchestration_projection("run-1").unwrap();
+        assert_eq!(projection["run"]["runId"], "run-1");
+        assert_eq!(projection["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(projection["deliveries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            projection["machineAcceptances"].as_array().unwrap().len(),
+            0
+        );
+        let serialized = serde_json::to_string(&projection).unwrap();
+        assert!(!serialized.contains("artifact sealed bytes"));
+        assert!(serialized.contains(&delivery.envelope_object_ref));
+        assert!(serialized.contains(&bindings[0].object_ref));
+        drop(reopened);
         std::fs::remove_dir_all(&base).unwrap();
     }
 

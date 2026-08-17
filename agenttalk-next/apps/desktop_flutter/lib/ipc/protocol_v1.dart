@@ -3,6 +3,9 @@ import 'dart:typed_data';
 
 const int protocolMajor = 1;
 const int defaultMaxMessageBytes = 1024 * 1024;
+const String orchestrationRunSnapshotQuery = 'orchestration.run.snapshot';
+const String orchestrationRunRecoveryStateQuery =
+    'orchestration.run.recovery_state';
 
 class ProtocolVersion {
   const ProtocolVersion(this.major, this.minor);

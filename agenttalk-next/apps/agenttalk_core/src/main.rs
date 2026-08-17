@@ -4994,6 +4994,82 @@ fn handle_query(
             }
         }
         "projection.snapshot" => core.projection_snapshot()?,
+        "orchestration.run.snapshot" => {
+            if let Err(message) = reject_unknown_fields(&query.payload, &["runId"]) {
+                write_error(
+                    connection,
+                    "INVALID_QUERY",
+                    &message.to_string(),
+                    false,
+                    &query.request_id,
+                )?;
+                return Ok(());
+            }
+            let run_id = match required_string(&query.payload, "runId") {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    write_error(
+                        connection,
+                        "INVALID_QUERY",
+                        &error.to_string(),
+                        false,
+                        &query.request_id,
+                    )?;
+                    return Ok(());
+                }
+            };
+            match core.orchestration_projection(&run_id) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    write_error(
+                        connection,
+                        "QUERY_REJECTED",
+                        &error.to_string(),
+                        false,
+                        &query.request_id,
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
+        "orchestration.run.recovery_state" => {
+            if let Err(message) = reject_unknown_fields(&query.payload, &["runId"]) {
+                write_error(
+                    connection,
+                    "INVALID_QUERY",
+                    &message.to_string(),
+                    false,
+                    &query.request_id,
+                )?;
+                return Ok(());
+            }
+            let run_id = match required_string(&query.payload, "runId") {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    write_error(
+                        connection,
+                        "INVALID_QUERY",
+                        &error.to_string(),
+                        false,
+                        &query.request_id,
+                    )?;
+                    return Ok(());
+                }
+            };
+            match core.orchestration_recovery_state(&run_id) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    write_error(
+                        connection,
+                        "QUERY_REJECTED",
+                        &error.to_string(),
+                        false,
+                        &query.request_id,
+                    )?;
+                    return Ok(());
+                }
+            }
+        }
         "model_selection.snapshot" => {
             let run_id = match required_string(&query.payload, "executionRunId") {
                 Ok(run_id) => run_id,
@@ -7010,7 +7086,12 @@ mod tests {
         let queries = schema["$defs"]["QueryEnvelope"]["properties"]["query"]["enum"]
             .as_array()
             .expect("query enum");
-        for query in ["connector.discover", "agent.scan_local"] {
+        for query in [
+            "connector.discover",
+            "agent.scan_local",
+            "orchestration.run.snapshot",
+            "orchestration.run.recovery_state",
+        ] {
             assert!(
                 queries.iter().any(|value| value == query),
                 "schema must register {query} as an additive query"

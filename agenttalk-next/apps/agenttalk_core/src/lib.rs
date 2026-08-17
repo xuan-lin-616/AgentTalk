@@ -961,6 +961,34 @@ impl PersistentCore {
         Ok(CreatedOrchestrationRun { run, seal })
     }
 
+    /// Read-only orchestration projection for IPC/UI consumers.  Core keeps
+    /// the journal and CAS authoritative; callers receive metadata and
+    /// digest/object references, never sealed bytes or SQLite access.
+    pub fn orchestration_projection(&self, run_id: &str) -> Result<Value, CoreError> {
+        Ok(self.storage.orchestration_projection(run_id)?)
+    }
+
+    pub fn orchestration_recovery_state(&self, run_id: &str) -> Result<Value, CoreError> {
+        let run = self.storage.orchestration_run(run_id)?;
+        let nodes = self
+            .storage
+            .orchestration_recovery_state(run_id)?
+            .into_iter()
+            .map(|(node_id, status, attempt_count)| {
+                json!({
+                    "nodeId": node_id,
+                    "status": status,
+                    "attemptCount": attempt_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "runId": run.run_id,
+            "coordinatorGeneration": run.coordinator_generation,
+            "nodes": nodes,
+        }))
+    }
+
     pub fn open_with_runtime(
         path: impl AsRef<Path>,
         runtime: Box<dyn RuntimeAdapter>,

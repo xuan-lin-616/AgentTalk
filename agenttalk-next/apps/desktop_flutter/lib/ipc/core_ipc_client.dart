@@ -2063,6 +2063,57 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> queryOrchestrationRunSnapshot({
+    required String sessionId,
+    required String runId,
+  }) async {
+    _requireNonEmpty('runId', runId);
+    final response = await request({
+      'kind': 'query',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-run-snapshot'),
+      'sessionId': sessionId,
+      'query': orchestrationRunSnapshotQuery,
+      'payload': {'runId': runId},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['run'] is! Map<String, dynamic> ||
+        payload['nodes'] is! List ||
+        payload['attempts'] is! List ||
+        payload['machineAcceptances'] is! List) {
+      throw const CoreIpcException(
+        'orchestration.run.snapshot payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> queryOrchestrationRecoveryState({
+    required String sessionId,
+    required String runId,
+  }) async {
+    _requireNonEmpty('runId', runId);
+    final response = await request({
+      'kind': 'query',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-run-recovery'),
+      'sessionId': sessionId,
+      'query': orchestrationRunRecoveryStateQuery,
+      'payload': {'runId': runId},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['runId'] != runId ||
+        payload['coordinatorGeneration'] is! int ||
+        payload['nodes'] is! List) {
+      throw const CoreIpcException(
+        'orchestration.run.recovery_state payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> setAgentModelBinding({
     required String sessionId,
     required String agentId,

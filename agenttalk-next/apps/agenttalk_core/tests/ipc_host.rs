@@ -5,6 +5,7 @@ use agenttalk_protocols::{
     CommandEnvelope, ErrorEnvelope, EventEnvelope, ProtocolHandshake, ProtocolVersion,
     QueryEnvelope, ResponseEnvelope, PROTOCOL_MAJOR,
 };
+use agenttalk_storage::{OrchestrationRunSeed, SqliteStore};
 use serde_json::json;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -121,6 +122,19 @@ fn core_host_accepts_handshake_command_and_query_over_named_pipe() {
     let _ = std::fs::remove_file(database.with_extension("db-wal"));
     let _ = std::fs::remove_file(database.with_extension("db-shm"));
     let credential = format!("test-credential-{}", "x".repeat(40));
+    {
+        let mut storage = SqliteStore::open(&database).unwrap();
+        storage
+            .create_orchestration_run(OrchestrationRunSeed {
+                run_id: "orchestration-host-run".into(),
+                project_id: "project-host-1".into(),
+                brief_snapshot_id: format!("sha256:{}", "0".repeat(64)),
+                brief_tree_digest: "0".repeat(64),
+                dag_snapshot_digest: "1".repeat(64),
+                role_binding_snapshot_digest: "2".repeat(64),
+            })
+            .unwrap();
+    }
     let executable = env!("CARGO_BIN_EXE_agenttalk-core");
     let child = Command::new(executable)
         .args([
@@ -312,6 +326,44 @@ fn core_host_accepts_handshake_command_and_query_over_named_pipe() {
     let snapshot: ResponseEnvelope = serde_json::from_slice(&client.read_json().unwrap()).unwrap();
     assert!(snapshot.payload["projects"].is_array());
     assert!(snapshot.payload["assignments"].is_array());
+
+    client
+        .write_json(&QueryEnvelope {
+            kind: "query".into(),
+            protocol: ProtocolVersion { major: 1, minor: 0 },
+            request_id: "orchestration-snapshot-1".into(),
+            session_id: "session-host-test-123456".into(),
+            query: "orchestration.run.snapshot".into(),
+            payload: json!({"runId":"orchestration-host-run"}),
+        })
+        .unwrap();
+    let orchestration: ResponseEnvelope =
+        serde_json::from_slice(&client.read_json().unwrap()).unwrap();
+    assert_eq!(
+        orchestration.payload["run"]["runId"],
+        "orchestration-host-run"
+    );
+    assert_eq!(orchestration.payload["run"]["projectId"], "project-host-1");
+    assert!(orchestration.payload["nodes"].is_array());
+    assert!(orchestration.payload["machineAcceptances"].is_array());
+    assert!(!serde_json::to_string(&orchestration.payload)
+        .unwrap()
+        .contains("artifact sealed bytes"));
+
+    client
+        .write_json(&QueryEnvelope {
+            kind: "query".into(),
+            protocol: ProtocolVersion { major: 1, minor: 0 },
+            request_id: "orchestration-recovery-1".into(),
+            session_id: "session-host-test-123456".into(),
+            query: "orchestration.run.recovery_state".into(),
+            payload: json!({"runId":"orchestration-host-run"}),
+        })
+        .unwrap();
+    let recovery: ResponseEnvelope = serde_json::from_slice(&client.read_json().unwrap()).unwrap();
+    assert_eq!(recovery.payload["runId"], "orchestration-host-run");
+    assert_eq!(recovery.payload["coordinatorGeneration"], 2);
+    assert!(recovery.payload["nodes"].as_array().unwrap().is_empty());
 
     client
         .write_json(&CommandEnvelope {

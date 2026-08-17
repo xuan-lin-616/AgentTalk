@@ -329,6 +329,22 @@
         "executionRunId": { "type": "string", "minLength": 1, "maxLength": 160 }
       }
     },
+    "OrchestrationSnapshotQueryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "OrchestrationRecoveryQueryPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
     "ExecutionStartPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -670,7 +686,7 @@
         "protocol": { "$ref": "#/$defs/ProtocolVersion" },
         "requestId": { "$ref": "#/$defs/RequestId" },
         "sessionId": { "$ref": "#/$defs/SessionId" },
-        "query": { "enum": ["projection.snapshot", "events.replay", "execution.get", "model_selection.snapshot", "identity_model_options.list", "messages.search", "summary.content", "artifact.content", "connector.query", "connector.health", "connector.models", "connector.discover", "agent.scan_local", "agent.discovery.snapshot", "agent.import.plan", "retrieval.preview", "retrieval.query", "retrieval.selections", "retrieval.feedback", "runtime.health", "runtime.models"] },
+        "query": { "enum": ["projection.snapshot", "orchestration.run.snapshot", "orchestration.run.recovery_state", "events.replay", "execution.get", "model_selection.snapshot", "identity_model_options.list", "messages.search", "summary.content", "artifact.content", "connector.query", "connector.health", "connector.models", "connector.discover", "agent.scan_local", "agent.discovery.snapshot", "agent.import.plan", "retrieval.preview", "retrieval.query", "retrieval.selections", "retrieval.feedback", "runtime.health", "runtime.models"] },
         "payload": { "type": "object" }
       },
       "allOf": [
@@ -789,6 +805,24 @@
           },
           "then": {
             "properties": { "payload": { "$ref": "#/$defs/ModelSelectionSnapshotQueryPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "orchestration.run.snapshot" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/OrchestrationSnapshotQueryPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["query"],
+            "properties": { "query": { "const": "orchestration.run.recovery_state" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/OrchestrationRecoveryQueryPayload" } }
           }
         }
       ]
