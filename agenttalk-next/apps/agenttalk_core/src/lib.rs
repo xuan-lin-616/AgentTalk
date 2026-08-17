@@ -40,6 +40,11 @@ fn hex_sha256(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+// The scheduler owns this identity in the current local Core build.  IPC
+// callers may carry a lease-owner claim for compatibility, but Core never
+// persists that caller-provided value.
+const ORCHESTRATION_CORE_LEASE_OWNER: &str = "core-instance-1";
+
 fn unix_timestamp() -> Result<i64, StorageError> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -47,6 +52,28 @@ fn unix_timestamp() -> Result<i64, StorageError> {
         .map_err(|_| StorageError::ModelSnapshotInvalid {
             reason: "system clock is before Unix epoch".into(),
         })
+}
+
+/// Core v1 acceptance policy.  The caller may submit a verdict claim, but it
+/// is never authoritative.  A non-empty sealed evidence object is accepted by
+/// the fixture validator unless it is a duplicate-safe JSON object containing
+/// an explicit `verdict` of `accepted`, `rejected`, or `error`.  The policy is
+/// deterministic and keeps the authority decision inside Core until a real
+/// Provider-specific validator is introduced by a later ADR.
+fn derive_machine_acceptance_verdict(evidence_bytes: &[u8]) -> Result<String, StorageError> {
+    if evidence_bytes.is_empty() {
+        return Ok("error".into());
+    }
+    let verdict = agenttalk_orchestration_contracts::json::parse_duplicate_safe(evidence_bytes)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("verdict")
+                .and_then(Value::as_str)
+                .filter(|value| matches!(*value, "accepted" | "rejected" | "error"))
+                .map(ToOwned::to_owned)
+        });
+    Ok(verdict.unwrap_or_else(|| "accepted".to_owned()))
 }
 
 #[cfg(test)]
@@ -1109,12 +1136,12 @@ impl PersistentCore {
         &mut self,
         node_id: &str,
         from_execution_run_id: &str,
-        lease_owner: &str,
+        _lease_owner: &str,
     ) -> Result<TaskReadyToRunningOutcome, CoreError> {
         Ok(self.storage.transition_task_ready_to_running(
             node_id,
             from_execution_run_id,
-            lease_owner,
+            ORCHESTRATION_CORE_LEASE_OWNER,
         )?)
     }
 
@@ -1131,14 +1158,14 @@ impl PersistentCore {
         attempt_id: &str,
         lease_epoch: i64,
         coordinator_generation: i64,
-        lease_owner: &str,
+        _lease_owner: &str,
         extension_seconds: i64,
     ) -> Result<i64, CoreError> {
         Ok(self.storage.renew_orchestration_lease(
             attempt_id,
             lease_epoch,
             coordinator_generation,
-            lease_owner,
+            ORCHESTRATION_CORE_LEASE_OWNER,
             extension_seconds,
         )?)
     }
@@ -1148,13 +1175,13 @@ impl PersistentCore {
         attempt_id: &str,
         lease_epoch: i64,
         coordinator_generation: i64,
-        lease_owner: &str,
+        _lease_owner: &str,
     ) -> Result<bool, CoreError> {
         Ok(self.storage.release_orchestration_lease(
             attempt_id,
             lease_epoch,
             coordinator_generation,
-            lease_owner,
+            ORCHESTRATION_CORE_LEASE_OWNER,
         )?)
     }
 
@@ -1172,9 +1199,10 @@ impl PersistentCore {
 
     pub fn record_orchestration_handoff_delivery(
         &mut self,
-        delivery: HandoffDeliveryRecord,
+        mut delivery: HandoffDeliveryRecord,
         bindings: &[ArtifactBindingInput],
     ) -> Result<bool, CoreError> {
+        delivery.lease_owner = ORCHESTRATION_CORE_LEASE_OWNER.into();
         let run = self.storage.orchestration_run(&delivery.run_id)?;
         let project_root = self
             .storage
@@ -1208,6 +1236,16 @@ impl PersistentCore {
         let evidence_bytes = cas
             .read(&acceptance.acceptance_evidence_ref)
             .map_err(|_| StorageError::ArtifactBodyMismatch)?;
+        let derived_verdict = derive_machine_acceptance_verdict(&evidence_bytes)?;
+        if acceptance.verdict != derived_verdict {
+            return Err(StorageError::MachineAcceptanceInvalid {
+                reason: format!(
+                    "caller verdict claim does not match Core-derived verdict {derived_verdict}"
+                ),
+            }
+            .into());
+        }
+        acceptance.verdict = derived_verdict;
         let mut result_input = Vec::with_capacity(
             acceptance.verdict.len() + contract_bytes.len() + evidence_bytes.len() + 2,
         );

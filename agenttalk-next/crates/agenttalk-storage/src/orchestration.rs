@@ -688,8 +688,28 @@ impl SqliteStore {
         let rows = statement
             .query_map(params![run_id, after_sequence, limit], |row| {
                 let payload_json: String = row.get(6)?;
+                let payload_sha256: String = row.get(7)?;
+                let canonical = canonicalize_audit_payload(&payload_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                if canonical != payload_json
+                    || hex_digest(payload_json.as_bytes()) != payload_sha256
+                {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(StorageError::AuditPayloadCanonicalization {
+                            reason: "stored audit payload is not canonical or digest-matched"
+                                .into(),
+                        }),
+                    ));
+                }
                 let payload: serde_json::Value =
-                    serde_json::from_str(&payload_json).map_err(|error| {
+                    serde_json::from_str(&canonical).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             6,
                             rusqlite::types::Type::Text,
@@ -704,7 +724,7 @@ impl SqliteStore {
                     "subjectKind": row.get::<_, String>(4)?,
                     "subjectId": row.get::<_, String>(5)?,
                     "payload": payload,
-                    "payloadSha256": row.get::<_, String>(7)?,
+                    "payloadSha256": payload_sha256,
                     "idempotencyKey": row.get::<_, String>(8)?,
                     "coordinatorGeneration": row.get::<_, i64>(9)?,
                     "coreTimestamp": row.get::<_, i64>(10)?,
@@ -741,20 +761,63 @@ impl SqliteStore {
                 status: run_status,
             });
         }
-        if run_status != "awaiting_approval"
-            && tx
-                .query_row(
-                    "SELECT 1 FROM orchestration_leases
-                     WHERE run_id = ?1 AND status = 'active' AND deadline > ?2 LIMIT 1",
-                    params![run_id, crate::orchestration::now_unix()?],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .is_some()
-        {
+        let active_attempt = tx
+            .query_row(
+                "SELECT 1 FROM orchestration_task_attempts
+                 WHERE run_id = ?1 AND status IN ('leased', 'running', 'sealing') LIMIT 1",
+                [run_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        let active_lease = tx
+            .query_row(
+                "SELECT 1 FROM orchestration_leases
+                 WHERE run_id = ?1 AND status = 'active' LIMIT 1",
+                [run_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if run_status != "awaiting_approval" && (active_attempt || active_lease) {
             return Err(StorageError::OrchestrationActiveAttemptExists {
                 run_id: run_id.to_owned(),
             });
+        }
+        let required_nodes: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_task_nodes
+             WHERE run_id = ?1 AND required = 1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if required_nodes > 0 {
+            let pending_nodes: i64 = tx.query_row(
+                "SELECT count(*) FROM orchestration_task_nodes
+                 WHERE run_id = ?1 AND required = 1 AND status != 'completed'",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            if pending_nodes > 0 {
+                return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                    milestone_id: milestone_id.to_owned(),
+                    status: "required nodes are not completed".into(),
+                });
+            }
+            let expected_id = format!("milestone:{run_id}:completion");
+            if milestone_id != expected_id {
+                return Err(StorageError::OrchestrationMilestoneStateInvalid {
+                    milestone_id: milestone_id.to_owned(),
+                    status: "milestone must be Core-derived from required node completion".into(),
+                });
+            }
+            let generation: i64 = tx.query_row(
+                "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            Self::ensure_completion_milestone_in_tx(&tx, run_id, generation)?;
+            tx.commit()?;
+            return Ok(());
         }
         let existing = tx
             .query_row(
@@ -945,16 +1008,23 @@ impl SqliteStore {
                 status: run_status,
             });
         }
-        let now = crate::orchestration::now_unix()?;
         let active_attempt: Option<String> = tx
             .query_row(
                 "SELECT attempt_id FROM orchestration_leases
-                 WHERE run_id = ?1 AND status = 'active' AND deadline > ?2 LIMIT 1",
-                params![receipt.run_id, now],
+                 WHERE run_id = ?1 AND status = 'active' LIMIT 1",
+                [&receipt.run_id],
                 |row| row.get(0),
             )
             .optional()?;
-        if active_attempt.is_some() {
+        let active_attempt_state: Option<String> = tx
+            .query_row(
+                "SELECT attempt_id FROM orchestration_task_attempts
+                 WHERE run_id = ?1 AND status IN ('leased', 'running', 'sealing') LIMIT 1",
+                [&receipt.run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active_attempt.is_some() || active_attempt_state.is_some() {
             return Err(StorageError::OrchestrationActiveAttemptExists {
                 run_id: receipt.run_id,
             });
@@ -1745,13 +1815,19 @@ impl SqliteStore {
         if required_nodes == 0 || pending_nodes != 0 {
             return Ok(());
         }
-        let active_leases: i64 = tx.query_row(
-            "SELECT count(*) FROM orchestration_leases
-             WHERE run_id = ?1 AND status = 'active' AND deadline > ?2",
-            params![run_id, now_unix()?],
+        let active_attempts: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_task_attempts
+             WHERE run_id = ?1 AND status IN ('leased', 'running', 'sealing')",
+            [run_id],
             |row| row.get(0),
         )?;
-        if active_leases != 0 {
+        let active_leases: i64 = tx.query_row(
+            "SELECT count(*) FROM orchestration_leases
+             WHERE run_id = ?1 AND status = 'active'",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if active_attempts != 0 || active_leases != 0 {
             return Ok(());
         }
 
@@ -2439,15 +2515,69 @@ impl SqliteStore {
         node_id: &str,
         node_key: &str,
     ) -> Result<(), StorageError> {
-        self.orchestration_run(run_id)?;
-        self.connection.execute(
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.query_row(
+            "SELECT 1 FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::OrchestrationRunNotFound {
+            run_id: run_id.to_owned(),
+        })?;
+        let existing = tx
+            .query_row(
+                "SELECT run_id, node_key, required, status, version,
+                        attempt_count, max_attempts
+                 FROM orchestration_task_nodes WHERE node_id = ?1",
+                [node_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.0 != run_id || existing.1 != node_key || existing.2 != 1 {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!("task node {node_id} conflicts with immutable authority"),
+                });
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
             "INSERT INTO orchestration_task_nodes(
                node_id, run_id, node_key, required, status, version,
                attempt_count, max_attempts
-             ) VALUES(?1, ?2, ?3, 1, 'pending', 1, 0, 1)
-             ON CONFLICT(node_id) DO NOTHING",
+             ) VALUES(?1, ?2, ?3, 1, 'pending', 1, 0, 1)",
             params![node_id, run_id, node_key],
         )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            run_id,
+            "task_node_inserted",
+            "task_node",
+            node_id,
+            "{\"status\":\"pending\"}",
+            &format!("task_node_inserted:{node_id}"),
+            generation,
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -2532,6 +2662,22 @@ impl SqliteStore {
                 }
                 continue;
             }
+            let natural_edge: Option<String> = tx
+                .query_row(
+                    "SELECT edge_id FROM orchestration_edges
+                     WHERE run_id = ?1 AND from_node_id = ?2 AND to_node_id = ?3",
+                    params![run_id, edge.from_node_id, edge.to_node_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if natural_edge.is_some() {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!(
+                        "edge {} conflicts with existing run/from/to binding",
+                        edge.edge_id
+                    ),
+                });
+            }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_edges(
                    edge_id, run_id, from_node_id, to_node_id,
@@ -2605,6 +2751,27 @@ impl SqliteStore {
                 }
                 continue;
             }
+            let natural_port: Option<String> = tx
+                .query_row(
+                    "SELECT edge_port_id FROM orchestration_edge_ports
+                     WHERE edge_id = ?1 AND source_output_port_id = ?2
+                       AND target_input_port_id = ?3",
+                    params![
+                        port.edge_id,
+                        port.source_output_port_id,
+                        port.target_input_port_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if natural_port.is_some() {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!(
+                        "edge port {} conflicts with existing edge/port binding",
+                        port.edge_port_id
+                    ),
+                });
+            }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_edge_ports(
                    edge_port_id, edge_id, source_output_port_id,
@@ -2672,6 +2839,23 @@ impl SqliteStore {
                     });
                 }
                 continue;
+            }
+            let natural_role: Option<String> = tx
+                .query_row(
+                    "SELECT role_binding_snapshot_id
+                     FROM orchestration_role_binding_snapshots
+                     WHERE run_id = ?1 AND role_id = ?2 AND agent_id = ?3",
+                    params![run_id, binding.role_id, binding.agent_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if natural_role.is_some() {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!(
+                        "role binding {} conflicts with existing role/agent binding",
+                        binding.role_binding_snapshot_id
+                    ),
+                });
             }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_role_binding_snapshots(
@@ -2749,6 +2933,23 @@ impl SqliteStore {
                     });
                 }
                 continue;
+            }
+            let natural_context: Option<String> = tx
+                .query_row(
+                    "SELECT context_manifest_ref_id
+                     FROM orchestration_context_manifest_authorities
+                     WHERE attempt_id = ?1 AND producer_context_manifest_digest = ?2",
+                    params![context.attempt_id, context.producer_context_manifest_digest],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if natural_context.is_some() {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: format!(
+                        "context authority {} conflicts with existing attempt/digest binding",
+                        context.context_manifest_ref_id
+                    ),
+                });
             }
             let inserted = tx.execute(
                 "INSERT INTO orchestration_context_manifest_authorities(
@@ -3489,23 +3690,147 @@ impl SqliteStore {
             [run_id],
             |row| row.get(0),
         )?;
-        let fenced = tx.execute(
-            "UPDATE orchestration_leases SET status = 'fenced'
-             WHERE run_id = ?1 AND status = 'active'",
-            [run_id],
-        )?;
-        tx.execute(
-            "UPDATE orchestration_task_attempts
-             SET status = 'cancelled'
-             WHERE run_id = ?1 AND status IN ('leased', 'running', 'sealing')",
-            [run_id],
-        )?;
-        tx.execute(
-            "UPDATE orchestration_task_nodes
-             SET status = 'cancelled', active_attempt_id = NULL, version = version + 1
-             WHERE run_id = ?1 AND status IN ('pending', 'ready', 'running', 'sealing', 'blocked')",
-            [run_id],
-        )?;
+        if status != "cancelling" {
+            tx.execute(
+                "UPDATE orchestration_runs
+                 SET status = 'cancelling', version = version + 1
+                 WHERE run_id = ?1",
+                [run_id],
+            )?;
+            append_audit_event(
+                &tx,
+                run_id,
+                "run_state_changed",
+                "run",
+                run_id,
+                "{\"status\":\"cancelling\"}",
+                &format!("run_state_changed:{run_id}:cancelling"),
+                generation,
+            )?;
+        }
+
+        let attempts: Vec<(String, String)> = tx
+            .prepare(
+                "SELECT attempt_id, status FROM orchestration_task_attempts
+                 WHERE run_id = ?1 AND status IN ('leased', 'running', 'sealing')
+                 ORDER BY attempt_id",
+            )?
+            .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        for (attempt_id, attempt_status) in attempts {
+            if attempt_status != "sealing" {
+                tx.execute(
+                    "UPDATE orchestration_task_attempts SET status = 'sealing'
+                     WHERE attempt_id = ?1 AND status = ?2",
+                    params![attempt_id, attempt_status],
+                )?;
+                append_audit_event(
+                    &tx,
+                    run_id,
+                    "task_attempt_sealing",
+                    "task_attempt",
+                    &attempt_id,
+                    "{\"status\":\"sealing\",\"reason\":\"run_cancelled\"}",
+                    &format!("task_attempt_sealing:{attempt_id}:cancel"),
+                    generation,
+                )?;
+            }
+            tx.execute(
+                "UPDATE orchestration_task_attempts SET status = 'cancelled'
+                 WHERE attempt_id = ?1 AND status = 'sealing'",
+                [&attempt_id],
+            )?;
+            append_audit_event(
+                &tx,
+                run_id,
+                "task_attempt_cancelled",
+                "task_attempt",
+                &attempt_id,
+                "{\"status\":\"cancelled\",\"reason\":\"run_cancelled\"}",
+                &format!("task_attempt_cancelled:{attempt_id}"),
+                generation,
+            )?;
+        }
+
+        let nodes: Vec<String> = tx
+            .prepare(
+                "SELECT node_id FROM orchestration_task_nodes
+                 WHERE run_id = ?1 AND status IN ('pending', 'ready', 'running', 'sealing', 'blocked')
+                 ORDER BY node_id",
+            )?
+            .query_map([run_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for node_id in nodes {
+            tx.execute(
+                "UPDATE orchestration_task_nodes
+                 SET status = 'cancelled', active_attempt_id = NULL, version = version + 1
+                 WHERE node_id = ?1 AND status IN ('pending', 'ready', 'running', 'sealing', 'blocked')",
+                [&node_id],
+            )?;
+            append_audit_event(
+                &tx,
+                run_id,
+                "task_node_cancelled",
+                "task_node",
+                &node_id,
+                "{\"status\":\"cancelled\",\"reason\":\"run_cancelled\"}",
+                &format!("task_node_cancelled:{node_id}"),
+                generation,
+            )?;
+        }
+
+        let milestones: Vec<String> = tx
+            .prepare(
+                "SELECT milestone_id FROM orchestration_milestones
+                 WHERE run_id = ?1 AND status IN ('pending', 'awaiting_approval')
+                 ORDER BY milestone_id",
+            )?
+            .query_map([run_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for milestone_id in milestones {
+            tx.execute(
+                "UPDATE orchestration_milestones
+                 SET status = 'cancelled', version = version + 1,
+                     terminal_reason = 'run_cancelled'
+                 WHERE milestone_id = ?1 AND status IN ('pending', 'awaiting_approval')",
+                [&milestone_id],
+            )?;
+            append_audit_event(
+                &tx,
+                run_id,
+                "milestone_state_changed",
+                "milestone",
+                &milestone_id,
+                "{\"status\":\"cancelled\",\"reason\":\"run_cancelled\"}",
+                &format!("milestone_cancelled:{milestone_id}"),
+                generation,
+            )?;
+        }
+
+        let lease_attempts: Vec<String> = tx
+            .prepare(
+                "SELECT DISTINCT attempt_id FROM orchestration_leases
+                 WHERE run_id = ?1 AND status = 'active' ORDER BY attempt_id",
+            )?
+            .query_map([run_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for attempt_id in lease_attempts {
+            tx.execute(
+                "UPDATE orchestration_leases SET status = 'fenced'
+                 WHERE run_id = ?1 AND attempt_id = ?2 AND status = 'active'",
+                params![run_id, attempt_id],
+            )?;
+            append_audit_event(
+                &tx,
+                run_id,
+                "lease_fenced",
+                "lease",
+                &attempt_id,
+                "{\"status\":\"fenced\",\"reason\":\"run_cancelled\"}",
+                &format!("lease_fenced:{attempt_id}:cancel"),
+                generation,
+            )?;
+        }
         tx.execute(
             "UPDATE orchestration_runs
              SET status = 'cancelled', terminal_reason = ?2, version = version + 1
@@ -3525,18 +3850,6 @@ impl SqliteStore {
             &format!("run_cancelled:{run_id}:{reason}"),
             generation,
         )?;
-        if fenced > 0 {
-            append_audit_event(
-                &tx,
-                run_id,
-                "leases_fenced",
-                "run",
-                run_id,
-                &format!("{{\"count\":{fenced},\"reason\":\"cancelled\"}}"),
-                &format!("cancel_leases_fenced:{run_id}"),
-                generation,
-            )?;
-        }
         tx.commit()?;
         Ok(false)
     }
@@ -5157,6 +5470,23 @@ mod tests {
                 .unwrap(),
             "cancelled"
         );
+        assert_eq!(
+            store.orchestration_run("run-1").unwrap().status,
+            "cancelled"
+        );
+        let cancellation_events = store
+            .orchestration_audit_events_since("run-1", -1, 100)
+            .unwrap();
+        let event_types: Vec<String> = cancellation_events
+            .iter()
+            .filter_map(|event| event.get("eventType").and_then(|value| value.as_str()))
+            .map(ToOwned::to_owned)
+            .collect();
+        assert!(event_types.contains(&"run_state_changed".into()));
+        assert!(event_types.contains(&"task_attempt_sealing".into()));
+        assert!(event_types.contains(&"task_attempt_cancelled".into()));
+        assert!(event_types.contains(&"task_node_cancelled".into()));
+        assert!(event_types.contains(&"run_cancelled".into()));
 
         store.create_orchestration_run(seed("run-2")).unwrap();
         store
@@ -5184,5 +5514,84 @@ mod tests {
             store.retry_orchestration_task("node-2"),
             Err(StorageError::OrchestrationTaskTerminal { .. })
         ));
+    }
+
+    #[test]
+    fn task_insert_is_immutable_and_audit_reads_fail_closed_on_tamper() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        store
+            .insert_orchestration_task_node("run-1", "node-1", "key-1")
+            .unwrap();
+        assert!(matches!(
+            store.insert_orchestration_task_node("run-1", "node-1", "different-key"),
+            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
+        ));
+
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_audit_events(
+                   event_id, run_id, sequence, event_type, schema_version,
+                   subject_kind, subject_id, payload_json, payload_sha256,
+                   idempotency_key, coordinator_generation, core_timestamp
+                 ) VALUES('tampered-event', 'run-1', 999, 'tampered', 'v1',
+                          'run', 'run-1', '{\"b\":2,\"a\":1}', ?1,
+                          'tampered-event', 1, 1)",
+                ["0".repeat(64)],
+            )
+            .unwrap();
+        assert!(store
+            .orchestration_audit_events_since("run-1", -1, 1000)
+            .is_err());
+        assert!(store
+            .ensure_orchestration_milestone(
+                "run-1",
+                "manual-milestone",
+                "review",
+                &"0".repeat(64),
+                &"1".repeat(64),
+                &"2".repeat(64),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn graph_natural_key_conflicts_are_typed_and_atomic() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-graph")).unwrap();
+        store
+            .insert_orchestration_task_node("run-graph", "node-a", "a")
+            .unwrap();
+        store
+            .insert_orchestration_task_node("run-graph", "node-b", "b")
+            .unwrap();
+        let edge = |edge_id: &str| OrchestrationEdgeInput {
+            edge_id: edge_id.into(),
+            run_id: "run-graph".into(),
+            from_node_id: "node-a".into(),
+            to_node_id: "node-b".into(),
+            dag_snapshot_digest: "0".repeat(64),
+            allowed_consumer_json: "[]".into(),
+        };
+        store
+            .bind_orchestration_graph_facts("run-graph", &[edge("edge-1")], &[], &[], &[])
+            .unwrap();
+        assert!(matches!(
+            store.bind_orchestration_graph_facts("run-graph", &[edge("edge-2")], &[], &[], &[]),
+            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
+        ));
+        let edge_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_edges WHERE run_id = 'run-graph'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 1);
     }
 }

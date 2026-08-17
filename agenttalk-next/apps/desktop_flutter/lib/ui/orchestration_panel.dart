@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/material.dart';
 
 import '../ipc/core_ipc_client.dart';
@@ -120,6 +123,95 @@ class _OrchestrationPanelState extends State<OrchestrationPanel> {
     }
   }
 
+  Future<void> _recordMilestoneDecision(
+    Map<String, dynamic> milestone,
+    String decision,
+  ) async {
+    final client = widget.client;
+    final sessionId = widget.sessionId;
+    final runId = _runIdController.text.trim();
+    final milestoneId = milestone['milestoneId']?.toString() ?? '';
+    final briefTreeDigest = milestone['briefTreeDigest']?.toString() ?? '';
+    final artifactDigest =
+        milestone['presentedArtifactSetDigest']?.toString() ?? '';
+    final evidenceDigest =
+        milestone['acceptanceEvidenceDigest']?.toString() ?? '';
+    final expectedVersion = milestone['version'];
+    if (client == null ||
+        sessionId == null ||
+        runId.isEmpty ||
+        milestoneId.isEmpty ||
+        expectedVersion is! int ||
+        _busy) {
+      return;
+    }
+    final requestId =
+        'receipt-$runId-$milestoneId-${DateTime.now().microsecondsSinceEpoch}';
+    final receiptId =
+        'receipt-$runId-$milestoneId-${DateTime.now().microsecondsSinceEpoch}';
+    final semanticPayloadHash = crypto.sha256
+        .convert(
+          utf8.encode(
+            jsonEncode(<String, dynamic>{
+              'runId': runId,
+              'milestoneId': milestoneId,
+              'decision': decision,
+              'expectedVersion': expectedVersion,
+              'briefTreeDigest': briefTreeDigest,
+              'presentedArtifactSetDigest': artifactDigest,
+              'acceptanceEvidenceDigest': evidenceDigest,
+            }),
+          ),
+        )
+        .toString();
+    setState(() {
+      _busy = true;
+      _status = decision == 'approve' ? '正在提交批准…' : '正在提交拒绝…';
+    });
+    var succeeded = false;
+    try {
+      await client.recordOrchestrationHumanReceipt(
+        sessionId: sessionId,
+        receiptId: receiptId,
+        runId: runId,
+        milestoneId: milestoneId,
+        requestId: requestId,
+        semanticPayloadHash: semanticPayloadHash,
+        decision: decision,
+        expectedVersion: expectedVersion,
+        briefTreeDigest: briefTreeDigest,
+        presentedArtifactSetDigest: artifactDigest,
+        acceptanceEvidenceDigest: evidenceDigest,
+      );
+      succeeded = true;
+    } on Object catch (error) {
+      if (mounted) setState(() => _status = '审批被 Core 拒绝：$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    if (succeeded && mounted) await _loadRun();
+  }
+
+  Future<void> _retryNode(String nodeId) async {
+    final client = widget.client;
+    final sessionId = widget.sessionId;
+    if (client == null || sessionId == null || nodeId.isEmpty || _busy) return;
+    setState(() {
+      _busy = true;
+      _status = '正在请求 Core 重试节点…';
+    });
+    var succeeded = false;
+    try {
+      await client.retryOrchestrationTask(sessionId: sessionId, nodeId: nodeId);
+      succeeded = true;
+    } on Object catch (error) {
+      if (mounted) setState(() => _status = '重试被 Core 拒绝：$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    if (succeeded && mounted) await _loadRun();
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -219,10 +311,81 @@ class _OrchestrationPanelState extends State<OrchestrationPanel> {
                           subtitle: Text(
                             '${node['nodeId'] ?? '-'} · ${node['status'] ?? '-'}',
                           ),
+                          trailing:
+                              node['status'] == 'failed' ||
+                                  node['status'] == 'blocked'
+                              ? IconButton(
+                                  key: Key(
+                                    'orchestration-node-retry-${node['nodeId']}',
+                                  ),
+                                  tooltip: '重试节点',
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _retryNode(
+                                          node['nodeId']?.toString() ?? '',
+                                        ),
+                                  icon: const Icon(Icons.replay),
+                                )
+                              : null,
                         ),
                     ],
                   ),
                 ),
+              if (milestones.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                for (final milestone in milestones)
+                  if (milestone is Map<String, dynamic>)
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        milestone['status'] == 'approved'
+                            ? Icons.verified_outlined
+                            : milestone['status'] == 'rejected'
+                            ? Icons.cancel_outlined
+                            : Icons.fact_check_outlined,
+                      ),
+                      title: Text(
+                        milestone['milestoneKey']?.toString() ??
+                            milestone['milestoneId']?.toString() ??
+                            '-',
+                      ),
+                      subtitle: Text(
+                        '${milestone['milestoneId'] ?? '-'} · ${milestone['status'] ?? '-'}',
+                      ),
+                      trailing: milestone['status'] == 'awaiting_approval'
+                          ? Wrap(
+                              spacing: 4,
+                              children: [
+                                OutlinedButton(
+                                  key: Key(
+                                    'orchestration-milestone-approve-${milestone['milestoneId']}',
+                                  ),
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _recordMilestoneDecision(
+                                          milestone,
+                                          'approve',
+                                        ),
+                                  child: const Text('批准'),
+                                ),
+                                TextButton(
+                                  key: Key(
+                                    'orchestration-milestone-reject-${milestone['milestoneId']}',
+                                  ),
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _recordMilestoneDecision(
+                                          milestone,
+                                          'reject',
+                                        ),
+                                  child: const Text('拒绝'),
+                                ),
+                              ],
+                            )
+                          : null,
+                    ),
+              ],
               if (run['status'] != 'completed' && run['status'] != 'cancelled')
                 Align(
                   alignment: Alignment.centerRight,
