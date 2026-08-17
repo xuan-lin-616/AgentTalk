@@ -551,7 +551,7 @@ impl BriefSealer {
     fn open_safe(&self, root_handle: &File, relative: &Path) -> Result<OpenedSafe, BriefSealError> {
         let file =
             fs_guard::open_relative_components(root_handle, relative, false).map_err(|source| {
-                if source.to_string().contains("reparse point forbidden") {
+                if fs_guard::is_reparse_error(&source) {
                     BriefSealError::ReparsePoint {
                         path: self.project_root.join(relative),
                     }

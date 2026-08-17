@@ -21,22 +21,3 @@ pub mod sealer;
 pub use cas::{CasObject, CoreCas};
 pub use error::BriefSealError;
 pub use sealer::{BriefSealer, PreparedBriefSeal, SealedBriefFile};
-
-/// Test-only failure injection for temp-file deletion. Production code paths
-/// must never consult this module.
-#[doc(hidden)]
-pub mod test_support {
-    use std::cell::Cell;
-
-    thread_local! {
-        static FAIL_NEXT_TEMP_DELETE: Cell<bool> = const { Cell::new(false) };
-    }
-
-    pub fn set_fail_next_temp_delete(value: bool) {
-        FAIL_NEXT_TEMP_DELETE.with(|flag| flag.set(value));
-    }
-
-    pub(crate) fn should_fail_temp_delete() -> bool {
-        FAIL_NEXT_TEMP_DELETE.with(|flag| flag.replace(false))
-    }
-}

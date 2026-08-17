@@ -110,6 +110,21 @@ fn parse_object_ref(object_ref: &str) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_TEMP_DELETE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn should_fail_temp_delete_for_test() -> bool {
+    FAIL_NEXT_TEMP_DELETE.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+fn set_fail_next_temp_delete_for_test(value: bool) {
+    FAIL_NEXT_TEMP_DELETE.with(|flag| flag.set(value));
+}
+
 #[derive(Clone, Debug)]
 pub struct CoreCas {
     project_root: PathBuf,
@@ -178,7 +193,7 @@ impl CoreCas {
     }
 
     fn traversal_error(&self, relative: &Path, source: std::io::Error) -> CasError {
-        if source.to_string().contains("reparse point forbidden") {
+        if fs_guard::is_reparse_error(&source) {
             CasError::ReparsePoint {
                 path: self.project_root.join(relative),
             }
@@ -211,7 +226,8 @@ impl CoreCas {
     }
 
     fn delete_temp_checked(&self, temp: &std::fs::File, temp_name: &str) -> Result<(), CasError> {
-        if crate::test_support::should_fail_temp_delete() {
+        #[cfg(test)]
+        if should_fail_temp_delete_for_test() {
             return Err(CasError::Io {
                 path: self.objects_root().join(temp_name),
                 source: std::io::Error::other("injected temp delete failure"),
@@ -398,6 +414,26 @@ mod tests {
     use super::*;
     use crate::fs_guard;
     use std::fs;
+
+    #[test]
+    fn injected_temp_delete_failure_prevents_success_return() {
+        let root = std::env::temp_dir().join(format!(
+            "agenttalk-cas-delete-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let cas = CoreCas::new(root.clone());
+        set_fail_next_temp_delete_for_test(true);
+        let error = cas.publish(b"delete-failure-test").unwrap_err();
+        assert_eq!(error.code_str(), "CAS_IO");
+        let object_ref = format!("sha256:{}", sha256_hex(b"delete-failure-test"));
+        assert!(cas.object_path(&object_ref).exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn flush_directory_handle_succeeds_or_reports_blocked() {

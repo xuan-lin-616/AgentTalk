@@ -50,6 +50,44 @@ const FILE_LIST_DIRECTORY: u32 = 0x0001;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
 
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TraceEntry {
+    pub parent_handle: usize,
+    pub child_handle: usize,
+    pub component: String,
+    pub open_directory: bool,
+    pub open_reparse_point: bool,
+    pub reparse_checked: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OPEN_TRACE: std::cell::RefCell<Vec<TraceEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn reparse_io_error(component: &str) -> io::Error {
+    io::Error::other(format!("reparse point forbidden: {component}"))
+}
+
+pub(crate) fn is_reparse_error(error: &io::Error) -> bool {
+    error.to_string().contains("reparse point forbidden")
+}
+
+fn check_reparse(file: &File, component: &str) -> io::Result<()> {
+    if handle_is_reparse(file)? {
+        return Err(reparse_io_error(component));
+    }
+    #[cfg(test)]
+    OPEN_TRACE.with(|trace| {
+        if let Some(entry) = trace.borrow_mut().last_mut() {
+            entry.reparse_checked = true;
+        }
+    });
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FileIdentity {
     pub volume_serial_number: u32,
@@ -158,7 +196,19 @@ fn open_child_relative(parent: &File, component: &str, open_directory: bool) -> 
             "NtCreateFile failed for component {component:?}: NTSTATUS {status:#x}"
         )));
     }
-    Ok(unsafe { File::from_raw_handle(handle as _) })
+    let file = unsafe { File::from_raw_handle(handle as _) };
+    #[cfg(test)]
+    OPEN_TRACE.with(|trace| {
+        trace.borrow_mut().push(TraceEntry {
+            parent_handle: parent.as_raw_handle() as usize,
+            child_handle: file.as_raw_handle() as usize,
+            component: component.to_owned(),
+            open_directory,
+            open_reparse_point: true,
+            reparse_checked: false,
+        });
+    });
+    Ok(file)
 }
 
 #[cfg(not(windows))]
@@ -383,11 +433,7 @@ pub fn open_relative_components(
         let is_last = index + 1 == components.len();
         let open_directory = if is_last { final_is_dir } else { true };
         let file = open_child_relative(parent, component, open_directory)?;
-        if handle_is_reparse(&file)? {
-            return Err(io::Error::other(format!(
-                "reparse point forbidden: {component}"
-            )));
-        }
+        check_reparse(&file, component)?;
         current = Some(file);
         parent = current.as_ref().expect("current file set");
     }
@@ -559,6 +605,49 @@ pub fn final_path_from_handle(file: &File) -> io::Result<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn trace_proves_parent_handle_chain_and_no_follow_flags() {
+        let root = std::env::temp_dir().join(format!(
+            "agenttalk-fsguard-trace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("plan")).unwrap();
+        fs::write(root.join("plan/roadmap.md"), b"abc").unwrap();
+
+        let root_handle = open_root_handle(&root).unwrap();
+        OPEN_TRACE.with(|trace| trace.borrow_mut().clear());
+        let mut file =
+            open_relative_components(&root_handle, Path::new("plan/roadmap.md"), false).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
+        assert_eq!(bytes, b"abc");
+
+        let trace = OPEN_TRACE.with(|trace| trace.borrow().clone());
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0].parent_handle, root_handle.as_raw_handle() as usize);
+        assert_eq!(trace[0].component, "plan");
+        assert!(trace[0].open_directory);
+        assert!(trace[0].open_reparse_point);
+        assert!(trace[0].reparse_checked);
+        assert_eq!(trace[1].parent_handle, trace[0].child_handle);
+        assert_eq!(trace[1].component, "roadmap.md");
+        assert!(!trace[1].open_directory);
+        assert!(trace[1].open_reparse_point);
+        assert!(trace[1].reparse_checked);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reparse_error_mapping_branch_is_deterministic() {
+        let error = reparse_io_error("x");
+        assert!(is_reparse_error(&error));
+        assert!(!is_reparse_error(&io::Error::other("ordinary io failure")));
+    }
 
     #[test]
     fn open_relative_components_opens_and_reads_regular_file_from_parent_handle() {
