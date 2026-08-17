@@ -107,7 +107,7 @@ fn seals_valid_brief_and_digest_is_stable() {
     assert_eq!(first.brief_snapshot_id(), second.brief_snapshot_id());
     assert_eq!(first.brief_tree_digest(), second.brief_tree_digest());
     assert_eq!(first.files().len(), 2);
-    assert!(first.brief_snapshot_id().starts_with("brief-snapshot-"));
+    assert!(first.brief_snapshot_id().starts_with("sha256:"));
 
     // Cross-check the tree digest with the contracts crate directly.
     let manifest_bytes = fs::read(project.path("agenttalk-brief.json")).unwrap();
@@ -368,4 +368,190 @@ fn prepared_seal_is_an_immutable_snapshot_not_a_run() {
     let _ = seal.canonical_tree_record();
     // There is no journal write API in this crate; C3-A stops here.
     let _ = json::parse_duplicate_safe_str("{}").unwrap();
+}
+
+#[test]
+fn snapshot_descriptor_reopens_after_authoring_tree_mutation() {
+    let project = TestProject::new();
+    let roadmap = b"# Roadmap
+";
+    let env_example = b"EXAMPLE_TOKEN=replace-me
+";
+    write_valid_project(&project, roadmap, env_example);
+    let sealer = BriefSealer::new(project.root.clone());
+    let seal = sealer.seal(&InMemorySchemaRegistry::new()).unwrap();
+
+    fs::remove_file(project.path("agenttalk-brief.json")).unwrap();
+    fs::remove_file(project.path("plan/roadmap.md")).unwrap();
+    fs::write(
+        project.path("plan/.env.example"),
+        b"mutated
+",
+    )
+    .unwrap();
+
+    let descriptor = sealer
+        .read_snapshot_descriptor(seal.brief_snapshot_id())
+        .unwrap();
+    assert_eq!(descriptor.brief_tree_digest(), seal.brief_tree_digest());
+    let manifest_bytes = sealer.cas().read(descriptor.manifest_object_ref()).unwrap();
+    let parsed = ParsedManifest::parse(&manifest_bytes).unwrap();
+    let shape = parsed.validate_shape().unwrap();
+    assert_eq!(
+        shape
+            .as_value()
+            .get("title")
+            .and_then(serde_json::Value::as_str),
+        Some("Sealer Test")
+    );
+
+    let mut re_read = Vec::new();
+    for file in descriptor.files() {
+        re_read.push((
+            file.path().to_owned(),
+            sealer.cas().read(file.object_ref()).unwrap(),
+        ));
+    }
+    assert!(re_read
+        .iter()
+        .any(|(path, bytes)| path == "plan/roadmap.md" && bytes == roadmap));
+    assert!(re_read
+        .iter()
+        .any(|(path, bytes)| path == "plan/.env.example" && bytes == env_example));
+}
+
+#[test]
+fn same_tree_digest_different_raw_manifest_produces_distinct_reopenable_snapshots() {
+    let project = TestProject::new();
+    let roadmap = b"# Roadmap
+";
+    let env_example = b"EXAMPLE_TOKEN=replace-me
+";
+    let manifest = valid_manifest(roadmap, env_example);
+    let compact = serde_json::to_vec(&manifest).unwrap();
+    let pretty = serde_json::to_vec_pretty(&manifest).unwrap();
+    project.write("agenttalk-brief.json", &compact);
+    project.write("plan/roadmap.md", roadmap);
+    project.write("plan/.env.example", env_example);
+
+    let sealer = BriefSealer::new(project.root.clone());
+    let first = sealer.seal(&InMemorySchemaRegistry::new()).unwrap();
+    project.write("agenttalk-brief.json", &pretty);
+    let second = sealer.seal(&InMemorySchemaRegistry::new()).unwrap();
+
+    assert_eq!(first.brief_tree_digest(), second.brief_tree_digest());
+    assert_ne!(first.brief_snapshot_id(), second.brief_snapshot_id());
+    let first_descriptor = sealer
+        .read_snapshot_descriptor(first.brief_snapshot_id())
+        .unwrap();
+    let second_descriptor = sealer
+        .read_snapshot_descriptor(second.brief_snapshot_id())
+        .unwrap();
+    assert_ne!(
+        first_descriptor.manifest_object_ref(),
+        second_descriptor.manifest_object_ref()
+    );
+    let first_raw = sealer
+        .cas()
+        .read(first_descriptor.manifest_object_ref())
+        .unwrap();
+    let second_raw = sealer
+        .cas()
+        .read(second_descriptor.manifest_object_ref())
+        .unwrap();
+    assert_eq!(first_raw, compact);
+    assert_eq!(second_raw, pretty);
+}
+
+#[test]
+fn schema_registry_canonical_bytes_are_sealed_in_descriptor() {
+    let project = TestProject::new();
+    let roadmap = b"# Roadmap
+";
+    let schema_value = json::parse_duplicate_safe_str(
+        r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false}"#,
+    )
+    .unwrap();
+    let canonical_schema_bytes = json::canonicalize(&schema_value).unwrap();
+    let mut registry = InMemorySchemaRegistry::new();
+    let reference = registry
+        .register_value("agenttalk.plan.schema.v1", "1", schema_value)
+        .unwrap();
+
+    let json_body = b"{\"ok\":true}
+";
+    let mut manifest = valid_manifest(
+        roadmap, b"x
+",
+    );
+    manifest["files"][0]["format"] = json!("json");
+    manifest["files"][0]["contentSchemaRef"] = json!({
+        "id": reference.id,
+        "version": reference.version,
+        "digest": reference.digest,
+    });
+    manifest["files"][0]["sha256"] = json!(agenttalk_brief_sealer::cas::sha256_hex(json_body));
+    manifest["files"][0]["size"] = json!(json_body.len());
+    project.write(
+        "agenttalk-brief.json",
+        &serde_json::to_vec(&manifest).unwrap(),
+    );
+    project.write("plan/roadmap.md", json_body);
+    project.write(
+        "plan/.env.example",
+        b"x
+",
+    );
+
+    let sealer = BriefSealer::new(project.root.clone());
+    let seal = sealer.seal(&registry).unwrap();
+    assert_eq!(seal.schemas().len(), 1);
+    let schema_ref = &seal.schemas()[0];
+    assert_eq!(schema_ref.digest(), reference.digest);
+    assert_eq!(
+        sealer
+            .cas()
+            .read(schema_ref.canonical_schema_object_ref())
+            .unwrap(),
+        canonical_schema_bytes
+    );
+
+    let descriptor = sealer
+        .read_snapshot_descriptor(seal.brief_snapshot_id())
+        .unwrap();
+    assert_eq!(descriptor.schemas().len(), 1);
+    assert_eq!(
+        sealer
+            .cas()
+            .read(descriptor.schemas()[0].canonical_schema_object_ref())
+            .unwrap(),
+        canonical_schema_bytes
+    );
+}
+
+#[test]
+fn cas_read_rejects_reparse_object_path() {
+    let project = TestProject::new();
+    let cas = CoreCas::new(project.root.clone());
+    let object = cas.publish(b"hello cas").unwrap();
+    let object_path = cas.object_path(&object.object_ref);
+    fs::remove_file(&object_path).unwrap();
+
+    let target = project.path("plan");
+    let result = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&object_path)
+        .arg(&target)
+        .output();
+    let Ok(output) = result else {
+        eprintln!("junction creation unavailable; skipping CAS reparse read assertion");
+        return;
+    };
+    if !output.status.success() {
+        eprintln!("junction creation unavailable; skipping CAS reparse read assertion");
+        return;
+    }
+
+    let error = cas.read(&object.object_ref).unwrap_err();
+    assert_eq!(error.code_str(), "BRIEF_REPARSE_POINT");
 }

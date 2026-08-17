@@ -8,6 +8,9 @@
 //! passed to the scheduler.
 //!
 //! Status: `C3-A PARTIAL / JOURNAL_PERSISTENCE_BLOCKED`
+//!
+//! CAS publication durability is atomic no-replace; full Windows directory
+//! entry durability is explicitly not claimed in this work package.
 
 pub mod cas;
 pub mod error;
