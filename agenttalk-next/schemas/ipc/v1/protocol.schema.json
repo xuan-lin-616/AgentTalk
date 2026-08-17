@@ -345,6 +345,19 @@
         "runId": { "type": "string", "minLength": 1, "maxLength": 160 }
       }
     },
+    "OrchestrationRunCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "runId", "briefSnapshotId", "briefTreeDigest", "dagSnapshotDigest", "roleBindingSnapshotDigest"],
+      "properties": {
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "briefSnapshotId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "briefTreeDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "dagSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "roleBindingSnapshotDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "ExecutionStartPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -551,7 +564,7 @@
         "protocol": { "$ref": "#/$defs/ProtocolVersion" },
         "requestId": { "$ref": "#/$defs/RequestId" },
         "sessionId": { "$ref": "#/$defs/SessionId" },
-        "command": { "enum": ["project.create", "project.update", "agent.create", "agent.update", "agent.model_binding.set", "agent.model_binding.patch", "conversation.create", "conversation.update", "connector.create", "connector.update", "connector.remove", "config.export", "config.import", "message.create", "memory.store", "summary.store", "summary.generate", "artifact.store", "attachment.import_file", "attachment.store", "retrieval.store", "retrieval.select", "retrieval.feedback", "workflow.create", "workflow.dispatch", "collaboration.create", "handoff.create", "handoff.approve", "handoff.reject", "handoff.dispatch", "handoff.cancel", "workspace.authorize", "project_agent.set", "project_agent.remove", "conversation_agent.set", "conversation_agent.remove", "identity_model_option.upsert", "identity_model_option.default", "execution.start", "execution.retry", "execution.rerun_current", "execution.cancel", "events.subscribe", "events.ack", "events.unsubscribe", "shutdown_owned", "agent.discovery.start", "agent.discovery.verify", "agent.discovery.dismiss", "agent.import_local"] },
+        "command": { "enum": ["project.create", "project.update", "agent.create", "agent.update", "agent.model_binding.set", "agent.model_binding.patch", "conversation.create", "conversation.update", "connector.create", "connector.update", "connector.remove", "config.export", "config.import", "message.create", "memory.store", "summary.store", "summary.generate", "artifact.store", "attachment.import_file", "attachment.store", "retrieval.store", "retrieval.select", "retrieval.feedback", "workflow.create", "workflow.dispatch", "collaboration.create", "handoff.create", "handoff.approve", "handoff.reject", "handoff.dispatch", "handoff.cancel", "workspace.authorize", "project_agent.set", "project_agent.remove", "conversation_agent.set", "conversation_agent.remove", "identity_model_option.upsert", "identity_model_option.default", "execution.start", "execution.retry", "execution.rerun_current", "execution.cancel", "orchestration.run.create", "events.subscribe", "events.ack", "events.unsubscribe", "shutdown_owned", "agent.discovery.start", "agent.discovery.verify", "agent.discovery.dismiss", "agent.import_local"] },
         "payload": { "type": "object" },
         "deadlineMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
       },
@@ -674,6 +687,13 @@
             "properties": { "command": { "const": "events.subscribe" } }
           },
           "then": { "properties": { "payload": { "$ref": "#/$defs/EventsSubscribePayload" } } }
+        },
+        {
+          "if": {
+            "required": ["command"],
+            "properties": { "command": { "const": "orchestration.run.create" } }
+          },
+          "then": { "properties": { "payload": { "$ref": "#/$defs/OrchestrationRunCreatePayload" } } }
         }
       ]
     },

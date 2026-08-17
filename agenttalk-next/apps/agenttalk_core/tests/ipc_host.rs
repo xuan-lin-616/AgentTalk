@@ -1,6 +1,8 @@
 #![cfg(windows)]
 
+use agenttalk_brief_sealer::BriefSealer;
 use agenttalk_ipc::{FramedTransport, NamedPipeClient};
+use agenttalk_orchestration_contracts::registry::InMemorySchemaRegistry;
 use agenttalk_protocols::{
     CommandEnvelope, ErrorEnvelope, EventEnvelope, ProtocolHandshake, ProtocolVersion,
     QueryEnvelope, ResponseEnvelope, PROTOCOL_MAJOR,
@@ -89,7 +91,60 @@ fn send_command(
             deadline_ms: None,
         })
         .unwrap();
+    let raw = client.read_json().unwrap();
+    serde_json::from_slice(&raw).unwrap_or_else(|error| {
+        panic!(
+            "expected response envelope, got {}: {error}",
+            String::from_utf8_lossy(&raw)
+        )
+    })
+}
+
+fn send_command_error(
+    client: &mut agenttalk_ipc::NamedPipeConnection,
+    request_id: &str,
+    session_id: &str,
+    command: &str,
+    payload: serde_json::Value,
+) -> ErrorEnvelope {
+    client
+        .write_json(&CommandEnvelope {
+            kind: "command".into(),
+            protocol: ProtocolVersion { major: 1, minor: 0 },
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            command: command.into(),
+            payload,
+            deadline_ms: None,
+        })
+        .unwrap();
     serde_json::from_slice(&client.read_json().unwrap()).unwrap()
+}
+
+fn send_query(
+    client: &mut agenttalk_ipc::NamedPipeConnection,
+    request_id: &str,
+    session_id: &str,
+    query: &str,
+    payload: serde_json::Value,
+) -> ResponseEnvelope {
+    client
+        .write_json(&QueryEnvelope {
+            kind: "query".into(),
+            protocol: ProtocolVersion { major: 1, minor: 0 },
+            request_id: request_id.into(),
+            session_id: session_id.into(),
+            query: query.into(),
+            payload,
+        })
+        .unwrap();
+    let raw = client.read_json().unwrap();
+    serde_json::from_slice(&raw).unwrap_or_else(|error| {
+        panic!(
+            "expected query response envelope, got {}: {error}",
+            String::from_utf8_lossy(&raw)
+        )
+    })
 }
 
 #[test]
@@ -2004,6 +2059,210 @@ fn core_host_accepts_handshake_command_and_query_over_named_pipe() {
     let _ = std::fs::remove_file(database.with_extension("db-shm"));
     let _ = std::fs::remove_file(selected_file);
     let _ = std::fs::remove_dir_all(artifact_root);
+}
+
+#[test]
+fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_nanos();
+    let pipe = format!(
+        "\\\\.\\pipe\\agenttalk-orchestration-create-test-{}-{}",
+        std::process::id(),
+        nonce
+    );
+    let database = std::env::temp_dir().join(format!(
+        "agenttalk-orchestration-create-test-{}-{}.db",
+        std::process::id(),
+        nonce
+    ));
+    let artifact_root = std::env::temp_dir().join(format!(
+        "agenttalk-orchestration-create-artifacts-{}-{}",
+        std::process::id(),
+        nonce
+    ));
+    let project_root = std::env::temp_dir().join(format!(
+        "agenttalk-orchestration-create-project-{}-{}",
+        std::process::id(),
+        nonce
+    ));
+    std::fs::create_dir_all(project_root.join("plan")).unwrap();
+    let roadmap = b"# sealed orchestration brief\n";
+    let manifest = json!({
+        "schemaVersion": "agenttalk.brief.manifest.v1",
+        "projectId": "orchestration-create-project",
+        "title": "Orchestration Create",
+        "roles": [{"roleId": "owner", "displayName": "Owner"}],
+        "files": [{
+            "path": "plan/roadmap.md",
+            "kind": "plan",
+            "format": "markdown",
+            "contentSchemaRef": null,
+            "required": true,
+            "sha256": agenttalk_brief_sealer::cas::sha256_hex(roadmap),
+            "size": roadmap.len(),
+            "context": {"layer": "shared", "roleIds": ["owner"], "retention": "run", "workspaceAccess": "read_only"},
+            "declaredOwnerRoleId": "owner"
+        }]
+    });
+    std::fs::write(
+        project_root.join("agenttalk-brief.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(project_root.join("plan/roadmap.md"), roadmap).unwrap();
+    let seal = BriefSealer::new(&project_root)
+        .seal(&InMemorySchemaRegistry::new())
+        .unwrap();
+    let project_root_string = project_root.to_string_lossy().into_owned();
+    {
+        let mut storage = SqliteStore::open(&database).unwrap();
+        storage
+            .create_project(
+                "orchestration-create-project",
+                "Orchestration Create",
+                Some(&project_root_string),
+            )
+            .unwrap();
+    }
+    let credential = format!("test-credential-{}", "x".repeat(40));
+    let executable = env!("CARGO_BIN_EXE_agenttalk-core");
+    let child = Command::new(executable)
+        .args([
+            pipe.clone(),
+            database.to_string_lossy().into_owned(),
+            artifact_root.to_string_lossy().into_owned(),
+        ])
+        .env("AGENTTALK_CORE_SESSION_CREDENTIAL", &credential)
+        .env("AGENTTALK_CORE_RUNTIME", "mock")
+        .env("AGENTTALK_CORE_DEV_MODE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _child = ChildGuard(child);
+    let mut client = connect_authenticated(
+        &pipe,
+        &credential,
+        "orchestration-create-test-client",
+        "orchestration-create-test-session",
+    );
+    let payload = json!({
+        "projectId": "orchestration-create-project",
+        "runId": "orchestration-create-run",
+        "briefSnapshotId": seal.brief_snapshot_id(),
+        "briefTreeDigest": seal.brief_tree_digest(),
+        "dagSnapshotDigest": "1".repeat(64),
+        "roleBindingSnapshotDigest": "2".repeat(64)
+    });
+    let created = send_command(
+        &mut client,
+        "orchestration-run-create-1",
+        "orchestration-create-test-session",
+        "orchestration.run.create",
+        payload.clone(),
+    );
+    assert!(created.ok);
+    assert_eq!(created.payload["created"], true);
+    assert_eq!(created.payload["run"]["runId"], "orchestration-create-run");
+    assert_eq!(
+        created.payload["run"]["briefSnapshotId"],
+        seal.brief_snapshot_id()
+    );
+    assert_eq!(
+        created.payload["projection"]["run"]["runId"],
+        "orchestration-create-run"
+    );
+
+    let replayed = send_command(
+        &mut client,
+        "orchestration-run-create-1",
+        "orchestration-create-test-session",
+        "orchestration.run.create",
+        payload,
+    );
+    assert!(replayed.ok);
+    assert_eq!(replayed.payload["run"], created.payload["run"]);
+    assert_eq!(
+        replayed.payload["projection"],
+        created.payload["projection"]
+    );
+
+    let snapshot = send_query(
+        &mut client,
+        "orchestration-run-snapshot-1",
+        "orchestration-create-test-session",
+        "orchestration.run.snapshot",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert!(snapshot.ok);
+    assert_eq!(
+        snapshot.payload["run"]["briefTreeDigest"],
+        seal.brief_tree_digest()
+    );
+    assert!(snapshot.payload["machineAcceptances"].is_array());
+
+    let recovery = send_query(
+        &mut client,
+        "orchestration-run-recovery-1",
+        "orchestration-create-test-session",
+        "orchestration.run.recovery_state",
+        json!({"runId": "orchestration-create-run"}),
+    );
+    assert!(recovery.ok);
+    assert_eq!(recovery.payload["runId"], "orchestration-create-run");
+    assert_eq!(recovery.payload["coordinatorGeneration"], 1);
+
+    let wrong_digest = json!({
+        "projectId": "orchestration-create-project",
+        "runId": "orchestration-create-run-wrong",
+        "briefSnapshotId": seal.brief_snapshot_id(),
+        "briefTreeDigest": "f".repeat(64),
+        "dagSnapshotDigest": "1".repeat(64),
+        "roleBindingSnapshotDigest": "2".repeat(64)
+    });
+    let wrong = send_command_error(
+        &mut client,
+        "orchestration-run-create-wrong-digest",
+        "orchestration-create-test-session",
+        "orchestration.run.create",
+        wrong_digest,
+    );
+    assert_eq!(wrong.code, "COMMAND_REJECTED");
+
+    let missing = send_command_error(
+        &mut client,
+        "orchestration-run-create-missing",
+        "orchestration-create-test-session",
+        "orchestration.run.create",
+        json!({"projectId": "orchestration-create-project"}),
+    );
+    assert_eq!(missing.code, "INVALID_COMMAND");
+
+    let unknown_snapshot = send_command_error(
+        &mut client,
+        "orchestration-run-create-unknown",
+        "orchestration-create-test-session",
+        "orchestration.run.create",
+        json!({
+            "projectId": "orchestration-create-project",
+            "runId": "orchestration-create-run-unknown",
+            "briefSnapshotId": format!("sha256:{}", "a".repeat(64)),
+            "briefTreeDigest": seal.brief_tree_digest(),
+            "dagSnapshotDigest": "1".repeat(64),
+            "roleBindingSnapshotDigest": "2".repeat(64)
+        }),
+    );
+    assert_eq!(unknown_snapshot.code, "COMMAND_REJECTED");
+
+    drop(client);
+    drop(_child);
+    let _ = std::fs::remove_file(&database);
+    let _ = std::fs::remove_file(database.with_extension("db-wal"));
+    let _ = std::fs::remove_file(database.with_extension("db-shm"));
+    let _ = std::fs::remove_dir_all(artifact_root);
+    let _ = std::fs::remove_dir_all(project_root);
 }
 
 #[test]

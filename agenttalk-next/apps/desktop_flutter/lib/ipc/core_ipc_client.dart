@@ -1063,6 +1063,12 @@ void _requireNonEmpty(String field, String value) {
   }
 }
 
+void _requireLowerHex64(String field, String value) {
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(value)) {
+    throw CoreIpcException('$field must be lowercase hex64');
+  }
+}
+
 void _requireExactFields(
   Map<String, dynamic> json,
   Set<String> fields,
@@ -2084,6 +2090,52 @@ class CoreIpcClient {
         payload['machineAcceptances'] is! List) {
       throw const CoreIpcException(
         'orchestration.run.snapshot payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> createOrchestrationRun({
+    required String sessionId,
+    required String projectId,
+    required String runId,
+    required String briefSnapshotId,
+    required String briefTreeDigest,
+    required String dagSnapshotDigest,
+    required String roleBindingSnapshotDigest,
+  }) async {
+    _requireNonEmpty('projectId', projectId);
+    _requireNonEmpty('runId', runId);
+    if (!RegExp(r'^sha256:[0-9a-f]{64}$').hasMatch(briefSnapshotId)) {
+      throw const CoreIpcException(
+        'briefSnapshotId must be sha256:<lowercase hex64>',
+      );
+    }
+    _requireLowerHex64('briefTreeDigest', briefTreeDigest);
+    _requireLowerHex64('dagSnapshotDigest', dagSnapshotDigest);
+    _requireLowerHex64('roleBindingSnapshotDigest', roleBindingSnapshotDigest);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-run-create'),
+      'sessionId': sessionId,
+      'command': orchestrationRunCreateCommand,
+      'payload': {
+        'projectId': projectId,
+        'runId': runId,
+        'briefSnapshotId': briefSnapshotId,
+        'briefTreeDigest': briefTreeDigest,
+        'dagSnapshotDigest': dagSnapshotDigest,
+        'roleBindingSnapshotDigest': roleBindingSnapshotDigest,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['created'] is! bool ||
+        payload['run'] is! Map<String, dynamic> ||
+        payload['projection'] is! Map<String, dynamic>) {
+      throw const CoreIpcException(
+        'orchestration.run.create response payload is invalid',
       );
     }
     return payload;

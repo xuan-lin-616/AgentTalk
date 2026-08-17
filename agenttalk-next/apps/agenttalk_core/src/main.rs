@@ -2935,6 +2935,61 @@ fn handle_command(
         };
     }
     match command.command.as_str() {
+        "orchestration.run.create" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "projectId",
+                        "runId",
+                        "briefSnapshotId",
+                        "briefTreeDigest",
+                        "dagSnapshotDigest",
+                        "roleBindingSnapshotDigest",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let project_id = required_string(&command.payload, "projectId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let run_id = required_string(&command.payload, "runId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let brief_snapshot_id = required_string(&command.payload, "briefSnapshotId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let brief_tree_digest =
+                    required_orchestration_digest(&command.payload, "briefTreeDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let dag_snapshot_digest =
+                    required_orchestration_digest(&command.payload, "dagSnapshotDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let role_binding_snapshot_digest =
+                    required_orchestration_digest(&command.payload, "roleBindingSnapshotDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let run = core
+                    .create_orchestration_run_from_prepared_facts(
+                        &project_id,
+                        &run_id,
+                        &brief_snapshot_id,
+                        &brief_tree_digest,
+                        &dag_snapshot_digest,
+                        &role_binding_snapshot_digest,
+                    )
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                let projection = core
+                    .orchestration_projection(&run_id)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({
+                    "created": true,
+                    "run": run,
+                    "projection": projection,
+                }))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
         "project.create" => {
             let project = Project {
                 id: parse_or_error!(required_string(&command.payload, "projectId")),
@@ -6146,6 +6201,19 @@ fn required_string(payload: &Value, key: &str) -> Result<String, Box<dyn Error>>
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| format!("missing required field {key}").into())
+}
+
+#[cfg(windows)]
+fn required_orchestration_digest(payload: &Value, key: &str) -> Result<String, Box<dyn Error>> {
+    let value = required_string(payload, key)?;
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("{key} must be lowercase hex64").into());
+    }
+    Ok(value)
 }
 
 #[cfg(windows)]

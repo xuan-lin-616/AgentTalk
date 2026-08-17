@@ -34,7 +34,8 @@ pub struct OrchestrationRunSeed {
     pub role_binding_snapshot_digest: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrchestrationRunRecord {
     pub run_id: String,
     pub project_id: String,
@@ -156,6 +157,20 @@ impl CasVerifier for CoreCasVerifier<'_> {
 }
 
 impl SqliteStore {
+    pub fn project_root_path(&self, project_id: &str) -> Result<Option<String>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT root_path FROM projects WHERE id = ?1",
+                [project_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::ProjectNotFound {
+                id: project_id.to_owned(),
+            })
+            .map(|root| root.filter(|value| !value.trim().is_empty()))
+    }
+
     pub fn create_orchestration_run(
         &mut self,
         seed: OrchestrationRunSeed,

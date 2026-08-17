@@ -22,8 +22,8 @@ use agenttalk_runtime_host::{
 use agenttalk_storage::{
     AgentModelBinding, AgentModelBindingPatch, ArtifactBodyChunk, CommandReceipt,
     CommandReceiptKey, LocalAgentImportOutcome, LocalAgentImportRequest, OrchestrationRunRecord,
-    RetrievalEmbeddingProvider, RetrievalPreviewRequest, SqliteStore, StorageError,
-    StoredModelSelection,
+    OrchestrationRunSeed, RetrievalEmbeddingProvider, RetrievalPreviewRequest, SqliteStore,
+    StorageError, StoredModelSelection,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -966,6 +966,44 @@ impl PersistentCore {
     /// digest/object references, never sealed bytes or SQLite access.
     pub fn orchestration_projection(&self, run_id: &str) -> Result<Value, CoreError> {
         Ok(self.storage.orchestration_projection(run_id)?)
+    }
+
+    /// Create a Run from a previously sealed brief snapshot. IPC callers pass
+    /// only sealed facts; Core resolves the authoritative project root from
+    /// its own project journal and re-reads the snapshot descriptor from CAS
+    /// before writing the Run.
+    pub fn create_orchestration_run_from_prepared_facts(
+        &mut self,
+        project_id: &str,
+        run_id: &str,
+        brief_snapshot_id: &str,
+        brief_tree_digest: &str,
+        dag_snapshot_digest: &str,
+        role_binding_snapshot_digest: &str,
+    ) -> Result<OrchestrationRunRecord, CoreError> {
+        let project_root = self.storage.project_root_path(project_id)?.ok_or_else(|| {
+            StorageError::ModelSnapshotInvalid {
+                reason: "project has no sealed brief root".into(),
+            }
+        })?;
+        let sealer = BriefSealer::new(project_root);
+        let descriptor = sealer.read_snapshot_descriptor(brief_snapshot_id)?;
+        if descriptor.brief_tree_digest() != brief_tree_digest {
+            return Err(StorageError::ModelSnapshotInvalid {
+                reason: "brief tree digest does not match sealed snapshot".into(),
+            }
+            .into());
+        }
+        self.storage
+            .create_orchestration_run(OrchestrationRunSeed {
+                run_id: run_id.to_owned(),
+                project_id: project_id.to_owned(),
+                brief_snapshot_id: brief_snapshot_id.to_owned(),
+                brief_tree_digest: brief_tree_digest.to_owned(),
+                dag_snapshot_digest: dag_snapshot_digest.to_owned(),
+                role_binding_snapshot_digest: role_binding_snapshot_digest.to_owned(),
+            })?;
+        Ok(self.storage.orchestration_run(run_id)?)
     }
 
     pub fn orchestration_recovery_state(&self, run_id: &str) -> Result<Value, CoreError> {

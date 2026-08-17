@@ -6,6 +6,7 @@ const int defaultMaxMessageBytes = 1024 * 1024;
 const String orchestrationRunSnapshotQuery = 'orchestration.run.snapshot';
 const String orchestrationRunRecoveryStateQuery =
     'orchestration.run.recovery_state';
+const String orchestrationRunCreateCommand = 'orchestration.run.create';
 
 class ProtocolVersion {
   const ProtocolVersion(this.major, this.minor);

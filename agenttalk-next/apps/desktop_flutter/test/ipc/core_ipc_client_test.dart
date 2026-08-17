@@ -496,43 +496,119 @@ void main() {
     expect(pipe.writtenRequestIds, hasLength(1));
   });
 
-  test('orchestration snapshot and recovery queries stay metadata-only', () async {
-    final pipe = _FakePipe(
-      responsePayload: const {
-        'run': {'runId': 'run-1', 'status': 'pending'},
-        'nodes': <dynamic>[],
-        'attempts': <dynamic>[],
-        'machineAcceptances': <dynamic>[],
-        'artifactBindings': <dynamic>[],
-      },
-    );
-    final client = _clientFor(pipe);
-    addTearDown(client.close);
+  test(
+    'orchestration snapshot and recovery queries stay metadata-only',
+    () async {
+      final pipe = _FakePipe(
+        responsePayload: const {
+          'run': {'runId': 'run-1', 'status': 'pending'},
+          'nodes': <dynamic>[],
+          'attempts': <dynamic>[],
+          'machineAcceptances': <dynamic>[],
+          'artifactBindings': <dynamic>[],
+        },
+      );
+      final client = _clientFor(pipe);
+      addTearDown(client.close);
 
-    final snapshot = await client.queryOrchestrationRunSnapshot(
-      sessionId: 'session-test-123456',
-      runId: 'run-1',
-    );
-    expect(snapshot['run'], isA<Map<String, dynamic>>());
-    expect(pipe.writtenQueries, ['orchestration.run.snapshot']);
-    expect(pipe.writtenPayloads.single, {'runId': 'run-1'});
+      final snapshot = await client.queryOrchestrationRunSnapshot(
+        sessionId: 'session-test-123456',
+        runId: 'run-1',
+      );
+      expect(snapshot['run'], isA<Map<String, dynamic>>());
+      expect(pipe.writtenQueries, ['orchestration.run.snapshot']);
+      expect(pipe.writtenPayloads.single, {'runId': 'run-1'});
 
-    final recoveryPipe = _FakePipe(
-      responsePayload: const {
+      final recoveryPipe = _FakePipe(
+        responsePayload: const {
+          'runId': 'run-1',
+          'coordinatorGeneration': 2,
+          'nodes': <dynamic>[],
+        },
+      );
+      final recoveryClient = _clientFor(recoveryPipe);
+      addTearDown(recoveryClient.close);
+      final recovery = await recoveryClient.queryOrchestrationRecoveryState(
+        sessionId: 'session-test-123456',
+        runId: 'run-1',
+      );
+      expect(recovery['coordinatorGeneration'], 2);
+      expect(recoveryPipe.writtenQueries, ['orchestration.run.recovery_state']);
+    },
+  );
+
+  test(
+    'createOrchestrationRun sends sealed facts and validates projection',
+    () async {
+      final pipe = _FakePipe(
+        responsePayload: const {
+          'created': true,
+          'run': {
+            'runId': 'run-1',
+            'briefSnapshotId':
+                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+          'projection': {
+            'run': {'runId': 'run-1'},
+          },
+        },
+      );
+      final client = _clientFor(pipe);
+      addTearDown(client.close);
+
+      final result = await client.createOrchestrationRun(
+        sessionId: 'session-test-123456',
+        projectId: 'project-1',
+        runId: 'run-1',
+        briefSnapshotId:
+            'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        briefTreeDigest:
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        dagSnapshotDigest:
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        roleBindingSnapshotDigest:
+            'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+      );
+
+      expect(result['created'], true);
+      expect(pipe.writtenCommands, ['orchestration.run.create']);
+      expect(pipe.writtenPayloads.single, {
+        'projectId': 'project-1',
         'runId': 'run-1',
-        'coordinatorGeneration': 2,
-        'nodes': <dynamic>[],
-      },
-    );
-    final recoveryClient = _clientFor(recoveryPipe);
-    addTearDown(recoveryClient.close);
-    final recovery = await recoveryClient.queryOrchestrationRecoveryState(
-      sessionId: 'session-test-123456',
-      runId: 'run-1',
-    );
-    expect(recovery['coordinatorGeneration'], 2);
-    expect(recoveryPipe.writtenQueries, ['orchestration.run.recovery_state']);
-  });
+        'briefSnapshotId':
+            'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'briefTreeDigest':
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        'dagSnapshotDigest':
+            'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+        'roleBindingSnapshotDigest':
+            'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+      });
+    },
+  );
+
+  test(
+    'createOrchestrationRun rejects non-canonical digest inputs locally',
+    () async {
+      final pipe = _FakePipe();
+      final client = _clientFor(pipe);
+      addTearDown(client.close);
+
+      await expectLater(
+        client.createOrchestrationRun(
+          sessionId: 'session-test-123456',
+          projectId: 'project-1',
+          runId: 'run-1',
+          briefSnapshotId: 'sha256:${'A' * 64}',
+          briefTreeDigest: 'b' * 64,
+          dagSnapshotDigest: 'c' * 64,
+          roleBindingSnapshotDigest: 'd' * 64,
+        ),
+        throwsA(isA<CoreIpcException>()),
+      );
+      expect(pipe.writtenCommands, isEmpty);
+    },
+  );
 
   test(
     'local discovery queries use empty payloads and reject extra fields',
