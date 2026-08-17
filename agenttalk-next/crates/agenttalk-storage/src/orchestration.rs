@@ -578,9 +578,12 @@ impl SqliteStore {
             tx.commit()?;
             return Ok(true);
         }
-        // New path: full authority closure in one Immediate transaction.
-        Self::validate_handoff_authority(&tx, &delivery, bindings)?;
-        SqliteStore::verify_cas_before_journal(cas, &delivery, bindings)?;
+        // New path: read and verify the sealed envelope/artifacts before any
+        // journal row is written. The envelope bytes themselves are part of
+        // authority validation; reconstructing an envelope from caller
+        // fields is insufficient because it would not prove what CAS holds.
+        let actual_envelope = SqliteStore::verify_cas_before_journal(cas, &delivery, bindings)?;
+        Self::validate_handoff_authority(&tx, &delivery, bindings, &actual_envelope)?;
         for binding in bindings {
             if binding.edge_port_id.is_empty() || binding.content_schema_ref_json.is_empty() {
                 return Err(StorageError::OrchestrationArtifactBindingInvalid {
@@ -775,12 +778,34 @@ impl SqliteStore {
         cas: &dyn CasVerifier,
         delivery: &HandoffDeliveryRecord,
         bindings: &[ArtifactBindingInput],
-    ) -> Result<(), StorageError> {
-        verify_cas_object(
+    ) -> Result<serde_json::Value, StorageError> {
+        let envelope_bytes = verify_cas_object(
             cas,
             &delivery.envelope_object_ref,
             &delivery.envelope_raw_sha256,
         )?;
+        let actual_envelope =
+            agenttalk_orchestration_contracts::json::parse_duplicate_safe(&envelope_bytes)
+                .map_err(|_error| StorageError::HandoffDeliveryConflict {
+                    attempt_id: delivery.attempt_id.clone(),
+                    edge_id: delivery.edge_id.clone(),
+                    lease_epoch: delivery.lease_epoch,
+                })?;
+        let canonical_envelope = agenttalk_orchestration_contracts::json::canonicalize(
+            &actual_envelope,
+        )
+        .map_err(|_| StorageError::HandoffDeliveryConflict {
+            attempt_id: delivery.attempt_id.clone(),
+            edge_id: delivery.edge_id.clone(),
+            lease_epoch: delivery.lease_epoch,
+        })?;
+        if canonical_envelope != envelope_bytes {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
         verify_cas_object(
             cas,
             &delivery.acceptance_contract_ref,
@@ -794,13 +819,14 @@ impl SqliteStore {
         for binding in bindings {
             verify_cas_object(cas, &binding.object_ref, &binding.sha256)?;
         }
-        Ok(())
+        Ok(actual_envelope)
     }
 
     fn validate_handoff_authority(
         tx: &rusqlite::Transaction<'_>,
         delivery: &HandoffDeliveryRecord,
         bindings: &[ArtifactBindingInput],
+        actual_envelope: &serde_json::Value,
     ) -> Result<(), StorageError> {
         use agenttalk_orchestration_contracts::handoff;
         use serde_json::{Map, Value};
@@ -1093,7 +1119,7 @@ impl SqliteStore {
             })
             .collect();
 
-        let envelope = Value::Object(Map::from_iter([
+        let expected_envelope = Value::Object(Map::from_iter([
             (
                 "schemaVersion".to_owned(),
                 Value::String("agenttalk.handoff.envelope.v1".to_owned()),
@@ -1133,25 +1159,89 @@ impl SqliteStore {
             ("artifactBindings".to_owned(), Value::Array(bindings_json)),
         ]));
 
-        let mut envelope = envelope;
-        if let Some(object) = envelope.as_object_mut() {
+        let mut expected_envelope = expected_envelope;
+        if let Some(object) = expected_envelope.as_object_mut() {
             object.insert("envelopeSha256".to_owned(), Value::String(String::new()));
         }
-        let computed_jcs = handoff::envelope_sha256_hex(&envelope).map_err(|_| {
+        let expected_idempotency = handoff::idempotency_key_hex(&expected_envelope).map_err(|_| {
             StorageError::HandoffDeliveryConflict {
                 attempt_id: delivery.attempt_id.clone(),
                 edge_id: delivery.edge_id.clone(),
                 lease_epoch: delivery.lease_epoch,
             }
         })?;
-        if computed_jcs != delivery.envelope_sha256_jcs {
+        let expected_transfer =
+            handoff::artifact_transfer_set_digest_hex(&expected_envelope).map_err(|_| {
+                StorageError::HandoffDeliveryConflict {
+                    attempt_id: delivery.attempt_id.clone(),
+                    edge_id: delivery.edge_id.clone(),
+                    lease_epoch: delivery.lease_epoch,
+                }
+            })?;
+        if expected_idempotency != delivery.idempotency_key
+            || expected_transfer != delivery.artifact_transfer_set_digest
+        {
             return Err(StorageError::HandoffDeliveryConflict {
                 attempt_id: delivery.attempt_id.clone(),
                 edge_id: delivery.edge_id.clone(),
                 lease_epoch: delivery.lease_epoch,
             });
         }
-        let computed_idempotency = handoff::idempotency_key_hex(&envelope).map_err(|_| {
+        let actual_from = actual_envelope.get("from").and_then(Value::as_object);
+        let actual_to = actual_envelope.get("to").and_then(Value::as_object);
+        let actual_identity_matches = actual_envelope.get("schemaVersion").and_then(Value::as_str)
+            == Some("agenttalk.handoff.envelope.v1")
+            && actual_envelope.get("handoffId").and_then(Value::as_str)
+                == Some(delivery.envelope_handoff_id.as_str())
+            && actual_envelope.get("projectRunId").and_then(Value::as_str)
+                == Some(delivery.run_id.as_str())
+            && actual_envelope.get("edgeId").and_then(Value::as_str)
+                == Some(delivery.edge_id.as_str())
+            && actual_envelope.get("leaseEpoch").and_then(Value::as_i64)
+                == Some(delivery.lease_epoch)
+            && actual_from
+                .and_then(|value| value.get("taskNodeId"))
+                .and_then(Value::as_str)
+                == Some(delivery.from_task_node_id.as_str())
+            && actual_from
+                .and_then(|value| value.get("attemptId"))
+                .and_then(Value::as_str)
+                == Some(delivery.attempt_id.as_str())
+            && actual_from
+                .and_then(|value| value.get("executionRunId"))
+                .and_then(Value::as_str)
+                == Some(delivery.from_execution_run_id.as_str())
+            && actual_to
+                .and_then(|value| value.get("taskNodeId"))
+                .and_then(Value::as_str)
+                == Some(delivery.to_task_node_id.as_str());
+        if !actual_identity_matches {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+        let actual_jcs = handoff::envelope_sha256_hex(actual_envelope).map_err(|_| {
+            StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            }
+        })?;
+        if actual_jcs != delivery.envelope_sha256_jcs
+            || actual_envelope
+                .get("envelopeSha256")
+                .and_then(Value::as_str)
+                != Some(delivery.envelope_sha256_jcs.as_str())
+        {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+        let computed_idempotency = handoff::idempotency_key_hex(actual_envelope).map_err(|_| {
             StorageError::HandoffDeliveryConflict {
                 attempt_id: delivery.attempt_id.clone(),
                 edge_id: delivery.edge_id.clone(),
@@ -1188,13 +1278,11 @@ impl SqliteStore {
             });
         }
 
-        let computed_transfer =
-            handoff::artifact_transfer_set_digest_hex(&envelope).map_err(|_| {
-                StorageError::HandoffDeliveryConflict {
-                    attempt_id: delivery.attempt_id.clone(),
-                    edge_id: delivery.edge_id.clone(),
-                    lease_epoch: delivery.lease_epoch,
-                }
+        let computed_transfer = handoff::artifact_transfer_set_digest_hex(actual_envelope)
+            .map_err(|_| StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
             })?;
         if computed_transfer != delivery.artifact_transfer_set_digest {
             return Err(StorageError::HandoffDeliveryConflict {
@@ -1826,7 +1914,7 @@ fn verify_cas_object(
     cas: &dyn CasVerifier,
     object_ref: &str,
     expected_sha256: &str,
-) -> Result<(), StorageError> {
+) -> Result<Vec<u8>, StorageError> {
     let expected_hex = object_ref.strip_prefix("sha256:").ok_or_else(|| {
         StorageError::OrchestrationArtifactBindingInvalid {
             reason: "object ref must be sha256:<hex>".into(),
@@ -1844,7 +1932,7 @@ fn verify_cas_object(
             reason: "CAS object content digest mismatch".into(),
         });
     }
-    Ok(())
+    Ok(bytes)
 }
 
 fn canonicalize_audit_payload(payload: &str) -> Result<String, StorageError> {
@@ -2510,6 +2598,29 @@ mod tests {
         wrong_jcs.envelope_sha256_jcs = "2".repeat(64);
         assert!(store
             .record_handoff_delivery(wrong_jcs, &bindings, &verifier)
+            .is_err());
+
+        // The CAS object can be internally self-consistent while still being
+        // a different envelope. Journal authority must be bound to the exact
+        // sealed envelope bytes, not merely to a caller-reconstructed value.
+        let actual_bytes = cas.read(&delivery.envelope_object_ref).unwrap();
+        let mut foreign_envelope =
+            agenttalk_orchestration_contracts::json::parse_duplicate_safe(&actual_bytes).unwrap();
+        foreign_envelope["projectRunId"] = serde_json::Value::String("foreign-run".into());
+        foreign_envelope["envelopeSha256"] = serde_json::Value::String(String::new());
+        let foreign_jcs =
+            agenttalk_orchestration_contracts::handoff::envelope_sha256_hex(&foreign_envelope)
+                .unwrap();
+        foreign_envelope["envelopeSha256"] = serde_json::Value::String(foreign_jcs.clone());
+        let foreign_bytes =
+            agenttalk_orchestration_contracts::json::canonicalize(&foreign_envelope).unwrap();
+        let foreign_object = cas.publish(&foreign_bytes).unwrap();
+        let mut foreign_actual = delivery.clone();
+        foreign_actual.envelope_object_ref = foreign_object.object_ref;
+        foreign_actual.envelope_raw_sha256 = foreign_object.sha256;
+        foreign_actual.envelope_sha256_jcs = foreign_jcs;
+        assert!(store
+            .record_handoff_delivery(foreign_actual, &bindings, &verifier)
             .is_err());
 
         let mut wrong_contract = delivery.clone();
