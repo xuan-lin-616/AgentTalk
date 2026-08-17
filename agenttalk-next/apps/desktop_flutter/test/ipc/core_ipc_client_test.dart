@@ -672,6 +672,22 @@ void main() {
       );
       expect(started['outcome'], isA<Map<String, dynamic>>());
       expect(startPipe.writtenCommands, ['orchestration.task.start']);
+
+      final sealPipe = _FakePipe(
+        responsePayload: const {
+          'changed': true,
+          'nodeId': 'node-1',
+          'status': 'sealing',
+        },
+      );
+      final sealClient = _clientFor(sealPipe);
+      addTearDown(sealClient.close);
+      final sealed = await sealClient.sealOrchestrationTask(
+        sessionId: 'session-test-123456',
+        nodeId: 'node-1',
+      );
+      expect(sealed['status'], 'sealing');
+      expect(sealPipe.writtenCommands, ['orchestration.task.seal']);
     },
   );
 

@@ -1102,6 +1102,14 @@ impl PersistentCore {
         )?)
     }
 
+    pub fn transition_orchestration_task_to_sealing(
+        &mut self,
+        node_id: &str,
+    ) -> Result<(), CoreError> {
+        self.storage.transition_attempt_to_sealing(node_id)?;
+        Ok(())
+    }
+
     pub fn record_orchestration_handoff_delivery(
         &mut self,
         delivery: HandoffDeliveryRecord,

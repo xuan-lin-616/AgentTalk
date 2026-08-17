@@ -2243,6 +2243,31 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> sealOrchestrationTask({
+    required String sessionId,
+    required String nodeId,
+  }) async {
+    _requireNonEmpty('nodeId', nodeId);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-task-seal'),
+      'sessionId': sessionId,
+      'command': orchestrationTaskSealCommand,
+      'payload': {'nodeId': nodeId},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['changed'] is! bool ||
+        payload['nodeId'] != nodeId ||
+        payload['status'] != 'sealing') {
+      throw const CoreIpcException(
+        'orchestration.task.seal response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> recordOrchestrationDelivery({
     required String sessionId,
     required Map<String, dynamic> delivery,

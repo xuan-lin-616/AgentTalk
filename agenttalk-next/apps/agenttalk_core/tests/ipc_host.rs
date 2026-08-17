@@ -2331,6 +2331,15 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
         running_snapshot.payload["attempts"][0]["fromExecutionRunId"],
         "execution-1"
     );
+    let sealed = send_command(
+        &mut client,
+        "orchestration-task-seal-1",
+        "orchestration-create-test-session",
+        "orchestration.task.seal",
+        json!({"nodeId": "orchestration-node-1"}),
+    );
+    assert!(sealed.ok);
+    assert_eq!(sealed.payload["status"], "sealing");
 
     let approval_run = send_command(
         &mut client,

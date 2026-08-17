@@ -3082,6 +3082,23 @@ fn handle_command(
                 }
             }
         }
+        "orchestration.task.seal" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(&command.payload, &["nodeId"])
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let node_id = required_string(&command.payload, "nodeId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                core.transition_orchestration_task_to_sealing(&node_id)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({"changed": true, "nodeId": node_id, "status": "sealing"}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
         "orchestration.delivery.record" => {
             let result = (|| -> Result<Value, (&str, String, bool)> {
                 reject_unknown_fields(&command.payload, &["delivery", "bindings"])

@@ -10,6 +10,7 @@ const String orchestrationRunCreateCommand = 'orchestration.run.create';
 const String orchestrationTaskInsertCommand = 'orchestration.task.insert';
 const String orchestrationTaskReadyCommand = 'orchestration.task.ready';
 const String orchestrationTaskStartCommand = 'orchestration.task.start';
+const String orchestrationTaskSealCommand = 'orchestration.task.seal';
 const String orchestrationDeliveryRecordCommand =
     'orchestration.delivery.record';
 const String orchestrationAcceptanceRecordCommand =
