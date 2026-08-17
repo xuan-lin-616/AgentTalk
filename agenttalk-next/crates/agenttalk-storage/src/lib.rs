@@ -28,7 +28,8 @@ const V13_SCHEMA_VERSION: i64 = 13;
 const V14_SCHEMA_VERSION: i64 = 14;
 const V15_SCHEMA_VERSION: i64 = 15;
 const V16_SCHEMA_VERSION: i64 = 16;
-pub const SCHEMA_VERSION: i64 = 16;
+const V17_SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 17;
 const HISTORICAL_V11_MIGRATION_CHECKSUM: &str =
     "f5a0e07a7de1f53b86aeee16e4908321abf637bae8b5372e019a37a39f6a38c7";
 const MUTATED_V11_MIGRATION_CHECKSUM: &str =
@@ -892,6 +893,39 @@ CREATE TABLE orchestration_artifact_bindings (
 DROP TABLE orchestration_artifact_bindings_v15;
 "#;
 
+const MIGRATION_V17_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS orchestration_machine_acceptances (
+  acceptance_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  edge_id TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL,
+  delivery_id TEXT NOT NULL,
+  acceptance_contract_ref TEXT NOT NULL,
+  acceptance_contract_digest TEXT NOT NULL,
+  acceptance_evidence_ref TEXT NOT NULL,
+  acceptance_evidence_digest TEXT NOT NULL,
+  verifier_id TEXT NOT NULL,
+  verifier_version TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK(verdict IN ('accepted','rejected','error')),
+  result_digest TEXT NOT NULL CHECK(length(result_digest) = 64 AND result_digest = lower(result_digest)),
+  coordinator_generation INTEGER NOT NULL CHECK(coordinator_generation >= 0),
+  core_timestamp INTEGER NOT NULL CHECK(core_timestamp >= 0),
+  UNIQUE(delivery_id),
+  UNIQUE(attempt_id, edge_id, lease_epoch)
+);
+CREATE TRIGGER orchestration_machine_acceptances_no_update
+BEFORE UPDATE ON orchestration_machine_acceptances
+BEGIN
+  SELECT RAISE(ABORT, 'orchestration_machine_acceptances is append-only');
+END;
+CREATE TRIGGER orchestration_machine_acceptances_no_delete
+BEFORE DELETE ON orchestration_machine_acceptances
+BEGIN
+  SELECT RAISE(ABORT, 'orchestration_machine_acceptances is append-only');
+END;
+"#;
+
 /// Non-secret durable ACP binding metadata. It deliberately has no path,
 /// endpoint, process, environment, credential, or raw runtime JSON field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1032,6 +1066,10 @@ pub enum StorageError {
     OrchestrationArtifactBindingInvalid { reason: String },
     #[error("orchestration audit payload canonicalization failed: {reason}")]
     AuditPayloadCanonicalization { reason: String },
+    #[error("machine acceptance is invalid: {reason}")]
+    MachineAcceptanceInvalid { reason: String },
+    #[error("machine acceptance conflicts for delivery {delivery_id}")]
+    MachineAcceptanceConflict { delivery_id: String },
     #[error("v15 orchestrator state cannot be mapped to v16: {detail}")]
     MigrationInvalidV15State { detail: String },
     #[error("artifact body is not registered: {id}")]
@@ -1593,7 +1631,8 @@ impl SqliteStore {
         self.migrate_v13()?;
         self.migrate_v14()?;
         self.migrate_v15()?;
-        self.migrate_v16()
+        self.migrate_v16()?;
+        self.migrate_v17()
     }
 
     fn migrate_v12(&mut self) -> Result<(), StorageError> {
@@ -1939,8 +1978,53 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v17(&mut self) -> Result<(), StorageError> {
+        let checksum = hex_digest(MIGRATION_V17_SQL.as_bytes());
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let dirty: Option<i64> = tx
+            .query_row(
+                "SELECT dirty FROM schema_migrations WHERE version = ?1",
+                [V17_SCHEMA_VERSION],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(dirty) = dirty {
+            if dirty != 0 {
+                return Err(StorageError::MigrationDirty {
+                    version: V17_SCHEMA_VERSION,
+                });
+            }
+            let existing: String = tx.query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = ?1",
+                [V17_SCHEMA_VERSION],
+                |row| row.get(0),
+            )?;
+            if existing != checksum {
+                return Err(StorageError::MigrationChecksumMismatch {
+                    version: V17_SCHEMA_VERSION,
+                });
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at, dirty)
+             VALUES(?1, ?2, strftime('%s','now'), 1)",
+            params![V17_SCHEMA_VERSION, checksum],
+        )?;
+        tx.execute_batch(MIGRATION_V17_SQL)?;
+        tx.execute(
+            "UPDATE schema_migrations SET dirty = 0 WHERE version = ?1",
+            [V17_SCHEMA_VERSION],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn migration_checksum(&self) -> String {
-        hex_digest(MIGRATION_V16_SQL.as_bytes())
+        hex_digest(MIGRATION_V17_SQL.as_bytes())
     }
 
     pub fn event_stream_epoch(&mut self) -> Result<String, StorageError> {
@@ -9773,12 +9857,12 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![7, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(versions, vec![7, 11, 12, 13, 14, 15, 16, 17]);
         let checksums: Vec<(i64, String)> = store
             .connection
             .prepare(
                 "SELECT version, checksum FROM schema_migrations
-                 WHERE version IN (?1, ?2, ?3, ?4, ?5, ?6) ORDER BY version",
+                 WHERE version IN (?1, ?2, ?3, ?4, ?5, ?6, ?7) ORDER BY version",
             )
             .unwrap()
             .query_map(
@@ -9788,6 +9872,7 @@ mod tests {
                     V13_SCHEMA_VERSION,
                     V14_SCHEMA_VERSION,
                     V15_SCHEMA_VERSION,
+                    V16_SCHEMA_VERSION,
                     SCHEMA_VERSION
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -9803,6 +9888,7 @@ mod tests {
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
                 (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
                 (V15_SCHEMA_VERSION, hex_digest(MIGRATION_V15_SQL.as_bytes())),
+                (V16_SCHEMA_VERSION, hex_digest(MIGRATION_V16_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
@@ -9901,6 +9987,7 @@ mod tests {
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
                 (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
                 (V15_SCHEMA_VERSION, hex_digest(MIGRATION_V15_SQL.as_bytes())),
+                (V16_SCHEMA_VERSION, hex_digest(MIGRATION_V16_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
@@ -9936,7 +10023,7 @@ mod tests {
             .connection
             .prepare(
                 "SELECT version, checksum FROM schema_migrations
-                 WHERE version IN (?1, ?2, ?3, ?4, ?5, ?6) ORDER BY version",
+                 WHERE version IN (?1, ?2, ?3, ?4, ?5, ?6, ?7) ORDER BY version",
             )
             .unwrap()
             .query_map(
@@ -9946,6 +10033,7 @@ mod tests {
                     V13_SCHEMA_VERSION,
                     V14_SCHEMA_VERSION,
                     V15_SCHEMA_VERSION,
+                    V16_SCHEMA_VERSION,
                     SCHEMA_VERSION
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -9961,6 +10049,7 @@ mod tests {
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
                 (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
                 (V15_SCHEMA_VERSION, hex_digest(MIGRATION_V15_SQL.as_bytes())),
+                (V16_SCHEMA_VERSION, hex_digest(MIGRATION_V16_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );

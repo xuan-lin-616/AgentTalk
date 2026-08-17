@@ -1,4 +1,4 @@
-use crate::{SqliteStore, StorageError, SCHEMA_VERSION, V16_SCHEMA_VERSION};
+use crate::{SqliteStore, StorageError, SCHEMA_VERSION, V17_SCHEMA_VERSION};
 use agenttalk_brief_sealer::PreparedBriefSeal;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -11,6 +11,13 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 fn is_hex64(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_lower_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn is_object_ref(value: &str) -> bool {
@@ -102,6 +109,26 @@ pub struct ArtifactBindingInput {
     pub normalized_content_type: String,
     pub normalized_content_type_policy_version: String,
     pub content_schema_ref_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MachineAcceptanceRecord {
+    pub acceptance_id: String,
+    pub run_id: String,
+    pub attempt_id: String,
+    pub edge_id: String,
+    pub lease_epoch: i64,
+    pub delivery_id: String,
+    pub acceptance_contract_ref: String,
+    pub acceptance_contract_digest: String,
+    pub acceptance_evidence_ref: String,
+    pub acceptance_evidence_digest: String,
+    pub verifier_id: String,
+    pub verifier_version: String,
+    pub verdict: String,
+    pub result_digest: String,
+    pub coordinator_generation: i64,
+    pub core_timestamp: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -694,6 +721,240 @@ impl SqliteStore {
         Ok(false)
     }
 
+    pub fn record_machine_acceptance(
+        &mut self,
+        acceptance: MachineAcceptanceRecord,
+        cas: &dyn CasVerifier,
+    ) -> Result<bool, StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT acceptance_id, run_id, attempt_id, edge_id, lease_epoch,
+                        acceptance_contract_ref, acceptance_contract_digest,
+                        acceptance_evidence_ref, acceptance_evidence_digest,
+                        verifier_id, verifier_version, verdict, result_digest,
+                        coordinator_generation
+                 FROM orchestration_machine_acceptances
+                 WHERE delivery_id = ?1",
+                [&acceptance.delivery_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, String>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, i64>(13)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let same = existing.0 == acceptance.acceptance_id
+                && existing.1 == acceptance.run_id
+                && existing.2 == acceptance.attempt_id
+                && existing.3 == acceptance.edge_id
+                && existing.4 == acceptance.lease_epoch
+                && existing.5 == acceptance.acceptance_contract_ref
+                && existing.6 == acceptance.acceptance_contract_digest
+                && existing.7 == acceptance.acceptance_evidence_ref
+                && existing.8 == acceptance.acceptance_evidence_digest
+                && existing.9 == acceptance.verifier_id
+                && existing.10 == acceptance.verifier_version
+                && existing.11 == acceptance.verdict
+                && existing.12 == acceptance.result_digest
+                && existing.13 == acceptance.coordinator_generation;
+            if same {
+                tx.commit()?;
+                return Ok(true);
+            }
+            return Err(StorageError::MachineAcceptanceConflict {
+                delivery_id: acceptance.delivery_id,
+            });
+        }
+
+        if acceptance.acceptance_id.is_empty()
+            || acceptance.verifier_id.is_empty()
+            || acceptance.verifier_version.is_empty()
+            || !matches!(
+                acceptance.verdict.as_str(),
+                "accepted" | "rejected" | "error"
+            )
+            || !is_lower_hex64(&acceptance.result_digest)
+            || acceptance.core_timestamp < 0
+        {
+            return Err(StorageError::MachineAcceptanceInvalid {
+                reason: "identity, verifier, verdict, result digest, and timestamp are required"
+                    .into(),
+            });
+        }
+
+        let delivery = tx
+            .query_row(
+                "SELECT run_id, attempt_id, edge_id, lease_epoch, lease_owner,
+                        coordinator_generation, acceptance_contract_ref,
+                        acceptance_contract_digest, acceptance_evidence_ref,
+                        acceptance_evidence_digest
+                 FROM orchestration_handoff_deliveries WHERE delivery_id = ?1",
+                [&acceptance.delivery_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::MachineAcceptanceInvalid {
+                reason: "delivery does not exist".into(),
+            })?;
+        if delivery.0 != acceptance.run_id
+            || delivery.1 != acceptance.attempt_id
+            || delivery.2 != acceptance.edge_id
+            || delivery.3 != acceptance.lease_epoch
+            || delivery.5 != acceptance.coordinator_generation
+            || delivery.6 != acceptance.acceptance_contract_ref
+            || delivery.7 != acceptance.acceptance_contract_digest
+            || delivery.8 != acceptance.acceptance_evidence_ref
+            || delivery.9 != acceptance.acceptance_evidence_digest
+        {
+            return Err(StorageError::MachineAcceptanceConflict {
+                delivery_id: acceptance.delivery_id,
+            });
+        }
+        let lease = tx
+            .query_row(
+                "SELECT l.status, l.deadline, l.lease_owner, l.coordinator_generation,
+                        r.coordinator_generation
+                 FROM orchestration_leases l
+                 JOIN orchestration_runs r ON r.run_id = l.run_id
+                 WHERE l.attempt_id = ?1 AND l.lease_epoch = ?2
+                 ORDER BY l.coordinator_generation DESC LIMIT 1",
+                params![acceptance.attempt_id, acceptance.lease_epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: acceptance.attempt_id.clone(),
+            })?;
+        if lease.0 != "active"
+            || lease.1 <= crate::orchestration::now_unix()?
+            || lease.2 != delivery.4
+            || lease.3 != acceptance.coordinator_generation
+            || lease.4 != acceptance.coordinator_generation
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: acceptance.attempt_id,
+            });
+        }
+        verify_cas_object(
+            cas,
+            &acceptance.acceptance_contract_ref,
+            &acceptance.acceptance_contract_digest,
+        )?;
+        verify_cas_object(
+            cas,
+            &acceptance.acceptance_evidence_ref,
+            &acceptance.acceptance_evidence_digest,
+        )?;
+        let persisted = acceptance.clone();
+        tx.execute(
+            "INSERT INTO orchestration_machine_acceptances(
+               acceptance_id, run_id, attempt_id, edge_id, lease_epoch, delivery_id,
+               acceptance_contract_ref, acceptance_contract_digest,
+               acceptance_evidence_ref, acceptance_evidence_digest,
+               verifier_id, verifier_version, verdict, result_digest,
+               coordinator_generation, core_timestamp
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                      ?13, ?14, ?15, ?16)",
+            params![
+                persisted.acceptance_id,
+                persisted.run_id,
+                persisted.attempt_id,
+                persisted.edge_id,
+                persisted.lease_epoch,
+                persisted.delivery_id,
+                persisted.acceptance_contract_ref,
+                persisted.acceptance_contract_digest,
+                persisted.acceptance_evidence_ref,
+                persisted.acceptance_evidence_digest,
+                persisted.verifier_id,
+                persisted.verifier_version,
+                persisted.verdict,
+                persisted.result_digest,
+                persisted.coordinator_generation,
+                persisted.core_timestamp,
+            ],
+        )?;
+        append_audit_event(
+            &tx,
+            &delivery.0,
+            "machine_acceptance_recorded",
+            "machine_acceptance",
+            &acceptance.acceptance_id,
+            &format!("{{\"verdict\":\"{}\"}}", acceptance.verdict),
+            &format!("machine_acceptance:{}", acceptance.delivery_id),
+            acceptance.coordinator_generation,
+        )?;
+        let completion_delivery = HandoffDeliveryRecord {
+            delivery_id: acceptance.delivery_id.clone(),
+            run_id: delivery.0.clone(),
+            attempt_id: acceptance.attempt_id.clone(),
+            edge_id: acceptance.edge_id.clone(),
+            lease_epoch: acceptance.lease_epoch,
+            lease_owner: delivery.4.clone(),
+            coordinator_generation: acceptance.coordinator_generation,
+            envelope_handoff_id: String::new(),
+            from_task_node_id: String::new(),
+            from_execution_run_id: String::new(),
+            to_task_node_id: String::new(),
+            dag_snapshot_digest: String::new(),
+            role_binding_snapshot_digest: String::new(),
+            declaration_digest: String::new(),
+            artifact_transfer_set_digest: String::new(),
+            idempotency_key: String::new(),
+            delivery_payload_digest: String::new(),
+            envelope_object_ref: String::new(),
+            envelope_raw_sha256: String::new(),
+            envelope_sha256_jcs: String::new(),
+            acceptance_contract_ref: String::new(),
+            acceptance_contract_digest: String::new(),
+            acceptance_evidence_ref: String::new(),
+            acceptance_evidence_digest: String::new(),
+            producer_context_manifest_digest: String::new(),
+            replay_receipt_json: None,
+        };
+        Self::maybe_complete_attempt_sealing(&tx, &completion_delivery)?;
+        tx.commit()?;
+        Ok(false)
+    }
+
     fn maybe_complete_attempt_sealing(
         tx: &rusqlite::Transaction<'_>,
         delivery: &HandoffDeliveryRecord,
@@ -722,16 +983,16 @@ impl SqliteStore {
         }
         let mut pending_edges = Vec::new();
         for edge_id in &required_edges {
-            let delivered = tx
+            let acceptance = tx
                 .query_row(
-                    "SELECT acceptance_evidence_digest FROM orchestration_handoff_deliveries
+                    "SELECT verdict FROM orchestration_machine_acceptances
                      WHERE attempt_id = ?1 AND edge_id = ?2 AND lease_epoch = ?3",
                     params![delivery.attempt_id, edge_id, delivery.lease_epoch],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
-            match delivered {
-                Some(evidence) if !evidence.is_empty() => {}
+            match acceptance {
+                Some(verdict) if verdict == "accepted" => {}
                 _ => pending_edges.push(edge_id.clone()),
             }
         }
@@ -1163,20 +1424,19 @@ impl SqliteStore {
         if let Some(object) = expected_envelope.as_object_mut() {
             object.insert("envelopeSha256".to_owned(), Value::String(String::new()));
         }
-        let expected_idempotency = handoff::idempotency_key_hex(&expected_envelope).map_err(|_| {
-            StorageError::HandoffDeliveryConflict {
-                attempt_id: delivery.attempt_id.clone(),
-                edge_id: delivery.edge_id.clone(),
-                lease_epoch: delivery.lease_epoch,
-            }
-        })?;
-        let expected_transfer =
-            handoff::artifact_transfer_set_digest_hex(&expected_envelope).map_err(|_| {
+        let expected_idempotency =
+            handoff::idempotency_key_hex(&expected_envelope).map_err(|_| {
                 StorageError::HandoffDeliveryConflict {
                     attempt_id: delivery.attempt_id.clone(),
                     edge_id: delivery.edge_id.clone(),
                     lease_epoch: delivery.lease_epoch,
                 }
+            })?;
+        let expected_transfer = handoff::artifact_transfer_set_digest_hex(&expected_envelope)
+            .map_err(|_| StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
             })?;
         if expected_idempotency != delivery.idempotency_key
             || expected_transfer != delivery.artifact_transfer_set_digest
@@ -1892,7 +2152,7 @@ impl SqliteStore {
     }
 
     pub fn orchestration_migration_checksum(&self) -> String {
-        hex_digest(crate::MIGRATION_V16_SQL.as_bytes())
+        hex_digest(crate::MIGRATION_V17_SQL.as_bytes())
     }
 
     pub fn orchestration_schema_version(&self) -> i64 {
@@ -1904,7 +2164,7 @@ impl SqliteStore {
             .connection
             .prepare("SELECT version FROM schema_migrations WHERE version < ?1 ORDER BY version")?;
         let rows = statement
-            .query_map([V16_SCHEMA_VERSION], |row| row.get(0))?
+            .query_map([V17_SCHEMA_VERSION], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -2448,7 +2708,8 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(status, "completed");
+        // Deliveries alone are not machine acceptance authority.
+        assert_eq!(status, "sealing");
         tx.commit().unwrap();
     }
 
@@ -2641,6 +2902,70 @@ mod tests {
             )
             .unwrap();
         assert_eq!(facts, 0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn machine_acceptance_is_core_authority_and_completes_after_delivery() {
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-acceptance-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_root = base.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let (delivery, bindings) = setup_real_e2e(&mut store, &cas);
+        let verifier = CoreCasVerifier { cas: &cas };
+        assert!(!store
+            .record_handoff_delivery(delivery.clone(), &bindings, &verifier)
+            .unwrap());
+        let acceptance = MachineAcceptanceRecord {
+            acceptance_id: "acceptance-1".into(),
+            run_id: delivery.run_id.clone(),
+            attempt_id: delivery.attempt_id.clone(),
+            edge_id: delivery.edge_id.clone(),
+            lease_epoch: delivery.lease_epoch,
+            delivery_id: delivery.delivery_id.clone(),
+            acceptance_contract_ref: delivery.acceptance_contract_ref.clone(),
+            acceptance_contract_digest: delivery.acceptance_contract_digest.clone(),
+            acceptance_evidence_ref: delivery.acceptance_evidence_ref.clone(),
+            acceptance_evidence_digest: delivery.acceptance_evidence_digest.clone(),
+            verifier_id: "core.machine.acceptance".into(),
+            verifier_version: "v1".into(),
+            verdict: "accepted".into(),
+            result_digest: hex_digest(b"accepted"),
+            coordinator_generation: delivery.coordinator_generation,
+            core_timestamp: 1,
+        };
+        assert!(!store
+            .record_machine_acceptance(acceptance.clone(), &verifier)
+            .unwrap());
+        let status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&delivery.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert!(store
+            .record_machine_acceptance(acceptance, &verifier)
+            .unwrap());
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_machine_acceptances WHERE delivery_id = ?1",
+                [&delivery.delivery_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
