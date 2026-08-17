@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+agenttalk-brief-sealer = { path = "../agenttalk-brief-sealer" }
 agenttalk-domain = { path = "../agenttalk-domain" }
 agenttalk-events = { path = "../agenttalk-events" }
 agenttalk-permissions = { path = "../agenttalk-permissions" }

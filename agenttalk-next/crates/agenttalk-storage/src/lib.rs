@@ -19,10 +19,15 @@ use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+mod orchestration;
+pub use orchestration::*;
+
 const V11_SCHEMA_VERSION: i64 = 11;
 const V12_SCHEMA_VERSION: i64 = 12;
 const V13_SCHEMA_VERSION: i64 = 13;
-const SCHEMA_VERSION: i64 = 14;
+const V14_SCHEMA_VERSION: i64 = 14;
+const V15_SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 15;
 const HISTORICAL_V11_MIGRATION_CHECKSUM: &str =
     "f5a0e07a7de1f53b86aeee16e4908321abf637bae8b5372e019a37a39f6a38c7";
 const MUTATED_V11_MIGRATION_CHECKSUM: &str =
@@ -496,6 +501,164 @@ CREATE TABLE IF NOT EXISTS local_agent_imports (
 );
 "#;
 
+// v15 adds the C2-B orchestration journal facts. Historical migration text
+// remains immutable: v11-v14 checksums are still verified first.
+const MIGRATION_V15_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS orchestration_runs (
+  run_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  brief_snapshot_id TEXT NOT NULL,
+  brief_tree_digest TEXT NOT NULL,
+  dag_snapshot_digest TEXT NOT NULL,
+  role_binding_snapshot_digest TEXT NOT NULL,
+  coordinator_generation INTEGER NOT NULL DEFAULT 1,
+  terminal_reason TEXT,
+  UNIQUE(run_id, coordinator_generation),
+  UNIQUE(brief_snapshot_id)
+);
+CREATE TABLE IF NOT EXISTS orchestration_task_nodes (
+  node_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_key TEXT NOT NULL,
+  required INTEGER NOT NULL CHECK(required IN (0, 1)),
+  status TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  active_attempt_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  input_artifact_set_digest TEXT,
+  role_id TEXT,
+  acceptance_contract_ref TEXT,
+  terminal_reason TEXT,
+  UNIQUE(run_id, node_key)
+);
+CREATE TABLE IF NOT EXISTS orchestration_task_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_no INTEGER NOT NULL,
+  from_execution_run_id TEXT,
+  status TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL DEFAULT 0,
+  artifact_set_digest TEXT,
+  acceptance_evidence_digest TEXT,
+  terminal_reason TEXT,
+  terminal_identity_json TEXT,
+  UNIQUE(node_id, attempt_no)
+);
+CREATE TABLE IF NOT EXISTS orchestration_milestones (
+  milestone_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  milestone_key TEXT NOT NULL,
+  required INTEGER NOT NULL CHECK(required IN (0, 1)),
+  status TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  brief_tree_digest TEXT,
+  presented_artifact_set_digest TEXT,
+  acceptance_evidence_digest TEXT,
+  terminal_reason TEXT,
+  UNIQUE(run_id, milestone_key)
+);
+CREATE TABLE IF NOT EXISTS orchestration_edges (
+  edge_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  from_node_id TEXT NOT NULL,
+  to_node_id TEXT NOT NULL,
+  dag_snapshot_digest TEXT NOT NULL,
+  allowed_consumer_json TEXT NOT NULL CHECK(json_valid(allowed_consumer_json)),
+  UNIQUE(run_id, from_node_id, to_node_id)
+);
+CREATE TABLE IF NOT EXISTS orchestration_edge_ports (
+  edge_port_id TEXT PRIMARY KEY,
+  edge_id TEXT NOT NULL,
+  source_output_port_id TEXT NOT NULL,
+  target_input_port_id TEXT NOT NULL,
+  port_policy_json TEXT NOT NULL CHECK(json_valid(port_policy_json)),
+  UNIQUE(edge_id, source_output_port_id, target_input_port_id)
+);
+CREATE TABLE IF NOT EXISTS orchestration_artifact_bindings (
+  binding_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  delivery_id TEXT,
+  edge_port_id TEXT,
+  object_ref TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  normalized_content_type TEXT,
+  normalized_content_type_policy_version TEXT,
+  content_schema_ref_json TEXT,
+  UNIQUE(delivery_id, edge_port_id)
+);
+CREATE TABLE IF NOT EXISTS orchestration_role_binding_snapshots (
+  role_binding_snapshot_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  digest TEXT NOT NULL UNIQUE,
+  sealed_at INTEGER NOT NULL,
+  role_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  workspace_access TEXT NOT NULL,
+  UNIQUE(run_id, role_id, agent_id)
+);
+CREATE TABLE IF NOT EXISTS orchestration_human_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  milestone_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  semantic_payload_hash TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  expected_version INTEGER NOT NULL,
+  brief_tree_digest TEXT NOT NULL,
+  presented_artifact_set_digest TEXT NOT NULL,
+  acceptance_evidence_digest TEXT NOT NULL,
+  authenticated_principal TEXT NOT NULL,
+  core_timestamp INTEGER NOT NULL,
+  UNIQUE(milestone_id, request_id)
+);
+CREATE TABLE IF NOT EXISTS orchestration_leases (
+  attempt_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL,
+  lease_owner TEXT NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  deadline INTEGER NOT NULL,
+  coordinator_generation INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  PRIMARY KEY(attempt_id, lease_epoch, coordinator_generation)
+);
+CREATE TABLE IF NOT EXISTS orchestration_handoff_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  edge_id TEXT NOT NULL,
+  lease_epoch INTEGER NOT NULL,
+  declaration_digest TEXT NOT NULL,
+  artifact_transfer_set_digest TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  delivery_payload_digest TEXT NOT NULL,
+  envelope_object_ref TEXT NOT NULL,
+  envelope_raw_sha256 TEXT NOT NULL,
+  envelope_sha256_jcs TEXT NOT NULL,
+  acceptance_contract_ref TEXT NOT NULL,
+  acceptance_contract_digest TEXT NOT NULL,
+  acceptance_evidence_ref TEXT NOT NULL,
+  acceptance_evidence_digest TEXT NOT NULL,
+  producer_context_manifest_digest TEXT NOT NULL,
+  replay_receipt_json TEXT,
+  UNIQUE(attempt_id, edge_id, lease_epoch)
+);
+CREATE TABLE IF NOT EXISTS orchestration_context_manifest_authorities (
+  context_manifest_ref_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  producer_context_manifest_digest TEXT NOT NULL,
+  sealed_at INTEGER NOT NULL,
+  UNIQUE(attempt_id, producer_context_manifest_digest)
+);
+"#;
+
 /// Non-secret durable ACP binding metadata. It deliberately has no path,
 /// endpoint, process, environment, credential, or raw runtime JSON field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -594,6 +757,33 @@ pub enum StorageError {
     AttachmentArtifactMismatch { id: String },
     #[error("artifact body store is unavailable")]
     ArtifactBodyStoreUnavailable,
+    #[error("orchestration run already exists with different brief snapshot: {run_id}")]
+    OrchestrationRunConflict { run_id: String },
+    #[error("orchestration run does not exist: {run_id}")]
+    OrchestrationRunNotFound { run_id: String },
+    #[error("stale lease epoch for attempt {attempt_id}")]
+    StaleLease { attempt_id: String },
+    #[error("orchestration task is terminal: {node_id}")]
+    OrchestrationTaskTerminal { node_id: String },
+    #[error("orchestration task does not exist: {node_id}")]
+    OrchestrationTaskNotFound { node_id: String },
+    #[error("orchestration milestone does not exist: {milestone_id}")]
+    OrchestrationMilestoneNotFound { milestone_id: String },
+    #[error(
+        "orchestration human receipt conflict for milestone {milestone_id} request {request_id}"
+    )]
+    HumanReceiptConflict {
+        milestone_id: String,
+        request_id: String,
+    },
+    #[error(
+        "orchestration handoff delivery conflict for attempt {attempt_id} edge {edge_id} epoch {lease_epoch}"
+    )]
+    HandoffDeliveryConflict {
+        attempt_id: String,
+        edge_id: String,
+        lease_epoch: i64,
+    },
     #[error("artifact body is not registered: {id}")]
     ArtifactBodyNotFound { id: String },
     #[error("artifact body does not match its registered metadata")]
@@ -811,7 +1001,7 @@ struct CommandReceiptRow {
 }
 
 pub struct SqliteStore {
-    connection: Connection,
+    pub(crate) connection: Connection,
     artifact_root: Option<PathBuf>,
 }
 
@@ -1151,7 +1341,8 @@ impl SqliteStore {
 
         self.migrate_v12()?;
         self.migrate_v13()?;
-        self.migrate_v14()
+        self.migrate_v14()?;
+        self.migrate_v15()
     }
 
     fn migrate_v12(&mut self) -> Result<(), StorageError> {
@@ -1292,30 +1483,72 @@ impl SqliteStore {
 
     fn migrate_v14(&mut self) -> Result<(), StorageError> {
         let checksum = hex_digest(MIGRATION_V14_SQL.as_bytes());
+        let version = V14_SCHEMA_VERSION;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let dirty: Option<i64> = tx
             .query_row(
                 "SELECT dirty FROM schema_migrations WHERE version = ?1",
-                [SCHEMA_VERSION],
+                [version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(dirty) = dirty {
+            if dirty != 0 {
+                return Err(StorageError::MigrationDirty { version });
+            }
+            let existing: String = tx.query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )?;
+            if existing != checksum {
+                return Err(StorageError::MigrationChecksumMismatch { version });
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at, dirty)
+             VALUES(?1, ?2, strftime('%s','now'), 1)",
+            params![version, checksum],
+        )?;
+        tx.execute_batch(MIGRATION_V14_SQL)?;
+        tx.execute(
+            "UPDATE schema_migrations SET dirty = 0 WHERE version = ?1",
+            [version],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v15(&mut self) -> Result<(), StorageError> {
+        let checksum = hex_digest(MIGRATION_V15_SQL.as_bytes());
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let dirty: Option<i64> = tx
+            .query_row(
+                "SELECT dirty FROM schema_migrations WHERE version = ?1",
+                [V15_SCHEMA_VERSION],
                 |row| row.get(0),
             )
             .optional()?;
         if let Some(dirty) = dirty {
             if dirty != 0 {
                 return Err(StorageError::MigrationDirty {
-                    version: SCHEMA_VERSION,
+                    version: V15_SCHEMA_VERSION,
                 });
             }
             let existing: String = tx.query_row(
                 "SELECT checksum FROM schema_migrations WHERE version = ?1",
-                [SCHEMA_VERSION],
+                [V15_SCHEMA_VERSION],
                 |row| row.get(0),
             )?;
             if existing != checksum {
                 return Err(StorageError::MigrationChecksumMismatch {
-                    version: SCHEMA_VERSION,
+                    version: V15_SCHEMA_VERSION,
                 });
             }
             tx.commit()?;
@@ -1324,19 +1557,19 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO schema_migrations(version, checksum, applied_at, dirty)
              VALUES(?1, ?2, strftime('%s','now'), 1)",
-            params![SCHEMA_VERSION, checksum],
+            params![V15_SCHEMA_VERSION, checksum],
         )?;
-        tx.execute_batch(MIGRATION_V14_SQL)?;
+        tx.execute_batch(MIGRATION_V15_SQL)?;
         tx.execute(
             "UPDATE schema_migrations SET dirty = 0 WHERE version = ?1",
-            [SCHEMA_VERSION],
+            [V15_SCHEMA_VERSION],
         )?;
         tx.commit()?;
         Ok(())
     }
 
     pub fn migration_checksum(&self) -> String {
-        hex_digest(MIGRATION_V14_SQL.as_bytes())
+        hex_digest(MIGRATION_V15_SQL.as_bytes())
     }
 
     pub fn event_stream_epoch(&mut self) -> Result<String, StorageError> {
@@ -9169,12 +9402,12 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(versions, vec![7, 11, 12, 13, 14]);
+        assert_eq!(versions, vec![7, 11, 12, 13, 14, 15]);
         let checksums: Vec<(i64, String)> = store
             .connection
             .prepare(
                 "SELECT version, checksum FROM schema_migrations
-                 WHERE version IN (?1, ?2, ?3, ?4) ORDER BY version",
+                 WHERE version IN (?1, ?2, ?3, ?4, ?5) ORDER BY version",
             )
             .unwrap()
             .query_map(
@@ -9182,6 +9415,7 @@ mod tests {
                     V11_SCHEMA_VERSION,
                     V12_SCHEMA_VERSION,
                     V13_SCHEMA_VERSION,
+                    V14_SCHEMA_VERSION,
                     SCHEMA_VERSION
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
@@ -9195,6 +9429,7 @@ mod tests {
                 (V11_SCHEMA_VERSION, HISTORICAL_V11_MIGRATION_CHECKSUM.into()),
                 (V12_SCHEMA_VERSION, hex_digest(MIGRATION_V12_SQL.as_bytes())),
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
+                (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
@@ -9291,6 +9526,7 @@ mod tests {
                 (V11_SCHEMA_VERSION, HISTORICAL_V11_MIGRATION_CHECKSUM.into()),
                 (V12_SCHEMA_VERSION, hex_digest(MIGRATION_V12_SQL.as_bytes())),
                 (V13_SCHEMA_VERSION, hex_digest(MIGRATION_V13_SQL.as_bytes())),
+                (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );
@@ -9326,11 +9562,16 @@ mod tests {
             .connection
             .prepare(
                 "SELECT version, checksum FROM schema_migrations
-                 WHERE version IN (?1, ?2, ?3) ORDER BY version",
+                 WHERE version IN (?1, ?2, ?3, ?4) ORDER BY version",
             )
             .unwrap()
             .query_map(
-                params![V11_SCHEMA_VERSION, V12_SCHEMA_VERSION, SCHEMA_VERSION],
+                params![
+                    V11_SCHEMA_VERSION,
+                    V12_SCHEMA_VERSION,
+                    V14_SCHEMA_VERSION,
+                    SCHEMA_VERSION
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap()
@@ -9341,6 +9582,7 @@ mod tests {
             vec![
                 (V11_SCHEMA_VERSION, MUTATED_V11_MIGRATION_CHECKSUM.into()),
                 (V12_SCHEMA_VERSION, hex_digest(MIGRATION_V12_SQL.as_bytes())),
+                (V14_SCHEMA_VERSION, hex_digest(MIGRATION_V14_SQL.as_bytes())),
                 (SCHEMA_VERSION, store.migration_checksum()),
             ]
         );

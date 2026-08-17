@@ -135,6 +135,7 @@ dependencies = [
 name = "agenttalk-storage"
 version = "0.1.0"
 dependencies = [
+ "agenttalk-brief-sealer",
  "agenttalk-domain",
  "agenttalk-events",
  "agenttalk-permissions",
