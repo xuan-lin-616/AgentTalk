@@ -706,6 +706,12 @@ CREATE TABLE orchestration_task_nodes (
   terminal_reason TEXT,
   UNIQUE(run_id, node_key)
 );
+CREATE TRIGGER orchestration_task_nodes_v15_guard
+BEFORE INSERT ON orchestration_task_nodes_v15
+WHEN NEW.status NOT IN ('pending','ready','running','sealing','completed','failed','blocked','cancelled')
+BEGIN
+  SELECT RAISE(ABORT, 'v15 orchestration_task_nodes contains a status that v16 cannot map; manual recovery required');
+END;
 INSERT INTO orchestration_task_nodes(
   node_id, run_id, node_key, required, status, version, active_attempt_id,
   attempt_count, max_attempts, input_artifact_set_digest, role_id,
@@ -716,6 +722,7 @@ SELECT
   attempt_count, max_attempts, input_artifact_set_digest, role_id,
   acceptance_contract_ref, terminal_reason
 FROM orchestration_task_nodes_v15;
+DROP TRIGGER orchestration_task_nodes_v15_guard;
 DROP TABLE orchestration_task_nodes_v15;
 
 ALTER TABLE orchestration_task_attempts RENAME TO orchestration_task_attempts_v15;
@@ -733,6 +740,12 @@ CREATE TABLE orchestration_task_attempts (
   terminal_identity_json TEXT,
   UNIQUE(node_id, attempt_no)
 );
+CREATE TRIGGER orchestration_task_attempts_v15_guard
+BEFORE INSERT ON orchestration_task_attempts_v15
+WHEN NEW.status NOT IN ('leased','running','sealing','completed','failed','cancelled','interrupted')
+BEGIN
+  SELECT RAISE(ABORT, 'v15 orchestration_task_attempts contains a status that v16 cannot map; manual recovery required');
+END;
 INSERT INTO orchestration_task_attempts(
   attempt_id, run_id, node_id, attempt_no, from_execution_run_id, status,
   lease_epoch, artifact_set_digest, acceptance_evidence_digest,
@@ -743,6 +756,7 @@ SELECT
   lease_epoch, artifact_set_digest, acceptance_evidence_digest,
   terminal_reason, terminal_identity_json
 FROM orchestration_task_attempts_v15;
+DROP TRIGGER orchestration_task_attempts_v15_guard;
 DROP TABLE orchestration_task_attempts_v15;
 
 ALTER TABLE orchestration_milestones RENAME TO orchestration_milestones_v15;
@@ -753,12 +767,21 @@ CREATE TABLE orchestration_milestones (
   required INTEGER NOT NULL CHECK(required IN (0, 1)),
   status TEXT NOT NULL CHECK(status IN ('pending','awaiting_approval','approved','rejected','cancelled')),
   version INTEGER NOT NULL,
-  brief_tree_digest TEXT,
-  presented_artifact_set_digest TEXT,
-  acceptance_evidence_digest TEXT,
+  brief_tree_digest TEXT NOT NULL,
+  presented_artifact_set_digest TEXT NOT NULL,
+  acceptance_evidence_digest TEXT NOT NULL,
   terminal_reason TEXT,
   UNIQUE(run_id, milestone_key)
 );
+CREATE TRIGGER orchestration_milestones_v15_guard
+BEFORE INSERT ON orchestration_milestones_v15
+WHEN NEW.status NOT IN ('pending','awaiting_approval','approved','rejected','cancelled')
+   OR NEW.brief_tree_digest IS NULL
+   OR NEW.presented_artifact_set_digest IS NULL
+   OR NEW.acceptance_evidence_digest IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'v15 orchestration_milestones contains unmappable status or NULL sealed digest; manual recovery required');
+END;
 INSERT INTO orchestration_milestones(
   milestone_id, run_id, milestone_key, required, status, version,
   brief_tree_digest, presented_artifact_set_digest, acceptance_evidence_digest,
@@ -769,6 +792,7 @@ SELECT
   brief_tree_digest, presented_artifact_set_digest, acceptance_evidence_digest,
   terminal_reason
 FROM orchestration_milestones_v15;
+DROP TRIGGER orchestration_milestones_v15_guard;
 DROP TABLE orchestration_milestones_v15;
 "#;
 

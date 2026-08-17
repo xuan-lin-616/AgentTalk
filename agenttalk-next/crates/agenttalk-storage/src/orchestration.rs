@@ -1,6 +1,7 @@
-use crate::{SqliteStore, StorageError, SCHEMA_VERSION, V15_SCHEMA_VERSION};
+use crate::{SqliteStore, StorageError, SCHEMA_VERSION, V16_SCHEMA_VERSION};
 use agenttalk_brief_sealer::PreparedBriefSeal;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -63,6 +64,8 @@ pub struct HandoffDeliveryRecord {
     pub attempt_id: String,
     pub edge_id: String,
     pub lease_epoch: i64,
+    pub lease_owner: String,
+    pub coordinator_generation: i64,
     pub declaration_digest: String,
     pub artifact_transfer_set_digest: String,
     pub idempotency_key: String,
@@ -546,17 +549,100 @@ impl SqliteStore {
             return Ok(true);
         }
         // New path: authority guards must pass before any row is written.
-        let lease_ok: Option<i64> = tx
+        let attempt = tx
             .query_row(
-                "SELECT 1 FROM orchestration_leases
-                 WHERE attempt_id = ?1 AND lease_epoch = ?2 AND status = 'active'",
-                params![delivery.attempt_id, delivery.lease_epoch],
-                |row| row.get(0),
+                "SELECT run_id FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&delivery.attempt_id],
+                |row| row.get::<_, String>(0),
             )
-            .optional()?;
-        if lease_ok.is_none() {
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
+        let edge_run = tx
+            .query_row(
+                "SELECT run_id FROM orchestration_edges WHERE edge_id = ?1",
+                [&delivery.edge_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
+        if attempt != delivery.run_id || edge_run != delivery.run_id {
             return Err(StorageError::StaleLease {
                 attempt_id: delivery.attempt_id,
+            });
+        }
+        let lease = tx
+            .query_row(
+                "SELECT run_id, status, deadline, lease_owner, coordinator_generation
+                 FROM orchestration_leases
+                 WHERE attempt_id = ?1 AND lease_epoch = ?2
+                 ORDER BY coordinator_generation DESC LIMIT 1",
+                params![delivery.attempt_id, delivery.lease_epoch],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::StaleLease {
+                attempt_id: delivery.attempt_id.clone(),
+            })?;
+        let current_generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&delivery.run_id],
+            |row| row.get(0),
+        )?;
+        let now = crate::orchestration::now_unix()?;
+        if lease.0 != delivery.run_id
+            || lease.1 != "active"
+            || lease.2 <= now
+            || lease.3 != delivery.lease_owner
+            || lease.4 != delivery.coordinator_generation
+            || lease.4 != current_generation
+        {
+            return Err(StorageError::StaleLease {
+                attempt_id: delivery.attempt_id,
+            });
+        }
+        if !is_object_ref(&delivery.envelope_object_ref)
+            || !is_hex64(&delivery.envelope_raw_sha256)
+            || !is_hex64(&delivery.envelope_sha256_jcs)
+            || delivery.envelope_object_ref != format!("sha256:{}", delivery.envelope_raw_sha256)
+        {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id,
+                edge_id: delivery.edge_id,
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+        if delivery.acceptance_contract_ref
+            != format!("sha256:{}", delivery.acceptance_contract_digest)
+            || delivery.acceptance_evidence_ref
+                != format!("sha256:{}", delivery.acceptance_evidence_digest)
+        {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id,
+                edge_id: delivery.edge_id,
+                lease_epoch: delivery.lease_epoch,
+            });
+        }
+        if !is_hex64(&delivery.delivery_payload_digest)
+            || delivery.idempotency_key.is_empty()
+            || delivery.declaration_digest.is_empty()
+            || delivery.artifact_transfer_set_digest.is_empty()
+        {
+            return Err(StorageError::HandoffDeliveryConflict {
+                attempt_id: delivery.attempt_id,
+                edge_id: delivery.edge_id,
+                lease_epoch: delivery.lease_epoch,
             });
         }
         for binding in bindings {
@@ -1187,7 +1273,7 @@ impl SqliteStore {
     }
 
     pub fn orchestration_migration_checksum(&self) -> String {
-        hex_digest(crate::MIGRATION_V15_SQL.as_bytes())
+        hex_digest(crate::MIGRATION_V16_SQL.as_bytes())
     }
 
     pub fn orchestration_schema_version(&self) -> i64 {
@@ -1199,10 +1285,111 @@ impl SqliteStore {
             .connection
             .prepare("SELECT version FROM schema_migrations WHERE version < ?1 ORDER BY version")?;
         let rows = statement
-            .query_map([V15_SCHEMA_VERSION], |row| row.get(0))?
+            .query_map([V16_SCHEMA_VERSION], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+#[derive(Debug)]
+struct CanonicalJson(serde_json::Value);
+
+impl<'de> Deserialize<'de> for CanonicalJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = serde_json::Value;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON value without duplicate object keys")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Number(value.into()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Number(value.into()))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                serde_json::Number::from_f64(value)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| serde::de::Error::custom("invalid JSON number"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(serde_json::Value::String(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::String(value))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(serde_json::Value::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                CanonicalJson::deserialize(deserializer).map(|value| value.0)
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<CanonicalJson>()? {
+                    values.push(value.0);
+                }
+                Ok(serde_json::Value::Array(values))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut object = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, CanonicalJson>()? {
+                    if object.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate object key: {key}"
+                        )));
+                    }
+                    object.insert(key, value.0);
+                }
+                Ok(serde_json::Value::Object(object))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor).map(CanonicalJson)
+    }
+}
+
+fn canonicalize_audit_payload(payload: &str) -> Result<String, StorageError> {
+    let canonical: CanonicalJson = serde_json::from_str(payload)?;
+    Ok(serde_json::to_string(&canonical.0)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1221,8 +1408,9 @@ fn append_audit_event(
         [run_id],
         |row| row.get(0),
     )?;
+    let canonical_payload = canonicalize_audit_payload(payload_json)?;
     let event_id = format!("{run_id}:{sequence}:{event_type}");
-    let payload_sha256 = hex_digest(payload_json.as_bytes());
+    let payload_sha256 = hex_digest(canonical_payload.as_bytes());
     let core_timestamp = crate::orchestration::now_unix()?;
     tx.execute(
         "INSERT INTO orchestration_audit_events(
@@ -1237,7 +1425,7 @@ fn append_audit_event(
             event_type,
             subject_kind,
             subject_id,
-            payload_json,
+            canonical_payload,
             payload_sha256,
             idempotency_key,
             coordinator_generation,
@@ -1307,8 +1495,20 @@ mod tests {
         assert_eq!(store.orchestration_migration_checksum().len(), 64);
         assert_eq!(
             store.legacy_versions_unchanged().unwrap(),
-            vec![11, 12, 13, 14]
+            vec![11, 12, 13, 14, 15]
         );
+        let runtime = store.orchestration_migration_checksum();
+        assert_eq!(runtime, store.migration_checksum());
+        assert_eq!(runtime, hex_digest(crate::MIGRATION_V16_SQL.as_bytes()));
+        let db_checksum: String = store
+            .connection
+            .query_row(
+                "SELECT checksum FROM schema_migrations WHERE version = 16",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(db_checksum, runtime);
         let table_count: i64 = store
             .connection
             .query_row(
@@ -1517,23 +1717,35 @@ mod tests {
         let outcome = store
             .transition_task_ready_to_running("node-1", "exec-run-1", "worker-a")
             .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_edges(
+                   edge_id, run_id, from_node_id, to_node_id,
+                   dag_snapshot_digest, allowed_consumer_json
+                 ) VALUES('edge-1', 'run-1', 'node-1', 'node-1', ?1, '[]')",
+                [hex64('e')],
+            )
+            .unwrap();
         let delivery = HandoffDeliveryRecord {
             delivery_id: "delivery-1".into(),
             run_id: "run-1".into(),
             attempt_id: outcome.attempt_id.clone(),
             edge_id: "edge-1".into(),
             lease_epoch: outcome.lease_epoch,
-            declaration_digest: "decl-1".into(),
-            artifact_transfer_set_digest: "artifact-set-1".into(),
+            lease_owner: "worker-a".into(),
+            coordinator_generation: 1,
+            declaration_digest: hex64('f'),
+            artifact_transfer_set_digest: hex64('a'),
             idempotency_key: "key-1".into(),
-            delivery_payload_digest: "payload-1".into(),
+            delivery_payload_digest: hex64('b'),
             envelope_object_ref: format!("sha256:{}", hex64('c')),
             envelope_raw_sha256: hex64('c'),
             envelope_sha256_jcs: hex64('c'),
-            acceptance_contract_ref: "contract-1".into(),
-            acceptance_contract_digest: "contract-digest-1".into(),
-            acceptance_evidence_ref: "evidence-1".into(),
-            acceptance_evidence_digest: "evidence-digest-1".into(),
+            acceptance_contract_ref: format!("sha256:{}", hex64('d')),
+            acceptance_contract_digest: hex64('d'),
+            acceptance_evidence_ref: format!("sha256:{}", hex64('e')),
+            acceptance_evidence_digest: hex64('e'),
             producer_context_manifest_digest: "context-1".into(),
             replay_receipt_json: None,
         };
@@ -1780,6 +1992,85 @@ mod tests {
             .query_row("SELECT count(*) FROM event_store", [], |row| row.get(0))
             .unwrap();
         assert_eq!(legacy_count, 0);
+    }
+
+    #[test]
+    fn canonical_audit_payload_is_deterministic_and_duplicate_safe() {
+        let canonical =
+            canonicalize_audit_payload(" { \"b\": 1, \"a\": [true, null, 2.0] } ").unwrap();
+        assert_eq!(canonical, "{\"a\":[true,null,2.0],\"b\":1}");
+        assert!(canonicalize_audit_payload("{\"a\":1,\"a\":2}").is_err());
+        assert!(canonicalize_audit_payload("{not json}").is_err());
+    }
+
+    #[test]
+    fn v16_rejects_unmappable_v15_states_and_null_sealed_digests() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE orchestration_task_nodes_v15(
+                   node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_key TEXT NOT NULL,
+                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
+                   active_attempt_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                   max_attempts INTEGER NOT NULL DEFAULT 1, input_artifact_set_digest TEXT,
+                   role_id TEXT, acceptance_contract_ref TEXT, terminal_reason TEXT);
+                 CREATE TABLE orchestration_task_attempts_v15(
+                   attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                   attempt_no INTEGER NOT NULL, from_execution_run_id TEXT, status TEXT NOT NULL,
+                   lease_epoch INTEGER NOT NULL DEFAULT 0, artifact_set_digest TEXT,
+                   acceptance_evidence_digest TEXT, terminal_reason TEXT,
+                   terminal_identity_json TEXT);
+                 CREATE TABLE orchestration_milestones_v15(
+                   milestone_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, milestone_key TEXT NOT NULL,
+                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
+                   brief_tree_digest TEXT, presented_artifact_set_digest TEXT,
+                   acceptance_evidence_digest TEXT, terminal_reason TEXT);
+                 INSERT INTO orchestration_task_nodes_v15(
+                   node_id, run_id, node_key, required, status, version)
+                 VALUES('n1','run-1','k1',1,'leased',1);
+                 INSERT INTO orchestration_task_attempts_v15(
+                   attempt_id, run_id, node_id, attempt_no, status, lease_epoch)
+                 VALUES('a1','run-1','n1',1,'leased',1);
+                 INSERT INTO orchestration_milestones_v15(
+                   milestone_id, run_id, milestone_key, required, status, version)
+                 VALUES('m1','run-1','mk1',1,'awaiting_approval',1);",
+            )
+            .unwrap();
+        assert!(connection.execute_batch(crate::MIGRATION_V16_SQL).is_err());
+
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE orchestration_task_nodes_v15(
+                   node_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_key TEXT NOT NULL,
+                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
+                   active_attempt_id TEXT, attempt_count INTEGER NOT NULL DEFAULT 0,
+                   max_attempts INTEGER NOT NULL DEFAULT 1, input_artifact_set_digest TEXT,
+                   role_id TEXT, acceptance_contract_ref TEXT, terminal_reason TEXT);
+                 CREATE TABLE orchestration_task_attempts_v15(
+                   attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                   attempt_no INTEGER NOT NULL, from_execution_run_id TEXT, status TEXT NOT NULL,
+                   lease_epoch INTEGER NOT NULL DEFAULT 0, artifact_set_digest TEXT,
+                   acceptance_evidence_digest TEXT, terminal_reason TEXT,
+                   terminal_identity_json TEXT);
+                 CREATE TABLE orchestration_milestones_v15(
+                   milestone_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, milestone_key TEXT NOT NULL,
+                   required INTEGER NOT NULL, status TEXT NOT NULL, version INTEGER NOT NULL,
+                   brief_tree_digest TEXT, presented_artifact_set_digest TEXT,
+                   acceptance_evidence_digest TEXT, terminal_reason TEXT);
+                 INSERT INTO orchestration_task_nodes_v15(
+                   node_id, run_id, node_key, required, status, version)
+                 VALUES('n1','run-1','k1',1,'ready',1);
+                 INSERT INTO orchestration_task_attempts_v15(
+                   attempt_id, run_id, node_id, attempt_no, status, lease_epoch)
+                 VALUES('a1','run-1','n1',1,'running',1);
+                 INSERT INTO orchestration_milestones_v15(
+                   milestone_id, run_id, milestone_key, required, status, version,
+                   brief_tree_digest, presented_artifact_set_digest, acceptance_evidence_digest)
+                 VALUES('m1','run-1','mk1',1,'awaiting_approval',1,NULL,NULL,NULL);",
+            )
+            .unwrap();
+        assert!(connection.execute_batch(crate::MIGRATION_V16_SQL).is_err());
     }
 
     #[test]
