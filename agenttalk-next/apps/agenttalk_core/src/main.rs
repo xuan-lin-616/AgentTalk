@@ -38,8 +38,9 @@ use agenttalk_runtime_host::{
 };
 #[cfg(windows)]
 use agenttalk_storage::{
-    AgentModelBindingPatch, BindingFieldPatch, CommandReceipt, CommandReceiptKey,
-    CommandReceiptState, LocalAgentAdapterBinding, LocalAgentImportRequest,
+    AgentModelBindingPatch, ArtifactBindingInput, BindingFieldPatch, CommandReceipt,
+    CommandReceiptKey, CommandReceiptState, HandoffDeliveryRecord, HumanReceiptRecord,
+    LocalAgentAdapterBinding, LocalAgentImportRequest, MachineAcceptanceRecord,
     RetrievalPreviewRequest, StorageError, ARTIFACT_BODY_MAX_BYTES,
     ARTIFACT_CONTENT_CHUNK_MAX_BYTES, CONNECTOR_PROFILE_QUERY_LIMIT_MAX,
     RETRIEVAL_PREVIEW_LIMIT_MAX,
@@ -3072,6 +3073,229 @@ fn handle_command(
                     )
                     .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
                 Ok(json!({"started": true, "outcome": outcome}))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.delivery.record" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(&command.payload, &["delivery", "bindings"])
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let delivery_value = command.payload.get("delivery").cloned().ok_or_else(|| {
+                    (
+                        "INVALID_COMMAND",
+                        "missing required field delivery".to_owned(),
+                        false,
+                    )
+                })?;
+                let bindings_value = command.payload.get("bindings").cloned().ok_or_else(|| {
+                    (
+                        "INVALID_COMMAND",
+                        "missing required field bindings".to_owned(),
+                        false,
+                    )
+                })?;
+                let delivery: HandoffDeliveryRecord = serde_json::from_value(delivery_value)
+                    .map_err(|error| {
+                        (
+                            "INVALID_COMMAND",
+                            format!("invalid delivery: {error}"),
+                            false,
+                        )
+                    })?;
+                let bindings: Vec<ArtifactBindingInput> = serde_json::from_value(bindings_value)
+                    .map_err(|error| {
+                        (
+                            "INVALID_COMMAND",
+                            format!("invalid bindings: {error}"),
+                            false,
+                        )
+                    })?;
+                let delivery_id = delivery.delivery_id.clone();
+                let replayed = core
+                    .record_orchestration_handoff_delivery(delivery, &bindings)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({
+                    "deliveryId": delivery_id,
+                    "replayed": replayed,
+                    "journaled": true
+                }))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.acceptance.record" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(&command.payload, &["acceptance"])
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let acceptance_value =
+                    command.payload.get("acceptance").cloned().ok_or_else(|| {
+                        (
+                            "INVALID_COMMAND",
+                            "missing required field acceptance".to_owned(),
+                            false,
+                        )
+                    })?;
+                let acceptance: MachineAcceptanceRecord = serde_json::from_value(acceptance_value)
+                    .map_err(|error| {
+                        (
+                            "INVALID_COMMAND",
+                            format!("invalid acceptance: {error}"),
+                            false,
+                        )
+                    })?;
+                let acceptance_id = acceptance.acceptance_id.clone();
+                let verdict = acceptance.verdict.clone();
+                let replayed = core
+                    .record_orchestration_machine_acceptance(acceptance)
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({
+                    "acceptanceId": acceptance_id,
+                    "verdict": verdict,
+                    "replayed": replayed,
+                    "recorded": true
+                }))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.milestone.ensure" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "runId",
+                        "milestoneId",
+                        "milestoneKey",
+                        "briefTreeDigest",
+                        "presentedArtifactSetDigest",
+                        "acceptanceEvidenceDigest",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let run_id = required_string(&command.payload, "runId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let milestone_id = required_string(&command.payload, "milestoneId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let milestone_key = required_string(&command.payload, "milestoneKey")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let brief_digest =
+                    required_orchestration_digest(&command.payload, "briefTreeDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let artifact_digest =
+                    required_orchestration_digest(&command.payload, "presentedArtifactSetDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let evidence_digest =
+                    required_orchestration_digest(&command.payload, "acceptanceEvidenceDigest")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                core.ensure_orchestration_milestone(
+                    &run_id,
+                    &milestone_id,
+                    &milestone_key,
+                    &brief_digest,
+                    &artifact_digest,
+                    &evidence_digest,
+                )
+                .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({
+                    "milestoneId": milestone_id,
+                    "status": "awaiting_approval",
+                    "runId": run_id
+                }))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.receipt.record" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "receiptId",
+                        "runId",
+                        "milestoneId",
+                        "requestId",
+                        "semanticPayloadHash",
+                        "decision",
+                        "expectedVersion",
+                        "briefTreeDigest",
+                        "presentedArtifactSetDigest",
+                        "acceptanceEvidenceDigest",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let decision = required_string(&command.payload, "decision")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                if !matches!(decision.as_str(), "approve" | "reject") {
+                    return Err((
+                        "INVALID_COMMAND",
+                        "decision must be approve or reject".into(),
+                        false,
+                    ));
+                }
+                let semantic_hash =
+                    required_orchestration_digest(&command.payload, "semanticPayloadHash")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let receipt = HumanReceiptRecord {
+                    receipt_id: required_string(&command.payload, "receiptId")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    run_id: required_string(&command.payload, "runId")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    milestone_id: required_string(&command.payload, "milestoneId")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    request_id: required_string(&command.payload, "requestId")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    semantic_payload_hash: semantic_hash,
+                    decision: decision.clone(),
+                    expected_version: required_i64(&command.payload, "expectedVersion")
+                        .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    brief_tree_digest: required_orchestration_digest(
+                        &command.payload,
+                        "briefTreeDigest",
+                    )
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    presented_artifact_set_digest: required_orchestration_digest(
+                        &command.payload,
+                        "presentedArtifactSetDigest",
+                    )
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    acceptance_evidence_digest: required_orchestration_digest(
+                        &command.payload,
+                        "acceptanceEvidenceDigest",
+                    )
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?,
+                    authenticated_principal: String::new(),
+                    core_timestamp: 0,
+                };
+                let receipt_id = receipt.receipt_id.clone();
+                let replayed = core
+                    .record_orchestration_human_receipt(
+                        receipt,
+                        &format!("ipc-session:{}", command.session_id),
+                    )
+                    .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({
+                    "receiptId": receipt_id,
+                    "decision": decision,
+                    "replayed": replayed,
+                    "recorded": true
+                }))
             })();
             match result {
                 Ok(payload) => write_response(connection, &command.request_id, payload)?,
@@ -6291,6 +6515,15 @@ fn required_string(payload: &Value, key: &str) -> Result<String, Box<dyn Error>>
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .ok_or_else(|| format!("missing required field {key}").into())
+}
+
+#[cfg(windows)]
+fn required_i64(payload: &Value, key: &str) -> Result<i64, Box<dyn Error>> {
+    payload
+        .get(key)
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| format!("missing or invalid non-negative integer field {key}").into())
 }
 
 #[cfg(windows)]

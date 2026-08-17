@@ -676,6 +676,110 @@ void main() {
   );
 
   test(
+    'orchestration delivery and acceptance clients keep authority payloads nested',
+    () async {
+      final deliveryPipe = _FakePipe(
+        responsePayload: const {
+          'deliveryId': 'handoff-1',
+          'replayed': false,
+          'journaled': true,
+        },
+      );
+      final deliveryClient = _clientFor(deliveryPipe);
+      addTearDown(deliveryClient.close);
+      final delivery = await deliveryClient.recordOrchestrationDelivery(
+        sessionId: 'session-test-123456',
+        delivery: const {'deliveryId': 'handoff-1'},
+        bindings: const [
+          {'bindingId': 'binding-1'},
+        ],
+      );
+      expect(delivery['journaled'], true);
+      expect(deliveryPipe.writtenCommands, ['orchestration.delivery.record']);
+      expect(deliveryPipe.writtenPayloads.single, {
+        'delivery': {'deliveryId': 'handoff-1'},
+        'bindings': [
+          {'bindingId': 'binding-1'},
+        ],
+      });
+
+      final acceptancePipe = _FakePipe(
+        responsePayload: const {
+          'acceptanceId': 'acceptance-1',
+          'verdict': 'accepted',
+          'replayed': false,
+          'recorded': true,
+        },
+      );
+      final acceptanceClient = _clientFor(acceptancePipe);
+      addTearDown(acceptanceClient.close);
+      final acceptance = await acceptanceClient.recordOrchestrationAcceptance(
+        sessionId: 'session-test-123456',
+        acceptance: const {
+          'acceptanceId': 'acceptance-1',
+          'verdict': 'accepted',
+        },
+      );
+      expect(acceptance['verdict'], 'accepted');
+      expect(acceptancePipe.writtenCommands, [
+        'orchestration.acceptance.record',
+      ]);
+    },
+  );
+
+  test(
+    'orchestration milestone and receipt clients validate sealed facts',
+    () async {
+      final milestonePipe = _FakePipe(
+        responsePayload: const {
+          'runId': 'run-1',
+          'milestoneId': 'milestone-1',
+          'status': 'awaiting_approval',
+        },
+      );
+      final milestoneClient = _clientFor(milestonePipe);
+      addTearDown(milestoneClient.close);
+      final milestone = await milestoneClient.ensureOrchestrationMilestone(
+        sessionId: 'session-test-123456',
+        runId: 'run-1',
+        milestoneId: 'milestone-1',
+        milestoneKey: 'review',
+        briefTreeDigest: 'a' * 64,
+        presentedArtifactSetDigest: 'b' * 64,
+        acceptanceEvidenceDigest: 'c' * 64,
+      );
+      expect(milestone['status'], 'awaiting_approval');
+      expect(milestonePipe.writtenCommands, ['orchestration.milestone.ensure']);
+
+      final receiptPipe = _FakePipe(
+        responsePayload: const {
+          'receiptId': 'receipt-1',
+          'decision': 'approve',
+          'replayed': false,
+          'recorded': true,
+        },
+      );
+      final receiptClient = _clientFor(receiptPipe);
+      addTearDown(receiptClient.close);
+      final receipt = await receiptClient.recordOrchestrationHumanReceipt(
+        sessionId: 'session-test-123456',
+        receiptId: 'receipt-1',
+        runId: 'run-1',
+        milestoneId: 'milestone-1',
+        requestId: 'human-request-1',
+        semanticPayloadHash: 'd' * 64,
+        decision: 'approve',
+        expectedVersion: 1,
+        briefTreeDigest: 'a' * 64,
+        presentedArtifactSetDigest: 'b' * 64,
+        acceptanceEvidenceDigest: 'c' * 64,
+      );
+      expect(receipt['decision'], 'approve');
+      expect(receiptPipe.writtenCommands, ['orchestration.receipt.record']);
+    },
+  );
+
+  test(
     'local discovery queries use empty payloads and reject extra fields',
     () async {
       const responsePayload = {

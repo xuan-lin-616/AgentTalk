@@ -1,4 +1,4 @@
-use agenttalk_brief_sealer::{BriefSealer, PreparedBriefSeal};
+use agenttalk_brief_sealer::{BriefSealer, CoreCas, PreparedBriefSeal};
 use agenttalk_context::{
     AssembledContext, AttachmentContextSource, ContextAssembler, ContextInput,
 };
@@ -20,10 +20,12 @@ use agenttalk_runtime_host::{
     RuntimeError, RuntimeEventStream, RuntimeRequest,
 };
 use agenttalk_storage::{
-    AgentModelBinding, AgentModelBindingPatch, ArtifactBodyChunk, CommandReceipt,
-    CommandReceiptKey, LocalAgentImportOutcome, LocalAgentImportRequest, OrchestrationRunRecord,
-    OrchestrationRunSeed, RetrievalEmbeddingProvider, RetrievalPreviewRequest, SqliteStore,
-    StorageError, StoredModelSelection, TaskReadyToRunningOutcome,
+    AgentModelBinding, AgentModelBindingPatch, ArtifactBindingInput, ArtifactBodyChunk,
+    CommandReceipt, CommandReceiptKey, CoreCasVerifier, HandoffDeliveryRecord, HumanReceiptRecord,
+    LocalAgentImportOutcome, LocalAgentImportRequest, MachineAcceptanceRecord,
+    OrchestrationRunRecord, OrchestrationRunSeed, RetrievalEmbeddingProvider,
+    RetrievalPreviewRequest, SqliteStore, StorageError, StoredModelSelection,
+    TaskReadyToRunningOutcome,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -31,6 +33,20 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unix_timestamp() -> Result<i64, StorageError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .map_err(|_| StorageError::ModelSnapshotInvalid {
+            reason: "system clock is before Unix epoch".into(),
+        })
+}
 
 #[cfg(test)]
 use agenttalk_runtime_host::{
@@ -1065,6 +1081,91 @@ impl PersistentCore {
             from_execution_run_id,
             lease_owner,
         )?)
+    }
+
+    pub fn record_orchestration_handoff_delivery(
+        &mut self,
+        delivery: HandoffDeliveryRecord,
+        bindings: &[ArtifactBindingInput],
+    ) -> Result<bool, CoreError> {
+        let run = self.storage.orchestration_run(&delivery.run_id)?;
+        let project_root = self
+            .storage
+            .project_root_path(&run.project_id)?
+            .ok_or_else(|| StorageError::ModelSnapshotInvalid {
+                reason: "run project has no sealed brief root".into(),
+            })?;
+        let cas = CoreCas::new(project_root);
+        let verifier = CoreCasVerifier { cas: &cas };
+        Ok(self
+            .storage
+            .record_handoff_delivery(delivery, bindings, &verifier)?)
+    }
+
+    pub fn record_orchestration_machine_acceptance(
+        &mut self,
+        mut acceptance: MachineAcceptanceRecord,
+    ) -> Result<bool, CoreError> {
+        let run = self.storage.orchestration_run(&acceptance.run_id)?;
+        let project_root = self
+            .storage
+            .project_root_path(&run.project_id)?
+            .ok_or_else(|| StorageError::ModelSnapshotInvalid {
+                reason: "run project has no sealed brief root".into(),
+            })?;
+        let cas = CoreCas::new(project_root);
+        let verifier = CoreCasVerifier { cas: &cas };
+        let contract_bytes = cas
+            .read(&acceptance.acceptance_contract_ref)
+            .map_err(|_| StorageError::ArtifactBodyMismatch)?;
+        let evidence_bytes = cas
+            .read(&acceptance.acceptance_evidence_ref)
+            .map_err(|_| StorageError::ArtifactBodyMismatch)?;
+        let mut result_input = Vec::with_capacity(
+            acceptance.verdict.len() + contract_bytes.len() + evidence_bytes.len() + 2,
+        );
+        result_input.extend_from_slice(acceptance.verdict.as_bytes());
+        result_input.push(0);
+        result_input.extend_from_slice(&contract_bytes);
+        result_input.push(0);
+        result_input.extend_from_slice(&evidence_bytes);
+        acceptance.verifier_id = "core.machine.acceptance".into();
+        acceptance.verifier_version = "v1".into();
+        acceptance.result_digest = hex_sha256(&result_input);
+        acceptance.core_timestamp = unix_timestamp()?;
+        Ok(self
+            .storage
+            .record_machine_acceptance(acceptance, &verifier)?)
+    }
+
+    pub fn ensure_orchestration_milestone(
+        &mut self,
+        run_id: &str,
+        milestone_id: &str,
+        milestone_key: &str,
+        brief_tree_digest: &str,
+        presented_artifact_set_digest: &str,
+        acceptance_evidence_digest: &str,
+    ) -> Result<(), CoreError> {
+        self.storage.ensure_orchestration_milestone(
+            run_id,
+            milestone_id,
+            milestone_key,
+            brief_tree_digest,
+            presented_artifact_set_digest,
+            acceptance_evidence_digest,
+        )?;
+        Ok(())
+    }
+
+    pub fn record_orchestration_human_receipt(
+        &mut self,
+        mut receipt: HumanReceiptRecord,
+        authenticated_principal: &str,
+    ) -> Result<bool, CoreError> {
+        receipt.authenticated_principal = authenticated_principal.to_owned();
+        receipt.core_timestamp = unix_timestamp()?;
+        Ok(self.storage.record_human_receipt(receipt)?)
     }
 
     pub fn open_with_runtime(

@@ -2243,6 +2243,172 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> recordOrchestrationDelivery({
+    required String sessionId,
+    required Map<String, dynamic> delivery,
+    required List<Map<String, dynamic>> bindings,
+  }) async {
+    if (delivery.isEmpty) {
+      throw const CoreIpcException('delivery must not be empty');
+    }
+    if (bindings.isEmpty) {
+      throw const CoreIpcException('bindings must not be empty');
+    }
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-delivery-record'),
+      'sessionId': sessionId,
+      'command': orchestrationDeliveryRecordCommand,
+      'payload': {'delivery': delivery, 'bindings': bindings},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['deliveryId'] is! String ||
+        payload['replayed'] is! bool ||
+        payload['journaled'] != true) {
+      throw const CoreIpcException(
+        'orchestration.delivery.record response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> recordOrchestrationAcceptance({
+    required String sessionId,
+    required Map<String, dynamic> acceptance,
+  }) async {
+    if (acceptance.isEmpty) {
+      throw const CoreIpcException('acceptance must not be empty');
+    }
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-acceptance-record'),
+      'sessionId': sessionId,
+      'command': orchestrationAcceptanceRecordCommand,
+      'payload': {'acceptance': acceptance},
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['acceptanceId'] is! String ||
+        payload['verdict'] is! String ||
+        payload['replayed'] is! bool ||
+        payload['recorded'] != true) {
+      throw const CoreIpcException(
+        'orchestration.acceptance.record response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> ensureOrchestrationMilestone({
+    required String sessionId,
+    required String runId,
+    required String milestoneId,
+    required String milestoneKey,
+    required String briefTreeDigest,
+    required String presentedArtifactSetDigest,
+    required String acceptanceEvidenceDigest,
+  }) async {
+    _requireNonEmpty('runId', runId);
+    _requireNonEmpty('milestoneId', milestoneId);
+    _requireNonEmpty('milestoneKey', milestoneKey);
+    _requireLowerHex64('briefTreeDigest', briefTreeDigest);
+    _requireLowerHex64(
+      'presentedArtifactSetDigest',
+      presentedArtifactSetDigest,
+    );
+    _requireLowerHex64('acceptanceEvidenceDigest', acceptanceEvidenceDigest);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-milestone-ensure'),
+      'sessionId': sessionId,
+      'command': orchestrationMilestoneEnsureCommand,
+      'payload': {
+        'runId': runId,
+        'milestoneId': milestoneId,
+        'milestoneKey': milestoneKey,
+        'briefTreeDigest': briefTreeDigest,
+        'presentedArtifactSetDigest': presentedArtifactSetDigest,
+        'acceptanceEvidenceDigest': acceptanceEvidenceDigest,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['runId'] != runId ||
+        payload['milestoneId'] != milestoneId ||
+        payload['status'] != 'awaiting_approval') {
+      throw const CoreIpcException(
+        'orchestration.milestone.ensure response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
+  Future<Map<String, dynamic>> recordOrchestrationHumanReceipt({
+    required String sessionId,
+    required String receiptId,
+    required String runId,
+    required String milestoneId,
+    required String requestId,
+    required String semanticPayloadHash,
+    required String decision,
+    required int expectedVersion,
+    required String briefTreeDigest,
+    required String presentedArtifactSetDigest,
+    required String acceptanceEvidenceDigest,
+  }) async {
+    _requireNonEmpty('receiptId', receiptId);
+    _requireNonEmpty('runId', runId);
+    _requireNonEmpty('milestoneId', milestoneId);
+    _requireNonEmpty('requestId', requestId);
+    _requireLowerHex64('semanticPayloadHash', semanticPayloadHash);
+    if (decision != 'approve' && decision != 'reject') {
+      throw const CoreIpcException('decision must be approve or reject');
+    }
+    if (expectedVersion < 0) {
+      throw const CoreIpcException('expectedVersion must be non-negative');
+    }
+    _requireLowerHex64('briefTreeDigest', briefTreeDigest);
+    _requireLowerHex64(
+      'presentedArtifactSetDigest',
+      presentedArtifactSetDigest,
+    );
+    _requireLowerHex64('acceptanceEvidenceDigest', acceptanceEvidenceDigest);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-receipt-record'),
+      'sessionId': sessionId,
+      'command': orchestrationReceiptRecordCommand,
+      'payload': {
+        'receiptId': receiptId,
+        'runId': runId,
+        'milestoneId': milestoneId,
+        'requestId': requestId,
+        'semanticPayloadHash': semanticPayloadHash,
+        'decision': decision,
+        'expectedVersion': expectedVersion,
+        'briefTreeDigest': briefTreeDigest,
+        'presentedArtifactSetDigest': presentedArtifactSetDigest,
+        'acceptanceEvidenceDigest': acceptanceEvidenceDigest,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['receiptId'] != receiptId ||
+        payload['decision'] != decision ||
+        payload['replayed'] is! bool ||
+        payload['recorded'] != true) {
+      throw const CoreIpcException(
+        'orchestration.receipt.record response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> queryOrchestrationRecoveryState({
     required String sessionId,
     required String runId,

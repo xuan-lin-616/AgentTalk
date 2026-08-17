@@ -49,7 +49,8 @@ pub struct OrchestrationRunRecord {
     pub terminal_reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HumanReceiptRecord {
     pub receipt_id: String,
     pub run_id: String,
@@ -65,7 +66,8 @@ pub struct HumanReceiptRecord {
     pub core_timestamp: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HandoffDeliveryRecord {
     pub delivery_id: String,
     pub run_id: String,
@@ -95,7 +97,8 @@ pub struct HandoffDeliveryRecord {
     pub replay_receipt_json: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ArtifactBindingInput {
     pub binding_id: String,
     pub edge_port_id: String,
@@ -112,7 +115,8 @@ pub struct ArtifactBindingInput {
     pub content_schema_ref_json: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MachineAcceptanceRecord {
     pub acceptance_id: String,
     pub run_id: String,
@@ -616,7 +620,39 @@ impl SqliteStore {
         acceptance_evidence_digest: &str,
     ) -> Result<(), StorageError> {
         self.orchestration_run(run_id)?;
-        self.connection.execute(
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run_status: String = tx.query_row(
+            "SELECT status FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if !matches!(
+            run_status.as_str(),
+            "pending" | "running" | "awaiting_approval"
+        ) {
+            return Err(StorageError::OrchestrationRunStatusInvalid {
+                run_id: run_id.to_owned(),
+                status: run_status,
+            });
+        }
+        if run_status != "awaiting_approval"
+            && tx
+                .query_row(
+                    "SELECT 1 FROM orchestration_leases
+                     WHERE run_id = ?1 AND status = 'active' AND deadline > ?2 LIMIT 1",
+                    params![run_id, crate::orchestration::now_unix()?],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_some()
+        {
+            return Err(StorageError::OrchestrationActiveAttemptExists {
+                run_id: run_id.to_owned(),
+            });
+        }
+        let inserted = tx.execute(
             "INSERT INTO orchestration_milestones(
                milestone_id, run_id, milestone_key, required, status, version,
                brief_tree_digest, presented_artifact_set_digest,
@@ -632,6 +668,42 @@ impl SqliteStore {
                 acceptance_evidence_digest,
             ],
         )?;
+        if inserted > 0 {
+            let generation: i64 = tx.query_row(
+                "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            append_audit_event(
+                &tx,
+                run_id,
+                "milestone_created",
+                "milestone",
+                milestone_id,
+                "{\"status\":\"awaiting_approval\"}",
+                &format!("milestone_created:{milestone_id}"),
+                generation,
+            )?;
+            if run_status != "awaiting_approval" {
+                tx.execute(
+                    "UPDATE orchestration_runs
+                     SET status = 'awaiting_approval', version = version + 1
+                     WHERE run_id = ?1",
+                    [run_id],
+                )?;
+                append_audit_event(
+                    &tx,
+                    run_id,
+                    "run_state_changed",
+                    "run",
+                    run_id,
+                    "{\"status\":\"awaiting_approval\"}",
+                    &format!("run_state_changed:{run_id}:awaiting_approval"),
+                    generation,
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2114,6 +2186,24 @@ impl SqliteStore {
             "UPDATE orchestration_task_attempts SET status = 'running' WHERE attempt_id = ?1",
             [&attempt_id],
         )?;
+        if tx.execute(
+            "UPDATE orchestration_runs
+             SET status = 'running', version = version + 1
+             WHERE run_id = ?1 AND status = 'pending'",
+            [&node.0],
+        )? > 0
+        {
+            append_audit_event(
+                &tx,
+                &node.0,
+                "run_state_changed",
+                "run",
+                &node.0,
+                "{\"status\":\"running\"}",
+                &format!("run_state_changed:{}:running", node.0),
+                coordinator_generation,
+            )?;
+        }
         append_audit_event(
             &tx,
             &node.0,
@@ -3739,8 +3829,58 @@ mod tests {
         assert_eq!(matrix[0].0, "node-1");
         assert_eq!(matrix[0].1, "running");
         let record = store.orchestration_run("run-1").unwrap();
+        assert_eq!(record.status, "running");
         assert!(is_object_ref(&record.brief_snapshot_id));
         assert_eq!(record.brief_tree_digest.len(), 64);
+    }
+
+    #[test]
+    fn milestone_gate_and_human_receipt_are_atomic_and_replayable() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store.create_orchestration_run(seed("run-1")).unwrap();
+        store
+            .ensure_orchestration_milestone(
+                "run-1",
+                "milestone-1",
+                "review",
+                &"a".repeat(64),
+                &"b".repeat(64),
+                &"c".repeat(64),
+            )
+            .unwrap();
+        assert_eq!(
+            store.orchestration_run("run-1").unwrap().status,
+            "awaiting_approval"
+        );
+        let receipt = HumanReceiptRecord {
+            receipt_id: "receipt-1".into(),
+            run_id: "run-1".into(),
+            milestone_id: "milestone-1".into(),
+            request_id: "request-1".into(),
+            semantic_payload_hash: "d".repeat(64),
+            decision: "approve".into(),
+            expected_version: 1,
+            brief_tree_digest: "a".repeat(64),
+            presented_artifact_set_digest: "b".repeat(64),
+            acceptance_evidence_digest: "c".repeat(64),
+            authenticated_principal: "core-test".into(),
+            core_timestamp: 1,
+        };
+        assert!(!store.record_human_receipt(receipt.clone()).unwrap());
+        assert!(store.record_human_receipt(receipt).unwrap());
+        assert_eq!(
+            store.orchestration_run("run-1").unwrap().status,
+            "completed"
+        );
+        let audit_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_audit_events WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 5);
     }
 
     #[test]

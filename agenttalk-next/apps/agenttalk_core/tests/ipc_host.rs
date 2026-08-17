@@ -2274,6 +2274,66 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
         "execution-1"
     );
 
+    let approval_run = send_command(
+        &mut client,
+        "orchestration-approval-run-create",
+        "orchestration-create-test-session",
+        "orchestration.run.create",
+        json!({
+            "projectId": "orchestration-create-project",
+            "runId": "orchestration-approval-run",
+            "briefSnapshotId": seal.brief_snapshot_id(),
+            "briefTreeDigest": seal.brief_tree_digest(),
+            "dagSnapshotDigest": "5".repeat(64),
+            "roleBindingSnapshotDigest": "6".repeat(64)
+        }),
+    );
+    assert!(approval_run.ok);
+    let milestone = send_command(
+        &mut client,
+        "orchestration-milestone-ensure-1",
+        "orchestration-create-test-session",
+        "orchestration.milestone.ensure",
+        json!({
+            "runId": "orchestration-approval-run",
+            "milestoneId": "orchestration-milestone-1",
+            "milestoneKey": "review",
+            "briefTreeDigest": seal.brief_tree_digest(),
+            "presentedArtifactSetDigest": "7".repeat(64),
+            "acceptanceEvidenceDigest": "8".repeat(64)
+        }),
+    );
+    assert!(milestone.ok);
+    assert_eq!(milestone.payload["status"], "awaiting_approval");
+    let receipt = send_command(
+        &mut client,
+        "orchestration-receipt-record-1",
+        "orchestration-create-test-session",
+        "orchestration.receipt.record",
+        json!({
+            "receiptId": "orchestration-receipt-1",
+            "runId": "orchestration-approval-run",
+            "milestoneId": "orchestration-milestone-1",
+            "requestId": "human-request-1",
+            "semanticPayloadHash": "9".repeat(64),
+            "decision": "approve",
+            "expectedVersion": 1,
+            "briefTreeDigest": seal.brief_tree_digest(),
+            "presentedArtifactSetDigest": "7".repeat(64),
+            "acceptanceEvidenceDigest": "8".repeat(64)
+        }),
+    );
+    assert!(receipt.ok);
+    assert_eq!(receipt.payload["decision"], "approve");
+    let approval_snapshot = send_query(
+        &mut client,
+        "orchestration-approval-snapshot-1",
+        "orchestration-create-test-session",
+        "orchestration.run.snapshot",
+        json!({"runId": "orchestration-approval-run"}),
+    );
+    assert_eq!(approval_snapshot.payload["run"]["status"], "completed");
+
     let wrong_digest = json!({
         "projectId": "orchestration-create-project",
         "runId": "orchestration-create-run-wrong",

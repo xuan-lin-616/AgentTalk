@@ -10,6 +10,13 @@ const String orchestrationRunCreateCommand = 'orchestration.run.create';
 const String orchestrationTaskInsertCommand = 'orchestration.task.insert';
 const String orchestrationTaskReadyCommand = 'orchestration.task.ready';
 const String orchestrationTaskStartCommand = 'orchestration.task.start';
+const String orchestrationDeliveryRecordCommand =
+    'orchestration.delivery.record';
+const String orchestrationAcceptanceRecordCommand =
+    'orchestration.acceptance.record';
+const String orchestrationMilestoneEnsureCommand =
+    'orchestration.milestone.ensure';
+const String orchestrationReceiptRecordCommand = 'orchestration.receipt.record';
 
 class ProtocolVersion {
   const ProtocolVersion(this.major, this.minor);
