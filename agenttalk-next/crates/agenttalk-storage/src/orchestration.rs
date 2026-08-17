@@ -568,7 +568,7 @@ impl SqliteStore {
         }
         // New path: full authority closure in one Immediate transaction.
         Self::validate_handoff_authority(&tx, &delivery, bindings)?;
-        Self::verify_cas_before_journal(cas, &delivery, bindings)?;
+        SqliteStore::verify_cas_before_journal(cas, &delivery, bindings)?;
         for binding in bindings {
             if binding.edge_port_id.is_empty() || binding.content_schema_ref_json.is_empty() {
                 return Err(StorageError::OrchestrationArtifactBindingInvalid {
@@ -882,6 +882,20 @@ impl SqliteStore {
                     reason: "edge port does not match sealed edge authority".into(),
                 });
             }
+        }
+
+        let required_ports: HashSet<String> = tx
+            .prepare("SELECT edge_port_id FROM orchestration_edge_ports WHERE edge_id = ?1")?
+            .query_map([&delivery.edge_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        let provided_ports: HashSet<String> = bindings
+            .iter()
+            .map(|binding| binding.edge_port_id.clone())
+            .collect();
+        if required_ports != provided_ports {
+            return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                reason: "artifact bindings do not exactly cover the sealed edge port set".into(),
+            });
         }
 
         let bindings_json: Vec<Value> = bindings
@@ -1249,7 +1263,8 @@ impl SqliteStore {
         })
     }
 
-    pub fn set_task_max_attempts(
+    #[allow(dead_code)]
+    pub(crate) fn set_task_max_attempts(
         &mut self,
         node_id: &str,
         max_attempts: i64,
@@ -1257,9 +1272,34 @@ impl SqliteStore {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run_id: String = tx
+            .query_row(
+                "SELECT run_id FROM orchestration_task_nodes WHERE node_id = ?1",
+                [node_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationTaskNotFound {
+                node_id: node_id.to_owned(),
+            })?;
         tx.execute(
             "UPDATE orchestration_task_nodes SET max_attempts = ?2 WHERE node_id = ?1",
             params![node_id, max_attempts],
+        )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [&run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            &run_id,
+            "task_node_budget_changed",
+            "task_node",
+            node_id,
+            &format!("{{\"max_attempts\":{max_attempts}}}"),
+            &format!("task_node_budget_changed:{node_id}:{max_attempts}"),
+            generation,
         )?;
         tx.commit()?;
         Ok(())
@@ -1475,7 +1515,8 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn transition_run_to_awaiting_approval(
+    #[allow(dead_code)]
+    pub(crate) fn transition_run_to_awaiting_approval(
         &mut self,
         run_id: &str,
     ) -> Result<(), StorageError> {
@@ -1502,11 +1543,27 @@ impl SqliteStore {
             "UPDATE orchestration_runs SET status = 'awaiting_approval', version = version + 1 WHERE run_id = ?1",
             [run_id],
         )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            run_id,
+            "run_state_changed",
+            "run",
+            run_id,
+            "{\"status\":\"awaiting_approval\"}",
+            &format!("run_state_changed:{run_id}:awaiting_approval"),
+            generation,
+        )?;
         tx.commit()?;
         Ok(())
     }
 
-    pub fn record_role_binding_snapshot(
+    #[allow(dead_code)]
+    pub(crate) fn record_role_binding_snapshot(
         &mut self,
         run_id: &str,
         snapshot_id: &str,
@@ -1516,7 +1573,27 @@ impl SqliteStore {
         workspace_access: &str,
     ) -> Result<(), StorageError> {
         self.orchestration_run(run_id)?;
-        self.connection.execute(
+        if !is_hex64(digest) {
+            return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                reason: "role binding digest must be lowercase hex64".into(),
+            });
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM orchestration_role_binding_snapshots
+                 WHERE run_id = ?1 AND role_id = ?2 AND agent_id = ?3",
+                params![run_id, role_id, agent_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
             "INSERT INTO orchestration_role_binding_snapshots(
                role_binding_snapshot_id, run_id, digest, sealed_at,
                role_id, agent_id, workspace_access
@@ -1531,6 +1608,22 @@ impl SqliteStore {
                 workspace_access,
             ],
         )?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        append_audit_event(
+            &tx,
+            run_id,
+            "role_binding_snapshot_recorded",
+            "role_binding_snapshot",
+            snapshot_id,
+            "{\"status\":\"sealed\"}",
+            &format!("role_binding_snapshot:{snapshot_id}"),
+            generation,
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1705,6 +1798,28 @@ impl CasVerifier for TestCas {
 }
 
 #[cfg(test)]
+struct MissingCas;
+
+#[cfg(test)]
+impl CasVerifier for MissingCas {
+    fn verify_object(&self, _object_ref: &str) -> Result<Vec<u8>, StorageError> {
+        Err(StorageError::ArtifactBodyNotFound {
+            id: "missing".into(),
+        })
+    }
+}
+
+#[cfg(test)]
+struct TamperedCas;
+
+#[cfg(test)]
+impl CasVerifier for TamperedCas {
+    fn verify_object(&self, _object_ref: &str) -> Result<Vec<u8>, StorageError> {
+        Ok(vec![1u8; 32])
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::SqliteStore;
@@ -1745,6 +1860,74 @@ mod tests {
             authenticated_principal: "human-a".into(),
             core_timestamp: 1000,
         }
+    }
+
+    fn minimal_delivery() -> HandoffDeliveryRecord {
+        let sha = hex64('a');
+        HandoffDeliveryRecord {
+            delivery_id: format!("handoff-{}", hex64('b')),
+            run_id: "run-1".into(),
+            attempt_id: "attempt-1".into(),
+            edge_id: "edge-1".into(),
+            lease_epoch: 1,
+            lease_owner: "worker-a".into(),
+            coordinator_generation: 1,
+            envelope_handoff_id: format!("handoff-{}", hex64('b')),
+            from_task_node_id: "node-1".into(),
+            from_execution_run_id: "exec-1".into(),
+            to_task_node_id: "node-2".into(),
+            dag_snapshot_digest: sha.clone(),
+            role_binding_snapshot_digest: sha.clone(),
+            declaration_digest: sha.clone(),
+            artifact_transfer_set_digest: sha.clone(),
+            idempotency_key: sha.clone(),
+            delivery_payload_digest: sha.clone(),
+            envelope_object_ref: format!("sha256:{sha}"),
+            envelope_raw_sha256: sha.clone(),
+            envelope_sha256_jcs: sha.clone(),
+            acceptance_contract_ref: format!("sha256:{sha}"),
+            acceptance_contract_digest: sha.clone(),
+            acceptance_evidence_ref: format!("sha256:{sha}"),
+            acceptance_evidence_digest: sha.clone(),
+            producer_context_manifest_digest: sha.clone(),
+            replay_receipt_json: None,
+        }
+    }
+
+    #[test]
+    fn cas_verifier_missing_and_tampered_fail_closed() {
+        let delivery = minimal_delivery();
+        let binding = ArtifactBindingInput {
+            binding_id: "binding-1".into(),
+            edge_port_id: "edge-port-1".into(),
+            source_output_port_id: "out".into(),
+            target_input_port_id: "in".into(),
+            object_ref: format!("sha256:{}", hex64('a')),
+            sha256: hex64('a'),
+            size: 0,
+            content_schema_id: "schema".into(),
+            content_schema_version: "1".into(),
+            content_schema_digest: hex64('a'),
+            normalized_content_type: "text/plain".into(),
+            normalized_content_type_policy_version: "1".into(),
+            content_schema_ref_json: "{}".into(),
+        };
+        assert!(matches!(
+            SqliteStore::verify_cas_before_journal(
+                &MissingCas,
+                &delivery,
+                std::slice::from_ref(&binding)
+            ),
+            Err(StorageError::ArtifactBodyNotFound { .. })
+        ));
+        assert!(matches!(
+            SqliteStore::verify_cas_before_journal(
+                &TamperedCas,
+                &delivery,
+                std::slice::from_ref(&binding)
+            ),
+            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
+        ));
     }
 
     #[test]
@@ -2092,7 +2275,7 @@ mod tests {
             .record_role_binding_snapshot(
                 "run-1",
                 "snapshot-1",
-                "digest-1",
+                &hex64('a'),
                 "role-a",
                 "agent-a",
                 "read-write",
@@ -2102,7 +2285,7 @@ mod tests {
             .record_role_binding_snapshot(
                 "run-1",
                 "snapshot-2",
-                "digest-1",
+                &hex64('a'),
                 "role-b",
                 "agent-b",
                 "read",
@@ -2111,8 +2294,8 @@ mod tests {
         let role_count: i64 = store
             .connection
             .query_row(
-                "SELECT count(*) FROM orchestration_role_binding_snapshots WHERE digest = 'digest-1'",
-                [],
+                "SELECT count(*) FROM orchestration_role_binding_snapshots WHERE digest = ?1",
+                [hex64('a')],
                 |row| row.get(0),
             )
             .unwrap();

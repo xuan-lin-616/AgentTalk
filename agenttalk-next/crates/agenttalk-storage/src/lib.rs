@@ -949,6 +949,8 @@ pub enum StorageError {
     OrchestrationArtifactBindingInvalid { reason: String },
     #[error("orchestration audit payload canonicalization failed: {reason}")]
     AuditPayloadCanonicalization { reason: String },
+    #[error("v15 orchestrator state cannot be mapped to v16: {detail}")]
+    MigrationInvalidV15State { detail: String },
     #[error("artifact body is not registered: {id}")]
     ArtifactBodyNotFound { id: String },
     #[error("artifact body does not match its registered metadata")]
@@ -1734,6 +1736,57 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn validate_v15_to_v16_state(tx: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+        let bad_node: Option<String> = tx
+        .query_row(
+            "SELECT node_id FROM orchestration_task_nodes
+             WHERE status NOT IN ('pending','ready','running','sealing','completed','failed','blocked','cancelled')
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+        if let Some(node_id) = bad_node {
+            return Err(StorageError::MigrationInvalidV15State {
+                detail: format!("task node {node_id} has an unmappable v15 status"),
+            });
+        }
+        let bad_attempt: Option<String> = tx
+        .query_row(
+            "SELECT attempt_id FROM orchestration_task_attempts
+             WHERE status NOT IN ('leased','running','sealing','completed','failed','cancelled','interrupted')
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+        if let Some(attempt_id) = bad_attempt {
+            return Err(StorageError::MigrationInvalidV15State {
+                detail: format!("task attempt {attempt_id} has an unmappable v15 status"),
+            });
+        }
+        let bad_milestone: Option<String> = tx
+            .query_row(
+                "SELECT milestone_id FROM orchestration_milestones
+             WHERE status NOT IN ('pending','awaiting_approval','approved','rejected','cancelled')
+                OR brief_tree_digest IS NULL
+                OR presented_artifact_set_digest IS NULL
+                OR acceptance_evidence_digest IS NULL
+             LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(milestone_id) = bad_milestone {
+            return Err(StorageError::MigrationInvalidV15State {
+                detail: format!(
+                    "milestone {milestone_id} has an unmappable v15 status or NULL sealed digest"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn migrate_v16(&mut self) -> Result<(), StorageError> {
         let checksum = hex_digest(MIGRATION_V16_SQL.as_bytes());
         let tx = self
@@ -1770,6 +1823,7 @@ impl SqliteStore {
              VALUES(?1, ?2, strftime('%s','now'), 1)",
             params![V16_SCHEMA_VERSION, checksum],
         )?;
+        Self::validate_v15_to_v16_state(&tx)?;
         tx.execute_batch(MIGRATION_V16_SQL)?;
         tx.execute(
             "UPDATE schema_migrations SET dirty = 0 WHERE version = ?1",
