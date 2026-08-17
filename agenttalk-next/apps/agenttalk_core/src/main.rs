@@ -41,7 +41,8 @@ use agenttalk_storage::{
     AgentModelBindingPatch, ArtifactBindingInput, BindingFieldPatch, CommandReceipt,
     CommandReceiptKey, CommandReceiptState, HandoffDeliveryRecord, HumanReceiptRecord,
     LocalAgentAdapterBinding, LocalAgentImportRequest, MachineAcceptanceRecord,
-    RetrievalPreviewRequest, StorageError, ARTIFACT_BODY_MAX_BYTES,
+    OrchestrationContextAuthorityInput, OrchestrationEdgeInput, OrchestrationEdgePortInput,
+    OrchestrationRoleBindingInput, RetrievalPreviewRequest, StorageError, ARTIFACT_BODY_MAX_BYTES,
     ARTIFACT_CONTENT_CHUNK_MAX_BYTES, CONNECTOR_PROFILE_QUERY_LIMIT_MAX,
     RETRIEVAL_PREVIEW_LIMIT_MAX,
 };
@@ -3295,6 +3296,95 @@ fn handle_command(
                     "decision": decision,
                     "replayed": replayed,
                     "recorded": true
+                }))
+            })();
+            match result {
+                Ok(payload) => write_response(connection, &command.request_id, payload)?,
+                Err((code, message, retryable)) => {
+                    write_error(connection, code, &message, retryable, &command.request_id)?
+                }
+            }
+        }
+        "orchestration.graph.bind" => {
+            let result = (|| -> Result<Value, (&str, String, bool)> {
+                reject_unknown_fields(
+                    &command.payload,
+                    &[
+                        "runId",
+                        "edges",
+                        "edgePorts",
+                        "roleBindings",
+                        "contextAuthorities",
+                    ],
+                )
+                .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let run_id = required_string(&command.payload, "runId")
+                    .map_err(|error| ("INVALID_COMMAND", error.to_string(), false))?;
+                let edges: Vec<OrchestrationEdgeInput> = serde_json::from_value(
+                    command
+                        .payload
+                        .get("edges")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                )
+                .map_err(|error| ("INVALID_COMMAND", format!("invalid edges: {error}"), false))?;
+                let edge_ports: Vec<OrchestrationEdgePortInput> = serde_json::from_value(
+                    command
+                        .payload
+                        .get("edgePorts")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                )
+                .map_err(|error| {
+                    (
+                        "INVALID_COMMAND",
+                        format!("invalid edgePorts: {error}"),
+                        false,
+                    )
+                })?;
+                let role_bindings: Vec<OrchestrationRoleBindingInput> = serde_json::from_value(
+                    command
+                        .payload
+                        .get("roleBindings")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                )
+                .map_err(|error| {
+                    (
+                        "INVALID_COMMAND",
+                        format!("invalid roleBindings: {error}"),
+                        false,
+                    )
+                })?;
+                let context_authorities: Vec<OrchestrationContextAuthorityInput> =
+                    serde_json::from_value(
+                        command
+                            .payload
+                            .get("contextAuthorities")
+                            .cloned()
+                            .unwrap_or_else(|| json!([])),
+                    )
+                    .map_err(|error| {
+                        (
+                            "INVALID_COMMAND",
+                            format!("invalid contextAuthorities: {error}"),
+                            false,
+                        )
+                    })?;
+                core.bind_orchestration_graph_facts(
+                    &run_id,
+                    &edges,
+                    &edge_ports,
+                    &role_bindings,
+                    &context_authorities,
+                )
+                .map_err(|error| ("COMMAND_REJECTED", error.to_string(), false))?;
+                Ok(json!({
+                    "runId": run_id,
+                    "edges": edges.len(),
+                    "edgePorts": edge_ports.len(),
+                    "roleBindings": role_bindings.len(),
+                    "contextAuthorities": context_authorities.len()
                 }))
             })();
             match result {

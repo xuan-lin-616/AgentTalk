@@ -780,6 +780,41 @@ void main() {
   );
 
   test(
+    'orchestration graph binding keeps sealed authority facts grouped',
+    () async {
+      final pipe = _FakePipe(
+        responsePayload: const {
+          'runId': 'run-1',
+          'edges': 1,
+          'edgePorts': 1,
+          'roleBindings': 1,
+          'contextAuthorities': 1,
+        },
+      );
+      final client = _clientFor(pipe);
+      addTearDown(client.close);
+      final result = await client.bindOrchestrationGraphFacts(
+        sessionId: 'session-test-123456',
+        runId: 'run-1',
+        edges: const [
+          {'edgeId': 'edge-1'},
+        ],
+        edgePorts: const [
+          {'edgePortId': 'edge-port-1'},
+        ],
+        roleBindings: const [
+          {'roleId': 'architect'},
+        ],
+        contextAuthorities: const [
+          {'contextManifestRefId': 'context-1'},
+        ],
+      );
+      expect(result['edges'], 1);
+      expect(pipe.writtenCommands, ['orchestration.graph.bind']);
+    },
+  );
+
+  test(
     'local discovery queries use empty payloads and reject extra fields',
     () async {
       const responsePayload = {

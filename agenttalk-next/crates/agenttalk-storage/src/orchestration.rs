@@ -145,6 +145,47 @@ pub struct TaskReadyToRunningOutcome {
     pub lease_epoch: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrchestrationEdgeInput {
+    pub edge_id: String,
+    pub run_id: String,
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub dag_snapshot_digest: String,
+    pub allowed_consumer_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrchestrationEdgePortInput {
+    pub edge_port_id: String,
+    pub edge_id: String,
+    pub source_output_port_id: String,
+    pub target_input_port_id: String,
+    pub port_policy_json: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrchestrationRoleBindingInput {
+    pub role_binding_snapshot_id: String,
+    pub run_id: String,
+    pub digest: String,
+    pub role_id: String,
+    pub agent_id: String,
+    pub workspace_access: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrchestrationContextAuthorityInput {
+    pub context_manifest_ref_id: String,
+    pub run_id: String,
+    pub attempt_id: String,
+    pub producer_context_manifest_digest: String,
+}
+
 pub trait CasVerifier {
     fn verify_object(&self, object_ref: &str) -> Result<Vec<u8>, StorageError>;
 }
@@ -2025,6 +2066,219 @@ impl SqliteStore {
              ON CONFLICT(node_id) DO NOTHING",
             params![node_id, run_id, node_key],
         )?;
+        Ok(())
+    }
+
+    pub fn bind_orchestration_graph_facts(
+        &mut self,
+        run_id: &str,
+        edges: &[OrchestrationEdgeInput],
+        edge_ports: &[OrchestrationEdgePortInput],
+        role_bindings: &[OrchestrationRoleBindingInput],
+        context_authorities: &[OrchestrationContextAuthorityInput],
+    ) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (run_dag, run_role): (String, String) = tx
+            .query_row(
+                "SELECT dag_snapshot_digest, role_binding_snapshot_digest
+                 FROM orchestration_runs WHERE run_id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::OrchestrationRunNotFound {
+                run_id: run_id.to_owned(),
+            })?;
+        let generation: i64 = tx.query_row(
+            "SELECT coordinator_generation FROM orchestration_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        for edge in edges {
+            if edge.run_id != run_id
+                || edge.dag_snapshot_digest != run_dag
+                || !is_lower_hex64(&edge.dag_snapshot_digest)
+                || serde_json::from_str::<serde_json::Value>(&edge.allowed_consumer_json).is_err()
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "edge authority facts do not match sealed run".into(),
+                });
+            }
+            for node_id in [&edge.from_node_id, &edge.to_node_id] {
+                let node_run: Option<String> = tx
+                    .query_row(
+                        "SELECT run_id FROM orchestration_task_nodes WHERE node_id = ?1",
+                        [node_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if node_run.as_deref() != Some(run_id) {
+                    return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                        reason: "edge node is not owned by run".into(),
+                    });
+                }
+            }
+            let inserted = tx.execute(
+                "INSERT INTO orchestration_edges(
+                   edge_id, run_id, from_node_id, to_node_id,
+                   dag_snapshot_digest, allowed_consumer_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(edge_id) DO NOTHING",
+                params![
+                    edge.edge_id,
+                    run_id,
+                    edge.from_node_id,
+                    edge.to_node_id,
+                    edge.dag_snapshot_digest,
+                    edge.allowed_consumer_json
+                ],
+            )?;
+            if inserted > 0 {
+                append_audit_event(
+                    &tx,
+                    run_id,
+                    "edge_bound",
+                    "edge",
+                    &edge.edge_id,
+                    "{\"status\":\"sealed\"}",
+                    &format!("edge_bound:{}", edge.edge_id),
+                    generation,
+                )?;
+            }
+        }
+        for port in edge_ports {
+            let edge_run: Option<String> = tx
+                .query_row(
+                    "SELECT run_id FROM orchestration_edges WHERE edge_id = ?1",
+                    [&port.edge_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if edge_run.as_deref() != Some(run_id)
+                || serde_json::from_str::<serde_json::Value>(&port.port_policy_json).is_err()
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "edge port is not owned by run or policy is invalid".into(),
+                });
+            }
+            let inserted = tx.execute(
+                "INSERT INTO orchestration_edge_ports(
+                   edge_port_id, edge_id, source_output_port_id,
+                   target_input_port_id, port_policy_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(edge_port_id) DO NOTHING",
+                params![
+                    port.edge_port_id,
+                    port.edge_id,
+                    port.source_output_port_id,
+                    port.target_input_port_id,
+                    port.port_policy_json
+                ],
+            )?;
+            if inserted > 0 {
+                append_audit_event(
+                    &tx,
+                    run_id,
+                    "edge_port_bound",
+                    "edge_port",
+                    &port.edge_port_id,
+                    "{\"status\":\"sealed\"}",
+                    &format!("edge_port_bound:{}", port.edge_port_id),
+                    generation,
+                )?;
+            }
+        }
+        for binding in role_bindings {
+            if binding.run_id != run_id
+                || binding.digest != run_role
+                || !is_lower_hex64(&binding.digest)
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "role binding authority facts do not match sealed run".into(),
+                });
+            }
+            let inserted = tx.execute(
+                "INSERT INTO orchestration_role_binding_snapshots(
+                   role_binding_snapshot_id, run_id, digest, sealed_at,
+                   role_id, agent_id, workspace_access
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(role_binding_snapshot_id) DO NOTHING",
+                params![
+                    binding.role_binding_snapshot_id,
+                    run_id,
+                    binding.digest,
+                    now_unix()?,
+                    binding.role_id,
+                    binding.agent_id,
+                    binding.workspace_access
+                ],
+            )?;
+            if inserted > 0 {
+                append_audit_event(
+                    &tx,
+                    run_id,
+                    "role_binding_snapshot_recorded",
+                    "role_binding_snapshot",
+                    &binding.role_binding_snapshot_id,
+                    "{\"status\":\"sealed\"}",
+                    &format!("role_binding_snapshot:{}", binding.role_binding_snapshot_id),
+                    generation,
+                )?;
+            }
+        }
+        for context in context_authorities {
+            if context.run_id != run_id
+                || !is_lower_hex64(&context.producer_context_manifest_digest)
+            {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "context authority facts do not match sealed run".into(),
+                });
+            }
+            let attempt_run: Option<String> = tx
+                .query_row(
+                    "SELECT run_id FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                    [&context.attempt_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if attempt_run.as_deref() != Some(run_id) {
+                return Err(StorageError::OrchestrationArtifactBindingInvalid {
+                    reason: "context authority attempt is not owned by run".into(),
+                });
+            }
+            let inserted = tx.execute(
+                "INSERT INTO orchestration_context_manifest_authorities(
+                   context_manifest_ref_id, run_id, attempt_id,
+                   producer_context_manifest_digest, sealed_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(context_manifest_ref_id) DO NOTHING",
+                params![
+                    context.context_manifest_ref_id,
+                    run_id,
+                    context.attempt_id,
+                    context.producer_context_manifest_digest,
+                    now_unix()?
+                ],
+            )?;
+            if inserted > 0 {
+                append_audit_event(
+                    &tx,
+                    run_id,
+                    "context_manifest_authority_recorded",
+                    "context_manifest_authority",
+                    &context.context_manifest_ref_id,
+                    "{\"status\":\"sealed\"}",
+                    &format!(
+                        "context_manifest_authority:{}",
+                        context.context_manifest_ref_id
+                    ),
+                    generation,
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

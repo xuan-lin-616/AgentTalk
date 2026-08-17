@@ -2409,6 +2409,43 @@ class CoreIpcClient {
     return payload;
   }
 
+  Future<Map<String, dynamic>> bindOrchestrationGraphFacts({
+    required String sessionId,
+    required String runId,
+    required List<Map<String, dynamic>> edges,
+    required List<Map<String, dynamic>> edgePorts,
+    required List<Map<String, dynamic>> roleBindings,
+    required List<Map<String, dynamic>> contextAuthorities,
+  }) async {
+    _requireNonEmpty('runId', runId);
+    final response = await request({
+      'kind': 'command',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('orchestration-graph-bind'),
+      'sessionId': sessionId,
+      'command': orchestrationGraphBindCommand,
+      'payload': {
+        'runId': runId,
+        'edges': edges,
+        'edgePorts': edgePorts,
+        'roleBindings': roleBindings,
+        'contextAuthorities': contextAuthorities,
+      },
+    });
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic> ||
+        payload['runId'] != runId ||
+        payload['edges'] is! int ||
+        payload['edgePorts'] is! int ||
+        payload['roleBindings'] is! int ||
+        payload['contextAuthorities'] is! int) {
+      throw const CoreIpcException(
+        'orchestration.graph.bind response payload is invalid',
+      );
+    }
+    return payload;
+  }
+
   Future<Map<String, dynamic>> queryOrchestrationRecoveryState({
     required String sessionId,
     required String runId,

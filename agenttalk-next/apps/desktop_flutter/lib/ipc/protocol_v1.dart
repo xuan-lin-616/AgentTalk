@@ -17,6 +17,7 @@ const String orchestrationAcceptanceRecordCommand =
 const String orchestrationMilestoneEnsureCommand =
     'orchestration.milestone.ensure';
 const String orchestrationReceiptRecordCommand = 'orchestration.receipt.record';
+const String orchestrationGraphBindCommand = 'orchestration.graph.bind';
 
 class ProtocolVersion {
   const ProtocolVersion(this.major, this.minor);

@@ -2228,6 +2228,43 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
     assert!(inserted.ok);
     assert_eq!(inserted.payload["status"], "pending");
 
+    let graph = send_command(
+        &mut client,
+        "orchestration-graph-bind-1",
+        "orchestration-create-test-session",
+        "orchestration.graph.bind",
+        json!({
+            "runId": "orchestration-create-run",
+            "edges": [{
+                "edgeId": "orchestration-edge-1",
+                "runId": "orchestration-create-run",
+                "fromNodeId": "orchestration-node-1",
+                "toNodeId": "orchestration-node-1",
+                "dagSnapshotDigest": "1".repeat(64),
+                "allowedConsumerJson": "[]"
+            }],
+            "edgePorts": [{
+                "edgePortId": "orchestration-edge-port-1",
+                "edgeId": "orchestration-edge-1",
+                "sourceOutputPortId": "out",
+                "targetInputPortId": "in",
+                "portPolicyJson": "{}"
+            }],
+            "roleBindings": [{
+                "roleBindingSnapshotId": "orchestration-role-binding-1",
+                "runId": "orchestration-create-run",
+                "digest": "2".repeat(64),
+                "roleId": "architect",
+                "agentId": "agent-fixture",
+                "workspaceAccess": "read_only"
+            }],
+            "contextAuthorities": []
+        }),
+    );
+    assert!(graph.ok);
+    assert_eq!(graph.payload["edges"], 1);
+    assert_eq!(graph.payload["edgePorts"], 1);
+
     let ready = send_command(
         &mut client,
         "orchestration-task-ready-1",
@@ -2260,6 +2297,27 @@ fn core_host_creates_orchestration_run_from_sealed_snapshot_and_replays() {
         "orchestration-node-1:attempt:1"
     );
     assert_eq!(started.payload["outcome"]["leaseEpoch"], 1);
+
+    let context_graph = send_command(
+        &mut client,
+        "orchestration-context-bind-1",
+        "orchestration-create-test-session",
+        "orchestration.graph.bind",
+        json!({
+            "runId": "orchestration-create-run",
+            "edges": [],
+            "edgePorts": [],
+            "roleBindings": [],
+            "contextAuthorities": [{
+                "contextManifestRefId": "orchestration-context-1",
+                "runId": "orchestration-create-run",
+                "attemptId": "orchestration-node-1:attempt:1",
+                "producerContextManifestDigest": "3".repeat(64)
+            }]
+        }),
+    );
+    assert!(context_graph.ok);
+    assert_eq!(context_graph.payload["contextAuthorities"], 1);
 
     let running_snapshot = send_query(
         &mut client,

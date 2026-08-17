@@ -23,9 +23,10 @@ use agenttalk_storage::{
     AgentModelBinding, AgentModelBindingPatch, ArtifactBindingInput, ArtifactBodyChunk,
     CommandReceipt, CommandReceiptKey, CoreCasVerifier, HandoffDeliveryRecord, HumanReceiptRecord,
     LocalAgentImportOutcome, LocalAgentImportRequest, MachineAcceptanceRecord,
-    OrchestrationRunRecord, OrchestrationRunSeed, RetrievalEmbeddingProvider,
-    RetrievalPreviewRequest, SqliteStore, StorageError, StoredModelSelection,
-    TaskReadyToRunningOutcome,
+    OrchestrationContextAuthorityInput, OrchestrationEdgeInput, OrchestrationEdgePortInput,
+    OrchestrationRoleBindingInput, OrchestrationRunRecord, OrchestrationRunSeed,
+    RetrievalEmbeddingProvider, RetrievalPreviewRequest, SqliteStore, StorageError,
+    StoredModelSelection, TaskReadyToRunningOutcome,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1066,6 +1067,24 @@ impl PersistentCore {
             input_artifact_set_digest,
             role_id,
             acceptance_contract_ref,
+        )?;
+        Ok(())
+    }
+
+    pub fn bind_orchestration_graph_facts(
+        &mut self,
+        run_id: &str,
+        edges: &[OrchestrationEdgeInput],
+        edge_ports: &[OrchestrationEdgePortInput],
+        role_bindings: &[OrchestrationRoleBindingInput],
+        context_authorities: &[OrchestrationContextAuthorityInput],
+    ) -> Result<(), CoreError> {
+        self.storage.bind_orchestration_graph_facts(
+            run_id,
+            edges,
+            edge_ports,
+            role_bindings,
+            context_authorities,
         )?;
         Ok(())
     }
