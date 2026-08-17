@@ -908,7 +908,11 @@ CREATE TABLE IF NOT EXISTS orchestration_machine_acceptances (
   verifier_id TEXT NOT NULL,
   verifier_version TEXT NOT NULL,
   verdict TEXT NOT NULL CHECK(verdict IN ('accepted','rejected','error')),
-  result_digest TEXT NOT NULL CHECK(length(result_digest) = 64 AND result_digest = lower(result_digest)),
+  result_digest TEXT NOT NULL CHECK(
+    length(result_digest) = 64
+    AND result_digest = lower(result_digest)
+    AND result_digest NOT GLOB '*[^0-9a-f]*'
+  ),
   coordinator_generation INTEGER NOT NULL CHECK(coordinator_generation >= 0),
   core_timestamp INTEGER NOT NULL CHECK(core_timestamp >= 0),
   UNIQUE(delivery_id),

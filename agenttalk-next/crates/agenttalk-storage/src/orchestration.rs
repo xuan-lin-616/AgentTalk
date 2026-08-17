@@ -735,7 +735,7 @@ impl SqliteStore {
                         acceptance_contract_ref, acceptance_contract_digest,
                         acceptance_evidence_ref, acceptance_evidence_digest,
                         verifier_id, verifier_version, verdict, result_digest,
-                        coordinator_generation
+                        coordinator_generation, core_timestamp
                  FROM orchestration_machine_acceptances
                  WHERE delivery_id = ?1",
                 [&acceptance.delivery_id],
@@ -755,6 +755,7 @@ impl SqliteStore {
                         row.get::<_, String>(11)?,
                         row.get::<_, String>(12)?,
                         row.get::<_, i64>(13)?,
+                        row.get::<_, i64>(14)?,
                     ))
                 },
             )
@@ -773,7 +774,8 @@ impl SqliteStore {
                 && existing.10 == acceptance.verifier_version
                 && existing.11 == acceptance.verdict
                 && existing.12 == acceptance.result_digest
-                && existing.13 == acceptance.coordinator_generation;
+                && existing.13 == acceptance.coordinator_generation
+                && existing.14 == acceptance.core_timestamp;
             if same {
                 tx.commit()?;
                 return Ok(true);
@@ -791,11 +793,38 @@ impl SqliteStore {
                 "accepted" | "rejected" | "error"
             )
             || !is_lower_hex64(&acceptance.result_digest)
+            || !is_lower_hex64(&acceptance.acceptance_contract_digest)
+            || !is_lower_hex64(&acceptance.acceptance_evidence_digest)
+            || acceptance.acceptance_contract_ref
+                != format!("sha256:{}", acceptance.acceptance_contract_digest)
+            || acceptance.acceptance_evidence_ref
+                != format!("sha256:{}", acceptance.acceptance_evidence_digest)
             || acceptance.core_timestamp < 0
         {
             return Err(StorageError::MachineAcceptanceInvalid {
                 reason: "identity, verifier, verdict, result digest, and timestamp are required"
                     .into(),
+            });
+        }
+
+        // The slot is the authority boundary.  Detect a conflicting delivery
+        // before SQLite's UNIQUE constraint so callers receive the stable
+        // typed conflict instead of a backend-specific constraint error.
+        let slot_conflict: Option<String> = tx
+            .query_row(
+                "SELECT delivery_id FROM orchestration_machine_acceptances
+                 WHERE attempt_id = ?1 AND edge_id = ?2 AND lease_epoch = ?3",
+                params![
+                    acceptance.attempt_id,
+                    acceptance.edge_id,
+                    acceptance.lease_epoch
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if slot_conflict.is_some() {
+            return Err(StorageError::MachineAcceptanceConflict {
+                delivery_id: acceptance.delivery_id,
             });
         }
 
@@ -2966,6 +2995,322 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn real_two_edge_delivery_and_acceptance_complete_only_after_both_edges() {
+        use agenttalk_orchestration_contracts::{handoff, json};
+        use serde_json::Value;
+
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-two-edge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_root = base.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let (delivery_one, bindings_one) = setup_real_e2e(&mut store, &cas);
+
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_edges(
+                   edge_id, run_id, from_node_id, to_node_id,
+                   dag_snapshot_digest, allowed_consumer_json
+                 ) VALUES('edge-2','run-1','node-1','node-3',?1,'[]')",
+                [delivery_one.dag_snapshot_digest.as_str()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO orchestration_edge_ports(
+                   edge_port_id, edge_id, source_output_port_id,
+                   target_input_port_id, port_policy_json
+                 ) VALUES('edge-port-2','edge-2','out-2','in-2','{}')",
+                [],
+            )
+            .unwrap();
+
+        let artifact_two = b"second edge artifact bytes";
+        let artifact_two_object = cas.publish(artifact_two).unwrap();
+        let mut binding_two = bindings_one[0].clone();
+        binding_two.binding_id = "binding-2".into();
+        binding_two.edge_port_id = "edge-port-2".into();
+        binding_two.source_output_port_id = "out-2".into();
+        binding_two.target_input_port_id = "in-2".into();
+        binding_two.object_ref = artifact_two_object.object_ref.clone();
+        binding_two.sha256 = artifact_two_object.sha256.clone();
+        binding_two.size = artifact_two.len() as i64;
+
+        let mut envelope_two: Value =
+            json::parse_duplicate_safe(&cas.read(&delivery_one.envelope_object_ref).unwrap())
+                .unwrap();
+        let handoff_two = format!("handoff-{}", "1".repeat(64));
+        envelope_two["handoffId"] = Value::String(handoff_two.clone());
+        envelope_two["edgeId"] = Value::String("edge-2".into());
+        envelope_two["to"]["taskNodeId"] = Value::String("node-3".into());
+        let artifact_binding = &mut envelope_two["artifactBindings"][0];
+        artifact_binding["sourceOutput"]["portId"] = Value::String("out-2".into());
+        artifact_binding["targetInput"]["portId"] = Value::String("in-2".into());
+        artifact_binding["artifactRef"]["objectRef"] =
+            Value::String(binding_two.object_ref.clone());
+        artifact_binding["artifactRef"]["sha256"] = Value::String(binding_two.sha256.clone());
+        artifact_binding["artifactRef"]["size"] = Value::from(binding_two.size);
+        envelope_two["envelopeSha256"] = Value::String(String::new());
+        let envelope_two_jcs = handoff::envelope_sha256_hex(&envelope_two).unwrap();
+        envelope_two["envelopeSha256"] = Value::String(envelope_two_jcs.clone());
+        let envelope_two_bytes = json::canonicalize(&envelope_two).unwrap();
+        let envelope_two_object = cas.publish(&envelope_two_bytes).unwrap();
+        let envelope_two_raw = json::sha256_raw_hex(&envelope_two_bytes);
+        assert_eq!(envelope_two_object.sha256, envelope_two_raw);
+
+        let delivery_two_transfer =
+            handoff::artifact_transfer_set_digest_hex(&envelope_two).unwrap();
+        let delivery_two_idempotency = handoff::idempotency_key_hex(&envelope_two).unwrap();
+        let delivery_two_payload = handoff::delivery_payload_digest_hex(
+            &delivery_one.declaration_digest,
+            &delivery_two_transfer,
+            &delivery_one.acceptance_contract_digest,
+            &delivery_one.acceptance_evidence_digest,
+            &delivery_one.producer_context_manifest_digest,
+            &delivery_one.dag_snapshot_digest,
+            &delivery_one.role_binding_snapshot_digest,
+        )
+        .unwrap();
+        let mut delivery_two = delivery_one.clone();
+        delivery_two.delivery_id = handoff_two.clone();
+        delivery_two.edge_id = "edge-2".into();
+        delivery_two.envelope_handoff_id = handoff_two;
+        delivery_two.to_task_node_id = "node-3".into();
+        delivery_two.artifact_transfer_set_digest = delivery_two_transfer;
+        delivery_two.idempotency_key = delivery_two_idempotency;
+        delivery_two.delivery_payload_digest = delivery_two_payload;
+        delivery_two.envelope_object_ref = envelope_two_object.object_ref;
+        delivery_two.envelope_raw_sha256 = envelope_two_raw;
+        delivery_two.envelope_sha256_jcs = envelope_two_jcs;
+
+        let verifier = CoreCasVerifier { cas: &cas };
+        assert!(!store
+            .record_handoff_delivery(delivery_one.clone(), &bindings_one, &verifier)
+            .unwrap());
+        let acceptance_one = MachineAcceptanceRecord {
+            acceptance_id: "acceptance-edge-1".into(),
+            run_id: delivery_one.run_id.clone(),
+            attempt_id: delivery_one.attempt_id.clone(),
+            edge_id: delivery_one.edge_id.clone(),
+            lease_epoch: delivery_one.lease_epoch,
+            delivery_id: delivery_one.delivery_id.clone(),
+            acceptance_contract_ref: delivery_one.acceptance_contract_ref.clone(),
+            acceptance_contract_digest: delivery_one.acceptance_contract_digest.clone(),
+            acceptance_evidence_ref: delivery_one.acceptance_evidence_ref.clone(),
+            acceptance_evidence_digest: delivery_one.acceptance_evidence_digest.clone(),
+            verifier_id: "core.machine.acceptance".into(),
+            verifier_version: "v1".into(),
+            verdict: "accepted".into(),
+            result_digest: hex_digest(b"accepted-edge-1"),
+            coordinator_generation: delivery_one.coordinator_generation,
+            core_timestamp: 1,
+        };
+        assert!(!store
+            .record_machine_acceptance(acceptance_one, &verifier)
+            .unwrap());
+        let status_after_one: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&delivery_one.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_after_one, "sealing");
+
+        assert!(!store
+            .record_handoff_delivery(delivery_two.clone(), &[binding_two], &verifier)
+            .unwrap());
+        let acceptance_two = MachineAcceptanceRecord {
+            acceptance_id: "acceptance-edge-2".into(),
+            run_id: delivery_two.run_id.clone(),
+            attempt_id: delivery_two.attempt_id.clone(),
+            edge_id: delivery_two.edge_id.clone(),
+            lease_epoch: delivery_two.lease_epoch,
+            delivery_id: delivery_two.delivery_id.clone(),
+            acceptance_contract_ref: delivery_two.acceptance_contract_ref.clone(),
+            acceptance_contract_digest: delivery_two.acceptance_contract_digest.clone(),
+            acceptance_evidence_ref: delivery_two.acceptance_evidence_ref.clone(),
+            acceptance_evidence_digest: delivery_two.acceptance_evidence_digest.clone(),
+            verifier_id: "core.machine.acceptance".into(),
+            verifier_version: "v1".into(),
+            verdict: "accepted".into(),
+            result_digest: hex_digest(b"accepted-edge-2"),
+            coordinator_generation: delivery_two.coordinator_generation,
+            core_timestamp: 2,
+        };
+        assert!(!store
+            .record_machine_acceptance(acceptance_two.clone(), &verifier)
+            .unwrap());
+        let status_after_two: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                [&delivery_two.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_after_two, "completed");
+        let node_status: String = store
+            .connection
+            .query_row(
+                "SELECT status FROM orchestration_task_nodes WHERE node_id = 'node-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(node_status, "completed");
+        let acceptance_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_machine_acceptances WHERE attempt_id = ?1",
+                [&delivery_one.attempt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(acceptance_count, 2);
+        assert!(store
+            .record_machine_acceptance(acceptance_two.clone(), &verifier)
+            .unwrap());
+
+        let mut slot_conflict = acceptance_two;
+        slot_conflict.delivery_id = "handoff-2".into();
+        slot_conflict.acceptance_id = "acceptance-conflict".into();
+        assert!(matches!(
+            store.record_machine_acceptance(slot_conflict, &verifier),
+            Err(StorageError::MachineAcceptanceConflict { .. })
+        ));
+        let audit_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM orchestration_audit_events
+                 WHERE run_id = 'run-1' AND event_type = 'machine_acceptance_recorded'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_count, 2);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn rejected_or_error_acceptance_never_completes_and_cas_failure_rolls_back() {
+        for verdict in ["rejected", "error"] {
+            let base = std::env::temp_dir().join(format!(
+                "agenttalk-c4a-{}-{}-{}",
+                verdict,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let project_root = base.join("project");
+            std::fs::create_dir_all(&project_root).unwrap();
+            let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+            let mut store = SqliteStore::open_in_memory().unwrap();
+            let (delivery, bindings) = setup_real_e2e(&mut store, &cas);
+            let verifier = CoreCasVerifier { cas: &cas };
+            assert!(!store
+                .record_handoff_delivery(delivery.clone(), &bindings, &verifier)
+                .unwrap());
+            let acceptance = MachineAcceptanceRecord {
+                acceptance_id: format!("acceptance-{}", verdict),
+                run_id: delivery.run_id.clone(),
+                attempt_id: delivery.attempt_id.clone(),
+                edge_id: delivery.edge_id.clone(),
+                lease_epoch: delivery.lease_epoch,
+                delivery_id: delivery.delivery_id.clone(),
+                acceptance_contract_ref: delivery.acceptance_contract_ref.clone(),
+                acceptance_contract_digest: delivery.acceptance_contract_digest.clone(),
+                acceptance_evidence_ref: delivery.acceptance_evidence_ref.clone(),
+                acceptance_evidence_digest: delivery.acceptance_evidence_digest.clone(),
+                verifier_id: "core.machine.acceptance".into(),
+                verifier_version: "v1".into(),
+                verdict: verdict.into(),
+                result_digest: hex_digest(verdict.as_bytes()),
+                coordinator_generation: delivery.coordinator_generation,
+                core_timestamp: 1,
+            };
+            assert!(!store
+                .record_machine_acceptance(acceptance, &verifier)
+                .unwrap());
+            let status: String = store
+                .connection
+                .query_row(
+                    "SELECT status FROM orchestration_task_attempts WHERE attempt_id = ?1",
+                    [&delivery.attempt_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "sealing");
+            std::fs::remove_dir_all(&base).unwrap();
+        }
+
+        let base = std::env::temp_dir().join(format!(
+            "agenttalk-c4a-acceptance-cas-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project_root = base.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let cas = agenttalk_brief_sealer::CoreCas::new(&project_root);
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let (delivery, bindings) = setup_real_e2e(&mut store, &cas);
+        let verifier = CoreCasVerifier { cas: &cas };
+        assert!(!store
+            .record_handoff_delivery(delivery.clone(), &bindings, &verifier)
+            .unwrap());
+        std::fs::remove_file(cas.object_path(&delivery.acceptance_evidence_ref)).unwrap();
+        let acceptance = MachineAcceptanceRecord {
+            acceptance_id: "acceptance-missing-evidence".into(),
+            run_id: delivery.run_id.clone(),
+            attempt_id: delivery.attempt_id.clone(),
+            edge_id: delivery.edge_id.clone(),
+            lease_epoch: delivery.lease_epoch,
+            delivery_id: delivery.delivery_id.clone(),
+            acceptance_contract_ref: delivery.acceptance_contract_ref.clone(),
+            acceptance_contract_digest: delivery.acceptance_contract_digest.clone(),
+            acceptance_evidence_ref: delivery.acceptance_evidence_ref.clone(),
+            acceptance_evidence_digest: delivery.acceptance_evidence_digest.clone(),
+            verifier_id: "core.machine.acceptance".into(),
+            verifier_version: "v1".into(),
+            verdict: "accepted".into(),
+            result_digest: hex_digest(b"accepted-missing-evidence"),
+            coordinator_generation: delivery.coordinator_generation,
+            core_timestamp: 1,
+        };
+        assert!(matches!(
+            store.record_machine_acceptance(acceptance, &verifier),
+            Err(StorageError::ArtifactBodyMismatch)
+        ));
+        let facts: i64 = store
+            .connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM orchestration_machine_acceptances)
+                      + (SELECT count(*) FROM orchestration_audit_events
+                         WHERE event_type = 'machine_acceptance_recorded')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(facts, 0);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
