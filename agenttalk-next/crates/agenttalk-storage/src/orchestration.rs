@@ -112,6 +112,10 @@ pub struct TaskReadyToRunningOutcome {
     pub lease_epoch: i64,
 }
 
+pub trait CasVerifier {
+    fn verify_object(&self, object_ref: &str) -> Result<Vec<u8>, StorageError>;
+}
+
 impl SqliteStore {
     pub fn create_orchestration_run(
         &mut self,
@@ -518,6 +522,7 @@ impl SqliteStore {
         &mut self,
         delivery: HandoffDeliveryRecord,
         bindings: &[ArtifactBindingInput],
+        cas: &dyn CasVerifier,
     ) -> Result<bool, StorageError> {
         let tx = self
             .connection
@@ -563,6 +568,7 @@ impl SqliteStore {
         }
         // New path: full authority closure in one Immediate transaction.
         Self::validate_handoff_authority(&tx, &delivery, bindings)?;
+        Self::verify_cas_before_journal(cas, &delivery, bindings)?;
         for binding in bindings {
             if binding.edge_port_id.is_empty() || binding.content_schema_ref_json.is_empty() {
                 return Err(StorageError::OrchestrationArtifactBindingInvalid {
@@ -581,6 +587,9 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO orchestration_handoff_deliveries(
                delivery_id, run_id, attempt_id, edge_id, lease_epoch,
+               envelope_handoff_id, from_task_node_id, from_execution_run_id,
+               to_task_node_id, lease_owner, coordinator_generation,
+               dag_snapshot_digest, role_binding_snapshot_digest,
                declaration_digest, artifact_transfer_set_digest,
                idempotency_key, delivery_payload_digest,
                envelope_object_ref, envelope_raw_sha256, envelope_sha256_jcs,
@@ -588,13 +597,22 @@ impl SqliteStore {
                acceptance_evidence_ref, acceptance_evidence_digest,
                producer_context_manifest_digest, replay_receipt_json
              ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                      ?13, ?14, ?15, ?16, ?17, ?18)",
+                      ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                      ?23, ?24, ?25, ?26)",
             params![
                 delivery.delivery_id,
                 delivery.run_id,
                 delivery.attempt_id,
                 delivery.edge_id,
                 delivery.lease_epoch,
+                delivery.envelope_handoff_id,
+                delivery.from_task_node_id,
+                delivery.from_execution_run_id,
+                delivery.to_task_node_id,
+                delivery.lease_owner,
+                delivery.coordinator_generation,
+                delivery.dag_snapshot_digest,
+                delivery.role_binding_snapshot_digest,
                 delivery.declaration_digest,
                 delivery.artifact_transfer_set_digest,
                 delivery.idempotency_key,
@@ -614,16 +632,29 @@ impl SqliteStore {
             tx.execute(
                 "INSERT INTO orchestration_artifact_bindings(
                    binding_id, run_id, delivery_id, edge_port_id,
-                   object_ref, sha256, size, content_schema_ref_json
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                   source_output_port_id, target_input_port_id,
+                   object_ref, sha256, size,
+                   content_schema_id, content_schema_version,
+                   content_schema_digest, normalized_content_type,
+                   normalized_content_type_policy_version,
+                   content_schema_ref_json
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                          ?12, ?13, ?14, ?15)",
                 params![
                     binding.binding_id,
                     delivery.run_id,
                     delivery.delivery_id,
                     binding.edge_port_id,
+                    binding.source_output_port_id,
+                    binding.target_input_port_id,
                     binding.object_ref,
                     binding.sha256,
                     binding.size,
+                    binding.content_schema_id,
+                    binding.content_schema_version,
+                    binding.content_schema_digest,
+                    binding.normalized_content_type,
+                    binding.normalized_content_type_policy_version,
                     binding.content_schema_ref_json,
                 ],
             )?;
@@ -645,6 +676,32 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(false)
+    }
+
+    fn verify_cas_before_journal(
+        cas: &dyn CasVerifier,
+        delivery: &HandoffDeliveryRecord,
+        bindings: &[ArtifactBindingInput],
+    ) -> Result<(), StorageError> {
+        verify_cas_object(
+            cas,
+            &delivery.envelope_object_ref,
+            &delivery.envelope_raw_sha256,
+        )?;
+        verify_cas_object(
+            cas,
+            &delivery.acceptance_contract_ref,
+            &delivery.acceptance_contract_digest,
+        )?;
+        verify_cas_object(
+            cas,
+            &delivery.acceptance_evidence_ref,
+            &delivery.acceptance_evidence_digest,
+        )?;
+        for binding in bindings {
+            verify_cas_object(cas, &binding.object_ref, &binding.sha256)?;
+        }
+        Ok(())
     }
 
     fn validate_handoff_authority(
@@ -1477,50 +1534,6 @@ impl SqliteStore {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn record_artifact_binding(
-        &mut self,
-        binding_id: &str,
-        run_id: &str,
-        delivery_id: &str,
-        edge_port_id: &str,
-        object_ref: &str,
-        sha256: &str,
-        size: i64,
-    ) -> Result<(), StorageError> {
-        if delivery_id.is_empty() || edge_port_id.is_empty() {
-            return Err(StorageError::OrchestrationArtifactBindingInvalid {
-                reason: "delivery_id and edge_port_id are required".into(),
-            });
-        }
-        if !is_object_ref(object_ref) || !is_hex64(sha256) {
-            return Err(StorageError::OrchestrationArtifactBindingInvalid {
-                reason: "object_ref must be sha256:<64hex> and sha256 must be 64hex".into(),
-            });
-        }
-        if object_ref != format!("sha256:{sha256}") {
-            return Err(StorageError::OrchestrationArtifactBindingInvalid {
-                reason: "object_ref does not match sha256".into(),
-            });
-        }
-        self.connection.execute(
-            "INSERT INTO orchestration_artifact_bindings(
-               binding_id, run_id, delivery_id, edge_port_id,
-               object_ref, sha256, size
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                binding_id,
-                run_id,
-                delivery_id,
-                edge_port_id,
-                object_ref,
-                sha256,
-                size,
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn orchestration_recovery_state(
         &self,
         run_id: &str,
@@ -1557,6 +1570,31 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+fn verify_cas_object(
+    cas: &dyn CasVerifier,
+    object_ref: &str,
+    expected_sha256: &str,
+) -> Result<(), StorageError> {
+    let expected_hex = object_ref.strip_prefix("sha256:").ok_or_else(|| {
+        StorageError::OrchestrationArtifactBindingInvalid {
+            reason: "object ref must be sha256:<hex>".into(),
+        }
+    })?;
+    if expected_hex != expected_sha256 || !is_hex64(expected_sha256) {
+        return Err(StorageError::OrchestrationArtifactBindingInvalid {
+            reason: "object_ref does not match expected sha256".into(),
+        });
+    }
+    let bytes = cas.verify_object(object_ref)?;
+    let actual = hex_digest(&bytes);
+    if actual != expected_sha256 {
+        return Err(StorageError::OrchestrationArtifactBindingInvalid {
+            reason: "CAS object content digest mismatch".into(),
+        });
+    }
+    Ok(())
 }
 
 fn canonicalize_audit_payload(payload: &str) -> Result<String, StorageError> {
@@ -1654,6 +1692,16 @@ pub(crate) fn now_unix() -> Result<i64, StorageError> {
             StorageError::Sqlite(rusqlite::Error::InvalidParameterName(source.to_string()))
         })?
         .as_millis() as i64)
+}
+
+#[cfg(test)]
+struct TestCas;
+
+#[cfg(test)]
+impl CasVerifier for TestCas {
+    fn verify_object(&self, _object_ref: &str) -> Result<Vec<u8>, StorageError> {
+        Ok(vec![0u8; 32])
+    }
 }
 
 #[cfg(test)]
@@ -1976,9 +2024,10 @@ mod tests {
         ]));
         let computed_idempotency = handoff::idempotency_key_hex(&envelope).unwrap();
         let computed_transfer = handoff::artifact_transfer_set_digest_hex(&envelope).unwrap();
+        let cas_sha = hex_digest(&[0u8; 32]);
         let declaration = hex64('f');
-        let contract = hex64('d');
-        let evidence = hex64('e');
+        let contract = cas_sha.clone();
+        let evidence = cas_sha.clone();
         let producer_context = hex64('a');
         let dag = hex64('b');
         let role = hex64('c');
@@ -1992,6 +2041,7 @@ mod tests {
             &role,
         )
         .unwrap();
+        let cas = TestCas;
         let delivery = HandoffDeliveryRecord {
             delivery_id: format!("handoff-{}", hex64('0')),
             run_id: "run-1".into(),
@@ -2010,9 +2060,9 @@ mod tests {
             artifact_transfer_set_digest: computed_transfer,
             idempotency_key: computed_idempotency,
             delivery_payload_digest: computed_payload,
-            envelope_object_ref: format!("sha256:{}", hex64('c')),
-            envelope_raw_sha256: hex64('c'),
-            envelope_sha256_jcs: hex64('c'),
+            envelope_object_ref: format!("sha256:{cas_sha}"),
+            envelope_raw_sha256: cas_sha.clone(),
+            envelope_sha256_jcs: cas_sha,
             acceptance_contract_ref: format!("sha256:{contract}"),
             acceptance_contract_digest: contract,
             acceptance_evidence_ref: format!("sha256:{evidence}"),
@@ -2021,15 +2071,15 @@ mod tests {
             replay_receipt_json: None,
         };
         assert!(!store
-            .record_handoff_delivery(delivery.clone(), &[])
+            .record_handoff_delivery(delivery.clone(), &[], &cas)
             .unwrap());
         assert!(store
-            .record_handoff_delivery(delivery.clone(), &[])
+            .record_handoff_delivery(delivery.clone(), &[], &cas)
             .unwrap());
         let mut conflicting = delivery;
         conflicting.delivery_payload_digest = "different".into();
         assert!(matches!(
-            store.record_handoff_delivery(conflicting, &[]),
+            store.record_handoff_delivery(conflicting, &[], &cas),
             Err(StorageError::HandoffDeliveryConflict { .. })
         ));
     }
@@ -2067,43 +2117,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(role_count, 2);
-
-        let sha = hex64('d');
-        store
-            .record_artifact_binding(
-                "binding-1",
-                "run-1",
-                "delivery-1",
-                "edge-port-1",
-                &format!("sha256:{sha}"),
-                &sha,
-                12,
-            )
-            .unwrap();
-        assert!(matches!(
-            store.record_artifact_binding(
-                "binding-2",
-                "run-1",
-                "delivery-1",
-                "edge-port-1",
-                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                &sha,
-                12,
-            ),
-            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
-        ));
-        assert!(matches!(
-            store.record_artifact_binding(
-                "binding-3",
-                "run-1",
-                "",
-                "edge-port-1",
-                &format!("sha256:{sha}"),
-                &sha,
-                12,
-            ),
-            Err(StorageError::OrchestrationArtifactBindingInvalid { .. })
-        ));
     }
 
     #[test]
