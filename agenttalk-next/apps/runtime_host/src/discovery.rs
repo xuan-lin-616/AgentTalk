@@ -667,7 +667,7 @@ struct ManagedChild {
 #[cfg(not(windows))]
 impl ManagedChild {
     fn spawn(spec: &ManagedProviderProcessSpec) -> Result<Self, ()> {
-        Self::spawn_parts(&spec.executable, &spec.args, None, &[])
+        Self::spawn_parts(&spec.executable, &spec.args, None, &[], &[])
     }
 
     fn spawn_direct(spec: &ManagedDirectStdioSpec) -> Result<Self, ()> {
@@ -676,6 +676,7 @@ impl ManagedChild {
             &spec.args,
             Some(&spec.current_dir),
             &spec.environment_allowlist,
+            &spec.credential_environment,
         )
     }
 
@@ -684,6 +685,7 @@ impl ManagedChild {
         args: &[String],
         current_dir: Option<&Path>,
         environment_allowlist: &[String],
+        credential_environment: &[String],
     ) -> Result<Self, ()> {
         let job = OwnedJob::new_kill_on_close()?;
         let mut command = std::process::Command::new(executable);
@@ -693,7 +695,10 @@ impl ManagedChild {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        for variable in environment_allowlist {
+        for variable in environment_allowlist
+            .iter()
+            .chain(credential_environment.iter())
+        {
             if let Some(value) = std::env::var_os(variable) {
                 command.env(variable, value);
             }
@@ -778,6 +783,7 @@ impl ManagedChild {
             None,
             spec.force_attribute_list_failure(),
             &[],
+            &[],
         )
     }
 
@@ -788,6 +794,7 @@ impl ManagedChild {
             Some(&spec.current_dir),
             false,
             &spec.environment_allowlist,
+            &spec.credential_environment,
         )
     }
 
@@ -797,6 +804,7 @@ impl ManagedChild {
         current_dir: Option<&Path>,
         force_attribute_list_failure: bool,
         environment_allowlist: &[String],
+        credential_environment: &[String],
     ) -> Result<Self, ()> {
         let _ = force_attribute_list_failure;
         use std::mem::zeroed;
@@ -904,7 +912,8 @@ impl ManagedChild {
         let mut application = wide_null(executable.as_os_str());
         let command_line_text = windows_command_line(executable, args);
         let mut command_line = wide_null(std::ffi::OsStr::new(&command_line_text));
-        let mut environment = minimal_windows_environment_block(environment_allowlist);
+        let mut environment =
+            minimal_windows_environment_block(environment_allowlist, credential_environment);
         let mut current_directory = current_dir.map(|path| wide_null(path.as_os_str()));
         let env_ptr = if environment.is_empty() {
             std::ptr::null_mut()
@@ -1155,15 +1164,21 @@ fn quote_windows_arg(value: &str) -> String {
 }
 
 #[cfg(windows)]
-fn minimal_windows_environment_block(environment_allowlist: &[String]) -> Vec<u16> {
-    minimal_windows_environment_block_with_lookup(environment_allowlist, |name| {
-        std::env::var_os(name)
-    })
+fn minimal_windows_environment_block(
+    environment_allowlist: &[String],
+    credential_environment: &[String],
+) -> Vec<u16> {
+    minimal_windows_environment_block_with_lookup(
+        environment_allowlist,
+        credential_environment,
+        |name| std::env::var_os(name),
+    )
 }
 
 #[cfg(windows)]
 fn minimal_windows_environment_block_with_lookup(
     environment_allowlist: &[String],
+    credential_environment: &[String],
     lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Vec<u16> {
     let mut names = ["SystemRoot", "WINDIR"]
@@ -1171,6 +1186,7 @@ fn minimal_windows_environment_block_with_lookup(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     names.extend(environment_allowlist.iter().cloned());
+    names.extend(credential_environment.iter().cloned());
     names.sort();
     names.dedup();
     let mut entries = names
@@ -1595,6 +1611,7 @@ pub(crate) struct ManagedDirectStdioSpec {
     pub(crate) args: Vec<String>,
     pub(crate) current_dir: PathBuf,
     pub(crate) environment_allowlist: Vec<String>,
+    pub(crate) credential_environment: Vec<String>,
 }
 
 #[cfg(test)]
@@ -2416,7 +2433,7 @@ mod tests {
         // With no SystemRoot/WINDIR and an empty allowlist, the block must be
         // a valid double-NUL empty environment, never a single NUL (which
         // would be a malformed block).
-        let block = minimal_windows_environment_block_with_lookup(&[], |_| None);
+        let block = minimal_windows_environment_block_with_lookup(&[], &[], |_| None);
         assert_eq!(
             block,
             vec![0u16, 0u16],
@@ -2424,7 +2441,7 @@ mod tests {
         );
         // A non-empty block still ends with the double-NUL terminator and
         // contains only the explicitly allowed name/value pair.
-        let block = minimal_windows_environment_block_with_lookup(&[], |name| {
+        let block = minimal_windows_environment_block_with_lookup(&[], &[], |name| {
             (name == "SystemRoot").then(|| std::ffi::OsString::from(r"C:\Windows"))
         });
         let text = String::from_utf16_lossy(&block);
@@ -2436,6 +2453,17 @@ mod tests {
             block.ends_with(&[0u16, 0u16]),
             "block must end with two NULs"
         );
+
+        let block = minimal_windows_environment_block_with_lookup(
+            &[],
+            &["LX_API_KEY".to_owned()],
+            |name| match name {
+                "LX_API_KEY" => Some(std::ffi::OsString::from("redacted-test-value")),
+                _ => None,
+            },
+        );
+        let text = String::from_utf16_lossy(&block);
+        assert!(text.starts_with("LX_API_KEY=redacted-test-value\0"));
     }
 
     #[test]

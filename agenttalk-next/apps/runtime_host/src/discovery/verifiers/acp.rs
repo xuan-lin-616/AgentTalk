@@ -560,6 +560,7 @@ fn verify_in_owned_process(
     let ManifestLaunch::Direct {
         args,
         environment_allowlist,
+        credential_environment,
         ..
     } = &classification.manifest.launch
     else {
@@ -575,6 +576,7 @@ fn verify_in_owned_process(
         args: args.clone(),
         current_dir: current_dir.to_owned(),
         environment_allowlist: environment_allowlist.clone(),
+        credential_environment: credential_environment.clone(),
     })
     .map_err(|_| AcpVerificationDiagnosticCode::LaunchFailed)?;
     let stdin = child.take_stdin();

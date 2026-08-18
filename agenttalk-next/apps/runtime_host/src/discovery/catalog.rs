@@ -35,7 +35,8 @@ pub const PRODUCTION_CATALOG_BYTES: &[u8] = include_bytes!("production_catalog.j
 /// Loads the bundled production catalog through the existing cache parser and
 /// schema validator. The load is fully offline (no cache path, no network) and
 /// fails closed on corrupt JSON, schema violations, duplicate manifest ids,
-/// secret-like environment names, an empty catalog, or an unstable revision.
+/// secret-like ordinary environment grants, an empty catalog, or an unstable
+/// revision.
 pub fn bundled_production_catalog() -> Result<CatalogSnapshot, CatalogErrorCode> {
     bundled_production_catalog_from_bytes(PRODUCTION_CATALOG_BYTES)
 }
@@ -108,18 +109,20 @@ pub(crate) fn bundled_production_catalog_from_bytes(
         if !manifest_ids.insert(manifest.id.clone()) {
             return Err(CatalogErrorCode::SchemaViolation);
         }
-        // Credential-like environment names must never be granted to a
-        // launch, regardless of the launch kind.
+        // Ordinary inherited environment must never grant credential-like
+        // names. Explicit name-only credential slots are handled separately.
         validate_launch_environment_policy(&manifest.launch)?;
     }
     Ok(report.snapshot)
 }
 
-/// Unified launch environment policy for Direct, Npx and Uvx manifests:
-/// secret-like names are never allowed in either the environment allowlist
-/// or the credential environment. The error is a static, desensitized
-/// catalog configuration error; variable values, paths and manifest text are
-/// never echoed.
+/// Unified launch environment policy for Direct, Npx and Uvx manifests.
+///
+/// Ordinary inherited environment is fail-closed: secret-like names are not
+/// allowed in `environmentAllowlist`. A credential slot is different: it is
+/// an explicit, name-only grant whose value is read at spawn time and never
+/// serialized, logged, or placed in the catalog. The error is static and
+/// desensitized; variable values, paths and manifest text are never echoed.
 pub(crate) fn validate_launch_environment_policy(
     launch: &ManifestLaunch,
 ) -> Result<(), CatalogErrorCode> {
@@ -140,15 +143,15 @@ pub(crate) fn validate_launch_environment_policy(
             ..
         } => (environment_allowlist, credential_environment),
     };
-    // The bundled catalog never declares credential slots.
-    if !credential_environment.is_empty() {
-        return Err(CatalogErrorCode::SchemaViolation);
-    }
     for name in environment_allowlist {
         if contains_secret_env_name(name) {
             return Err(CatalogErrorCode::SchemaViolation);
         }
     }
+    // Credential slots are validated syntactically by the manifest schema.
+    // They intentionally may be secret-like names, but only as explicit
+    // name-only slots copied from the parent environment at spawn time.
+    let _ = credential_environment;
     Ok(())
 }
 
@@ -1699,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_environment_policy_rejects_secret_like_names_for_all_launch_kinds() {
+    fn launch_environment_policy_separates_ordinary_and_credential_grants() {
         let original: Value =
             serde_json::from_slice(PRODUCTION_CATALOG_BYTES).expect("parse bundled catalog");
         let cases = [
@@ -1709,29 +1712,14 @@ mod tests {
                 "direct allowlist",
             ),
             (
-                json!({"kind": "direct", "transport": "stdio", "executableRef": "matched-observation",
-                       "args": ["--run"], "environmentAllowlist": [], "credentialEnvironment": ["GITHUB_TOKEN"]}),
-                "direct credential environment",
-            ),
-            (
                 json!({"kind": "npx", "package": "fixture-agent-pkg", "args": ["--run"],
                        "environmentAllowlist": ["GH_TOKEN"], "credentialEnvironment": []}),
                 "npx allowlist",
             ),
             (
-                json!({"kind": "npx", "package": "fixture-agent-pkg", "args": ["--run"],
-                       "environmentAllowlist": [], "credentialEnvironment": ["COPILOT_GITHUB_TOKEN"]}),
-                "npx credential environment",
-            ),
-            (
                 json!({"kind": "uvx", "package": "fixture-agent-pkg", "args": ["--run"],
                        "environmentAllowlist": ["GH_TOKEN"], "credentialEnvironment": []}),
                 "uvx allowlist",
-            ),
-            (
-                json!({"kind": "uvx", "package": "fixture-agent-pkg", "args": ["--run"],
-                       "environmentAllowlist": [], "credentialEnvironment": ["COPILOT_PROVIDER_TOKEN"]}),
-                "uvx credential environment",
             ),
         ];
         for (launch, label) in cases {
@@ -1766,16 +1754,14 @@ mod tests {
                 "legal non-secret environment names must pass"
             );
         }
-        // A Direct manifest with a non-secret credential slot must fail.
+        // An explicit credential slot is legal as a name-only grant, including
+        // a secret-like name; only the ordinary inherited allowlist is
+        // rejected above.
         let mut value = original.clone();
         value["manifests"][0]["launch"]["credentialEnvironment"] =
-            Value::Array(vec![Value::String("AGENTTALK_SAFE_ALLOWED".into())]);
+            Value::Array(vec![Value::String("LX_API_KEY".into())]);
         let bytes = catalog_bytes_with_recomputed_digest(&value);
-        assert_eq!(
-            bundled_production_catalog_from_bytes(&bytes),
-            Err(CatalogErrorCode::SchemaViolation),
-            "credential slots are never allowed in the bundled catalog"
-        );
+        assert!(bundled_production_catalog_from_bytes(&bytes).is_ok());
     }
 
     #[test]
