@@ -115,6 +115,7 @@ struct LocalDiscoveryState {
 struct DiscoverySession {
     owner: DiscoveryOwnerScope,
     expires_at: Instant,
+    terminal_at: Option<Instant>,
     scan_cancelled: Arc<AtomicBool>,
     verification_cancellations: BTreeMap<String, Arc<AtomicBool>>,
     status: SessionStatus,
@@ -611,7 +612,7 @@ impl LocalDiscoveryService {
             return replay_or_reject(existing, &payload_hash).map(StartScanOutcome::Replayed);
         }
         let explicit_sources = parse_start_explicit_sources(payload)?;
-        ensure_start_capacity(&state, owner, &self.limits)?;
+        ensure_start_capacity(&mut state, owner, &self.limits)?;
         let scan_id = self.new_scan_id()?;
         ensure_receipt_capacity(&state, &scan_id, owner, &self.limits)?;
         let response = json!({
@@ -624,6 +625,7 @@ impl LocalDiscoveryService {
             DiscoverySession {
                 owner: owner.clone(),
                 expires_at: Instant::now() + SESSION_LIFETIME,
+                terminal_at: None,
                 scan_cancelled: Arc::new(AtomicBool::new(false)),
                 verification_cancellations: BTreeMap::new(),
                 status: SessionStatus::Running,
@@ -1488,6 +1490,7 @@ impl LocalDiscoveryService {
             DiscoverySession {
                 owner: owner.clone(),
                 expires_at: Instant::now() + SESSION_LIFETIME,
+                terminal_at: Some(Instant::now()),
                 scan_cancelled: Arc::new(AtomicBool::new(false)),
                 verification_cancellations: BTreeMap::new(),
                 status: SessionStatus::Completed,
@@ -1922,6 +1925,7 @@ impl LocalDiscoveryService {
                 candidate.verifying = false;
             }
             session.status = SessionStatus::Cancelled;
+            session.terminal_at = Some(Instant::now());
         }
         state.running_verifications.clear();
         // In-flight import-plan leases are cancelled together with the
@@ -1956,6 +1960,7 @@ impl LocalDiscoveryService {
             DiscoverySession {
                 owner: owner.clone(),
                 expires_at: Instant::now() + SESSION_LIFETIME,
+                terminal_at: None,
                 scan_cancelled: Arc::new(AtomicBool::new(false)),
                 verification_cancellations: BTreeMap::new(),
                 status: SessionStatus::Running,
@@ -2084,9 +2089,11 @@ impl LocalDiscoveryService {
                 || session.expires_at <= Instant::now()
             {
                 session.status = SessionStatus::Cancelled;
+                session.terminal_at = Some(Instant::now());
                 return;
             }
             session.status = SessionStatus::Completed;
+            session.terminal_at = Some(Instant::now());
             session.candidates = candidate_states;
             session.diagnostics = diagnostics;
             session.acp_session = Some(acp_session);
@@ -2224,6 +2231,7 @@ impl LocalDiscoveryService {
                 return;
             }
             session.status = SessionStatus::Failed;
+            session.terminal_at = Some(Instant::now());
             session.diagnostics.push(DiscoveryDiagnostic {
                 source_kind: ObservationSourceKind::ExecutableInventory,
                 code,
@@ -2318,6 +2326,7 @@ impl LocalDiscoveryService {
                 return;
             }
             session.status = SessionStatus::Cancelled;
+            session.terminal_at = Some(Instant::now());
         }
         self.emit(
             event_sink,
@@ -3377,31 +3386,103 @@ fn ensure_owner(
 }
 
 fn ensure_start_capacity(
-    state: &LocalDiscoveryState,
+    state: &mut LocalDiscoveryState,
     owner: &DiscoveryOwnerScope,
     limits: &LocalDiscoveryLimits,
 ) -> Result<(), LocalDiscoveryServiceError> {
-    let owner_sessions = state
-        .sessions
-        .values()
-        .filter(|session| &session.owner == owner)
-        .count();
     let owner_running = state
         .running_scans
         .values()
         .filter(|running_owner| *running_owner == owner)
         .count();
-    if owner_sessions >= limits.max_sessions_per_owner
-        || owner_running >= limits.max_running_scans_per_owner
-    {
+    if owner_running >= limits.max_running_scans_per_owner {
         return Err(LocalDiscoveryServiceError::OwnerScanCapacityExhausted);
     }
-    if state.sessions.len() >= limits.max_sessions_global
-        || state.running_scans.len() >= limits.max_running_scans_global
-    {
+    if state.running_scans.len() >= limits.max_running_scans_global {
         return Err(LocalDiscoveryServiceError::GlobalScanCapacityExhausted);
     }
+
+    // Completed/failed/cancelled sessions are retained for a bounded period
+    // so clients can read their snapshot, but they must not turn normal
+    // repeated scans into a capacity failure. Evict the oldest terminal
+    // sessions only when no operation still references them. A client that
+    // races this boundary receives the stable ScanNotFound error from the
+    // existing snapshot/mutation APIs; running sessions are never evicted.
+    while state
+        .sessions
+        .values()
+        .filter(|session| &session.owner == owner)
+        .count()
+        >= limits.max_sessions_per_owner
+    {
+        let Some(scan_id) = oldest_evictable_terminal_session(state, Some(owner)) else {
+            return Err(LocalDiscoveryServiceError::OwnerScanCapacityExhausted);
+        };
+        evict_terminal_session(state, &scan_id);
+    }
+    while state.sessions.len() >= limits.max_sessions_global {
+        let Some(scan_id) = oldest_evictable_terminal_session(state, None) else {
+            return Err(LocalDiscoveryServiceError::GlobalScanCapacityExhausted);
+        };
+        evict_terminal_session(state, &scan_id);
+    }
     Ok(())
+}
+
+fn oldest_evictable_terminal_session(
+    state: &LocalDiscoveryState,
+    owner: Option<&DiscoveryOwnerScope>,
+) -> Option<String> {
+    state
+        .sessions
+        .iter()
+        .filter(|(scan_id, session)| {
+            let scan_id = (*scan_id).as_str();
+            owner.is_none_or(|expected| &session.owner == expected)
+                && session.status != SessionStatus::Running
+                && session.terminal_at.is_some()
+                && session.verification_cancellations.is_empty()
+                && !state.running_scans.contains_key(scan_id)
+                && !state.lease_waiters.contains_key(scan_id)
+                && !state
+                    .running_verifications
+                    .keys()
+                    .any(|key| key.scan_id == scan_id)
+                && !state
+                    .inflight_import_plans
+                    .keys()
+                    .any(|key| key.scan_id == scan_id)
+        })
+        .min_by(|(left_id, left), (right_id, right)| {
+            left.terminal_at
+                .cmp(&right.terminal_at)
+                .then_with(|| left_id.cmp(right_id))
+        })
+        .map(|(scan_id, _)| scan_id.clone())
+}
+
+fn evict_terminal_session(state: &mut LocalDiscoveryState, scan_id: &str) {
+    let Some(session) = state.sessions.remove(scan_id) else {
+        return;
+    };
+    session.scan_cancelled.store(true, Ordering::Release);
+    for cancellation in session.verification_cancellations.values() {
+        cancellation.store(true, Ordering::Release);
+    }
+    state.running_scans.remove(scan_id);
+    state.lease_waiters.remove(scan_id);
+    state
+        .running_verifications
+        .retain(|key, _| key.scan_id != scan_id);
+    state
+        .verification_waiters
+        .retain(|key, _| key.scan_id != scan_id);
+    state
+        .inflight_import_plans
+        .retain(|key, _| key.scan_id != scan_id);
+    state.requests.retain(|_, receipt| {
+        receipt_scan_id(receipt).is_none_or(|receipt_scan_id| receipt_scan_id != scan_id)
+    });
 }
 
 /// The session a receipt belongs to. Committed receipts carry the scan id in
@@ -3980,6 +4061,51 @@ mod tests {
     }
 
     #[test]
+    fn repeated_completed_scans_evict_oldest_without_capacity_failure() {
+        let mut service = test_service();
+        service.limits.max_sessions_per_owner = 16;
+        service.limits.max_sessions_global = 16;
+        let owner = test_owner("repeated-completed");
+        let first_scan = "scan-completed-00".to_owned();
+        let mut retained_scan_ids = Vec::new();
+
+        for index in 0..20 {
+            let scan_id = format!("scan-completed-{index:02}");
+            service.seed_completed_candidate_for_shutdown_tests(
+                &owner,
+                &scan_id,
+                "candidate-empty",
+            );
+            let outcome =
+                service.begin_start(&owner, &format!("repeat-request-{index:02}"), &json!({}));
+            match outcome {
+                Ok(StartScanOutcome::Reserved(reservation)) => drop(reservation),
+                Ok(StartScanOutcome::Replayed(_)) | Err(_) => {
+                    panic!("completed scan {index} must not exhaust capacity")
+                }
+            }
+            retained_scan_ids.push(scan_id);
+        }
+
+        let counts = service.counts_for_tests(&owner);
+        assert!(counts.owner_sessions <= 16);
+        assert_eq!(counts.owner_running_scans, 0);
+        assert!(
+            matches!(
+                service.snapshot(&owner, &first_scan),
+                Err(LocalDiscoveryServiceError::ScanNotFound)
+            ),
+            "the oldest terminal session must be evicted at the retention boundary"
+        );
+        let newest = retained_scan_ids.last().expect("newest scan");
+        assert!(service.snapshot(&owner, newest).is_ok());
+        assert!(matches!(
+            service.snapshot(&owner, &first_scan),
+            Err(LocalDiscoveryServiceError::ScanNotFound)
+        ));
+    }
+
+    #[test]
     fn pending_start_receipt_is_not_replayed_before_commit() {
         let service = test_service();
         let owner = test_owner("pending-replay");
@@ -4401,10 +4527,10 @@ mod tests {
         wait_for_running_to_drain(&service, &owner);
         assert_eq!(service.counts_for_tests(&owner).owner_sessions, 2);
         assert_eq!(service.counts_for_tests(&owner).owner_requests, 2);
-        assert!(matches!(
-            service.start(&owner, "request-overflow", &json!({}), Arc::clone(&sink)),
-            Err(LocalDiscoveryServiceError::OwnerScanCapacityExhausted)
-        ));
+        service
+            .start(&owner, "request-overflow", &json!({}), Arc::clone(&sink))
+            .expect("completed retained sessions are evictable before capacity failure");
+        assert!(service.counts_for_tests(&owner).owner_sessions <= 2);
 
         service.expire_all_sessions_for_tests();
         assert_eq!(service.counts_for_tests(&owner).owner_sessions, 0);
