@@ -523,6 +523,8 @@ class DiscoveryCandidate {
 
   bool get isUnknown => category == 'unknown';
 
+  bool get hasUserSelectedEvidence => evidenceSummary.contains('user_selected');
+
   bool get isVerified =>
       verification?.status == 'verified' ||
       verification?.status == 'auth_required';

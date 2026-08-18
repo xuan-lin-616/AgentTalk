@@ -79,6 +79,7 @@
   "localAgentScanDialogDescription": "被动扫描本机候选并按类别分组展示；验证仅执行受控的协议握手（initialize），导入为原子操作。",
   "localAgentRescan": "重新扫描",
   "localAgentManualAdd": "手动添加",
+  "localAgentSelectExecutable": "选择文件并验证",
   "localAgentScanning": "正在扫描…",
   "localAgentNoCandidates": "没有发现本地候选。",
   "localAgentCategoryAgent": "智能体",

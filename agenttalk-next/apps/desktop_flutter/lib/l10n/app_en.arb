@@ -79,6 +79,7 @@
   "localAgentScanDialogDescription": "Passively scans local candidates, groups them by category, verifies with a bounded initialize-only handshake, and imports atomically.",
   "localAgentRescan": "Rescan",
   "localAgentManualAdd": "Add manually",
+  "localAgentSelectExecutable": "Select file to verify",
   "localAgentScanning": "Scanning…",
   "localAgentNoCandidates": "No local candidates were found.",
   "localAgentCategoryAgent": "Agent",

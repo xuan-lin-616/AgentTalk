@@ -5,6 +5,8 @@ use agenttalk_domain::{
 #[cfg(test)]
 use agenttalk_domain::{CandidateCategory, ObservationTrustLevel, VerificationAuthority};
 use agenttalk_events::RuntimeEvent;
+#[cfg(test)]
+use agenttalk_runtime_host::ManifestLaunch;
 use agenttalk_runtime_host::{
     bundled_production_catalog, discover_windows_passive_report_with_config_and_cancelled,
     load_catalog_for_scan, AcpCompatibilityReport, AcpDiscoverySession, AcpImportPlanMetadata,
@@ -203,6 +205,7 @@ pub(crate) struct StartScanReservation {
     payload_hash: String,
     response: Value,
     shutdown_generation: u64,
+    explicit_sources: Option<Vec<ExplicitDiscoverySource>>,
     launched: bool,
 }
 
@@ -607,9 +610,7 @@ impl LocalDiscoveryService {
         if let Some(existing) = state.requests.get(&request_key) {
             return replay_or_reject(existing, &payload_hash).map(StartScanOutcome::Replayed);
         }
-        if !payload.as_object().is_some_and(|object| object.is_empty()) {
-            return Err(LocalDiscoveryServiceError::InvalidPayload);
-        }
+        let explicit_sources = parse_start_explicit_sources(payload)?;
         ensure_start_capacity(&state, owner, &self.limits)?;
         let scan_id = self.new_scan_id()?;
         ensure_receipt_capacity(&state, &scan_id, owner, &self.limits)?;
@@ -648,6 +649,7 @@ impl LocalDiscoveryService {
             payload_hash,
             response,
             shutdown_generation: state.shutdown_generation,
+            explicit_sources,
             launched: false,
         })))
     }
@@ -1977,6 +1979,7 @@ impl LocalDiscoveryService {
         owner: DiscoveryOwnerScope,
         event_sink: EventSink,
         _running_scan: RunningScanLease,
+        explicit_sources: Option<Vec<ExplicitDiscoverySource>>,
     ) {
         let cancelled = {
             let state = lock_state(&self.state);
@@ -2005,10 +2008,24 @@ impl LocalDiscoveryService {
             );
             return;
         }
-        let report = discover_windows_passive_report_with_config_and_cancelled(
-            &self.configuration.scan,
-            &cancelled,
+        let scan_config = explicit_sources.map_or_else(
+            || self.configuration.scan.clone(),
+            |explicit_sources| {
+                let mut config = self.configuration.scan.clone();
+                config.path_env = None;
+                config.app_path_records.clear();
+                config.package_records.clear();
+                config.loopback_records.clear();
+                config.loopback_recheck_records = None;
+                config.use_real_app_paths = false;
+                config.use_real_packages = false;
+                config.use_real_loopback = false;
+                config.explicit_sources = explicit_sources;
+                config
+            },
         );
+        let report =
+            discover_windows_passive_report_with_config_and_cancelled(&scan_config, &cancelled);
         if cancelled.load(Ordering::Acquire) {
             self.finish_scan_cancelled(&scan_id, &owner, &event_sink);
             return;
@@ -2338,6 +2355,36 @@ impl LocalDiscoveryService {
     }
 }
 
+fn parse_start_explicit_sources(
+    payload: &Value,
+) -> Result<Option<Vec<ExplicitDiscoverySource>>, LocalDiscoveryServiceError> {
+    let Some(object) = payload.as_object() else {
+        return Err(LocalDiscoveryServiceError::InvalidPayload);
+    };
+    if object.is_empty() {
+        return Ok(None);
+    }
+    if object.len() != 1 {
+        return Err(LocalDiscoveryServiceError::InvalidPayload);
+    }
+    let Some(value) = object.get("explicitExecutablePath") else {
+        return Err(LocalDiscoveryServiceError::InvalidPayload);
+    };
+    let Some(path) = value.as_str() else {
+        return Err(LocalDiscoveryServiceError::InvalidPayload);
+    };
+    if path.is_empty()
+        || path.len() > 32 * 1024
+        || path.contains('\0')
+        || !Path::new(path).is_absolute()
+    {
+        return Err(LocalDiscoveryServiceError::InvalidPayload);
+    }
+    Ok(Some(vec![ExplicitDiscoverySource::Executable(
+        PathBuf::from(path),
+    )]))
+}
+
 impl StartScanReservation {
     #[cfg(test)]
     fn launch(self, event_sink: EventSink) -> Result<Value, LocalDiscoveryServiceError> {
@@ -2413,6 +2460,7 @@ impl StartScanReservation {
         let worker_scan_id = scan_id.clone();
         let worker_owner = owner.clone();
         let worker_event_sink = Arc::clone(&event_sink);
+        let worker_explicit_sources = self.explicit_sources.clone();
         let gate = Arc::new(WorkerStartGate::new());
         let worker_gate = Arc::clone(&gate);
         let publication_latch = Arc::new(WorkerPublicationLatch::new());
@@ -2447,6 +2495,7 @@ impl StartScanReservation {
                             worker_owner,
                             worker_event_sink,
                             running_scan,
+                            worker_explicit_sources,
                         );
                     }
                 }
@@ -3729,6 +3778,39 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn explicit_start_payload_accepts_only_one_absolute_executable_path() {
+        let path = if cfg!(windows) {
+            r"C:\\Agents\\fixture.exe"
+        } else {
+            "/tmp/agents/fixture"
+        };
+        let parsed = parse_start_explicit_sources(&json!({
+            "explicitExecutablePath": path
+        }))
+        .expect("explicit path payload");
+        assert!(matches!(
+            parsed,
+            Some(ref sources) if sources.len() == 1
+                && matches!(&sources[0], ExplicitDiscoverySource::Executable(candidate) if candidate == Path::new(path))
+        ));
+        assert!(parse_start_explicit_sources(&json!({})).unwrap().is_none());
+        for payload in [
+            json!({"explicitExecutablePath": "relative.exe"}),
+            json!({"explicitExecutablePath": ""}),
+            json!({"unknown": path}),
+            json!({"explicitExecutablePath": path, "extra": true}),
+        ] {
+            assert!(
+                matches!(
+                    parse_start_explicit_sources(&payload),
+                    Err(LocalDiscoveryServiceError::InvalidPayload)
+                ),
+                "payload must be rejected: {payload}"
+            );
+        }
+    }
+
     fn test_service() -> LocalDiscoveryService {
         LocalDiscoveryService {
             state: Arc::new(Mutex::new(LocalDiscoveryState {
@@ -3842,14 +3924,13 @@ mod tests {
                     snapshot.revision, "unavailable",
                     "production catalog revision must be stable and meaningful"
                 );
-                let copilot = snapshot
-                    .manifests
-                    .iter()
-                    .find(|manifest| manifest.id == "com.github.copilot-cli.acp")
-                    .unwrap_or_else(|| {
-                        panic!("bundled catalog must include the Copilot CLI manifest")
-                    });
-                assert_eq!(copilot.display_name, "GitHub Copilot CLI");
+                assert!(
+                    snapshot
+                        .manifests
+                        .iter()
+                        .any(|manifest| matches!(manifest.launch, ManifestLaunch::Direct { .. })),
+                    "production catalog must include at least one direct manifest"
+                );
             }
             CatalogConfiguration::Unavailable => {
                 panic!("production bundled catalog must be available");

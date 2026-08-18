@@ -224,6 +224,34 @@ void main() {
       },
     );
 
+    test(
+      'discoveryStart sends an explicit executable path when selected',
+      () async {
+        final pipe = _Pipe();
+        pipe.responder = (request) => _ok(request, {
+          'scanId': 'scan-explicit',
+          'accepted': true,
+          'state': 'running',
+          'eventStream': {
+            'streamId': 'local-discovery-events',
+            'epoch': 'epoch-explicit',
+          },
+        });
+        final client = _clientFor(pipe);
+        addTearDown(client.close);
+
+        await client.discoveryStart(
+          sessionId: 'session-ipc-test',
+          requestId: 'start-explicit',
+          explicitExecutablePath: r'C:\\Agents\\fixture.exe',
+        );
+        expect(pipe.writtenCommands, ['agent.discovery.start']);
+        expect(pipe.writtenPayloads.single, {
+          'explicitExecutablePath': r'C:\\Agents\\fixture.exe',
+        });
+      },
+    );
+
     test('discoverySnapshot sends scanId only', () async {
       final pipe = _Pipe();
       pipe.responder = (request) => _ok(request, {

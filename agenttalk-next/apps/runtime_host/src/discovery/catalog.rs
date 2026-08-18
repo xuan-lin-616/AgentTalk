@@ -712,6 +712,9 @@ fn map_winverifytrust_status(status: i32) -> AuthenticodeStatus {
 struct AcpRegistry {
     version: String,
     agents: Vec<AcpRegistryAgent>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    extensions: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1519,53 +1522,28 @@ mod tests {
     }
 
     #[test]
-    fn bundled_copilot_manifest_is_schema_valid_and_exact() {
+    fn bundled_registry_manifests_are_schema_valid_and_provenanced() {
         let snapshot = bundled_production_catalog().expect("bundled catalog is valid");
-        let copilot = snapshot
+        assert!(snapshot.manifests.len() >= 30);
+        let catalog_digest = snapshot
             .manifests
-            .iter()
-            .find(|manifest| manifest.id == "com.github.copilot-cli.acp")
-            .unwrap_or_else(|| panic!("bundled catalog must include the Copilot CLI manifest"));
-        // The manifest must pass the adapter schema and semantic validation.
-        AdapterManifest::validate_value(serde_json::to_value(copilot).expect("serialize manifest"))
-            .expect("bundled Copilot manifest must be schema-valid");
-        assert_eq!(copilot.display_name, "GitHub Copilot CLI");
-        assert_eq!(copilot.category, ManifestCategory::AgentProtocol);
-        assert_eq!(copilot.protocol.kind, ManifestProtocolKind::Acp);
-        assert_eq!(copilot.protocol.major, 1);
-        assert_eq!(
-            copilot.match_rules.executable_names,
-            vec!["copilot.exe".to_owned()],
-            "the manifest must match exactly copilot.exe"
-        );
-        let ManifestLaunch::Direct {
-            transport,
-            executable_ref,
-            args,
-            environment_allowlist,
-            credential_environment,
-            ..
-        } = &copilot.launch
-        else {
-            panic!("Copilot manifest must launch direct");
-        };
-        assert_eq!(*transport, ManifestTransport::Stdio);
-        assert_eq!(executable_ref, "matched-observation");
-        assert_eq!(args, &vec!["--acp".to_owned(), "--stdio".to_owned()]);
-        assert!(
-            environment_allowlist.is_empty(),
-            "the Copilot manifest must not grant any environment variables"
-        );
-        assert!(
-            credential_environment.is_empty(),
-            "the Copilot manifest must not declare credential slots"
-        );
-        let source = copilot
-            .source
-            .as_ref()
-            .expect("Copilot manifest provenance");
-        assert_eq!(source.kind, ManifestSourceKind::AgenttalkManifest);
-        assert_eq!(source.revision.as_deref(), Some("agenttalk-v1"));
+            .first()
+            .and_then(|manifest| manifest.source.as_ref())
+            .and_then(|source| source.catalog_sha256.as_deref())
+            .expect("catalog digest");
+        for manifest in &snapshot.manifests {
+            AdapterManifest::validate_value(
+                serde_json::to_value(manifest).expect("serialize manifest"),
+            )
+            .expect("every bundled manifest must be schema-valid");
+            assert_eq!(manifest.category, ManifestCategory::AgentProtocol);
+            assert_eq!(manifest.protocol.kind, ManifestProtocolKind::Acp);
+            assert_eq!(manifest.protocol.major, 1);
+            let source = manifest.source.as_ref().expect("registry provenance");
+            assert_eq!(source.kind, ManifestSourceKind::AcpRegistry);
+            assert_eq!(source.revision.as_deref(), Some("agenttalk-v2"));
+            assert_eq!(source.catalog_sha256.as_deref(), Some(catalog_digest));
+        }
         // The catalog digest is self-consistent under the field-level
         // normalization (zero the two hash fields, then SHA-256).
         let snapshot_sha = snapshot
@@ -1586,27 +1564,31 @@ mod tests {
     }
 
     #[test]
-    fn production_copilot_manifest_requires_exact_sha256_identity_pin() {
+    fn registry_archive_sha_is_not_executable_identity_pin() {
         let snapshot = bundled_production_catalog().expect("bundled catalog is valid");
-        let copilot = snapshot
+        let registry_manifests = snapshot
             .manifests
             .iter()
-            .find(|manifest| manifest.id == "com.github.copilot-cli.acp")
-            .expect("Copilot manifest is present");
-        let pin = copilot
-            .match_rules
-            .sha256
-            .as_deref()
-            .expect("Copilot manifest must pin an exact executable SHA-256");
-        assert!(
-            is_sha256_hex(pin),
-            "Copilot manifest SHA pin must be a valid 64-character hex digest"
-        );
-        assert_eq!(
-            pin,
-            pin.to_ascii_lowercase(),
-            "Copilot manifest SHA pin must be normalized lowercase"
-        );
+            .filter(|manifest| {
+                manifest
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.kind == ManifestSourceKind::AcpRegistry)
+            })
+            .collect::<Vec<_>>();
+        assert!(!registry_manifests.is_empty());
+        assert!(registry_manifests
+            .iter()
+            .all(|manifest| manifest.match_rules.sha256.is_none()));
+        assert!(registry_manifests.iter().any(|manifest| {
+            matches!(
+                manifest.launch,
+                ManifestLaunch::Direct {
+                    archive_sha256: Some(_),
+                    ..
+                }
+            )
+        }));
     }
 
     #[test]
@@ -1834,9 +1816,11 @@ mod tests {
         expected["registrySha256"] = Value::String(
             "0000000000000000000000000000000000000000000000000000000000000000".into(),
         );
-        expected["manifests"][0]["source"]["catalogSha256"] = Value::String(
-            "0000000000000000000000000000000000000000000000000000000000000000".into(),
-        );
+        for manifest in expected["manifests"].as_array_mut().expect("manifests") {
+            manifest["source"]["catalogSha256"] = Value::String(
+                "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            );
+        }
         let expected_digest = sha256_hex(
             serde_json::to_string(&expected)
                 .expect("canonical")

@@ -7,12 +7,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::adapters::acp::AcpProtocolAdapterFactory;
 use crate::{
     discover_windows_passive_report_with_config, AdapterManifest, ExplicitDiscoverySource,
-    ManifestLaunch, ManifestMatchInput, RuntimeRequest, WindowsPassiveDiscoveryConfig,
-    WorkspaceAccess,
+    ManifestLaunch, RuntimeRequest, WindowsPassiveDiscoveryConfig, WorkspaceAccess,
 };
 use agenttalk_domain::{
-    AuthState, CandidateCategory, CompatibilityState, DiscoveryState, ObservationSourceKind,
-    ObservationTrustLevel,
+    AuthState, CompatibilityState, DiscoveryState, ObservationSourceKind, ObservationTrustLevel,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -1410,79 +1408,38 @@ fn compatibility_report_is_renderer_safe_and_cannot_be_reused_for_a_different_ta
 }
 
 #[test]
-fn production_catalog_classifies_copilot_exe_without_product_branch() {
+fn production_catalog_classifies_direct_manifest_without_product_branch() {
     let _guard = suite_guard();
     let factory = AcpProtocolAdapterFactory;
-    let fixture = AcpFixture::compile("w83-production-copilot");
-    let root = TestTempDir::create("w83-copilot-classify");
-    let copilot_exe = root.path().join("copilot.exe");
-    std::fs::copy(fixture.executable(), &copilot_exe).expect("name the fixture copilot.exe");
-    let other_exe = root.path().join("random-tool.exe");
-    std::fs::copy(fixture.executable(), &other_exe).expect("name an unrelated executable");
+    let fixture = AcpFixture::compile("w83-production-direct");
 
     // The bundled production catalog is pure data: it loads through the
     // generic parser/validator and is matched through the same generic
-    // classifier used by the fixture catalog, with no Copilot-specific
-    // scanner branch anywhere in the classification path.
+    // classifier used by fixture manifests, with no product-specific scanner
+    // branch anywhere in the classification path.
     let snapshot = crate::bundled_production_catalog().expect("bundled catalog is valid");
-    let copilot_manifest = snapshot
+    let mut manifest = snapshot
         .manifests
         .iter()
-        .find(|manifest| manifest.id == "com.github.copilot-cli.acp")
-        .expect("bundled catalog includes the Copilot CLI manifest");
-    // The production Copilot manifest pins the real copilot.exe content SHA.
-    // A same-named file with a different SHA is rejected through the generic
-    // matcher's fingerprint check (fingerprint changed -> observed), with no
-    // Copilot-specific scanner branch anywhere in the classification path.
-    assert!(
-        copilot_manifest.match_rules.sha256.is_some(),
-        "production Copilot manifest pins an exact SHA"
-    );
+        .find(|manifest| matches!(manifest.launch, ManifestLaunch::Direct { .. }))
+        .expect("bundled catalog includes a direct manifest")
+        .clone();
+    manifest.match_rules.executable_names = vec![fixture.executable_name()];
+    if let ManifestLaunch::Direct { executable_ref, .. } = &mut manifest.launch {
+        *executable_ref = "matched-observation".to_owned();
+    }
     let observation = AcpPassiveObservation::from_observed_executable(
-        &copilot_exe,
+        fixture.executable(),
         ObservationSourceKind::UserSelected,
         Instant::now() + ACP_TIMEOUT,
         &AtomicBool::new(false),
     )
-    .expect("observe the copilot.exe-named fixture");
-    let classification = factory.classify(copilot_manifest, observation);
-    assert!(
-        matches!(
-            classification,
-            Err(AcpClassificationError::ObservationMismatch)
-        ),
-        "a copilot.exe-named file whose SHA differs from the production pin must be rejected"
-    );
-    // Classification alone must never start the executable.
-    assert!(
-        !root.path().join("root.pid").exists(),
-        "classification must not start the executable"
-    );
-
-    // An unrelated executable does not match the Copilot manifest through the
-    // generic matcher and stays unknown/observed.
-    let unmatched = crate::match_manifest_passively(
-        &ManifestMatchInput {
-            executable_name: other_exe
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned),
-            package_ids: Vec::new(),
-            registry_ids: Vec::new(),
-            executable_sha256: None,
-            publisher_subject: None,
-            category: CandidateCategory::Unknown,
-            source_kind: ObservationSourceKind::WindowsPath,
-        },
-        &snapshot.manifests,
-        None,
-    );
-    assert_ne!(
-        unmatched.discovery_state,
-        DiscoveryState::Identified,
-        "random-tool.exe must not match the Copilot manifest"
-    );
-    assert_ne!(unmatched.display_name, "GitHub Copilot CLI");
+    .expect("observe the direct-manifest fixture");
+    let classification = factory
+        .classify(&manifest, observation)
+        .expect("generic direct manifest classification");
+    assert!(classification.has_independent_identity());
+    assert_eq!(classification.manifest_id(), manifest.id);
 }
 
 #[test]
@@ -1630,31 +1587,16 @@ fn sha_mismatch_rejects_at_classification_without_spawn() {
     let _guard = suite_guard();
     let factory = AcpProtocolAdapterFactory;
     let fixture = AcpFixture::compile("w84-sha-mismatch");
-    let root = TestTempDir::create("w84-sha-mismatch");
-    let spoofed_exe = root.path().join("copilot.exe");
-    std::fs::copy(fixture.executable(), &spoofed_exe).expect("spoof a copilot.exe-named file");
-    // The production Copilot manifest pins the real copilot.exe SHA; a
-    // same-named file with a different SHA must be rejected at the
-    // classification boundary (fingerprint changed -> observed), before any
-    // verify/consent/spawn can happen.
-    let snapshot = crate::bundled_production_catalog().expect("bundled catalog is valid");
-    let copilot_manifest = snapshot
-        .manifests
-        .iter()
-        .find(|manifest| manifest.id == "com.github.copilot-cli.acp")
-        .expect("bundled catalog includes the Copilot CLI manifest");
-    assert!(
-        copilot_manifest.match_rules.sha256.is_some(),
-        "production Copilot manifest pins an exact SHA"
-    );
+    let mut manifest = manifest_for(&fixture, "unknown-start-marker");
+    manifest.match_rules.sha256 = Some("00".repeat(32));
     let observation = AcpPassiveObservation::from_observed_executable(
-        &spoofed_exe,
+        fixture.executable(),
         ObservationSourceKind::WindowsPath,
         Instant::now() + ACP_TIMEOUT,
         &AtomicBool::new(false),
     )
-    .expect("observe the spoofed copilot.exe");
-    let classification = factory.classify(copilot_manifest, observation);
+    .expect("observe the SHA-mismatch fixture");
+    let classification = factory.classify(&manifest, observation);
     assert!(
         matches!(
             classification,
@@ -1663,14 +1605,7 @@ fn sha_mismatch_rejects_at_classification_without_spawn() {
         "a name match with a mismatched exact SHA must be rejected at classification"
     );
     // No child, no initialize, no verified event.
-    assert!(
-        !root.path().join("root.pid").exists(),
-        "mismatched-SHA classification must not spawn"
-    );
-    assert!(
-        !root.path().join("initialize.invocations").exists(),
-        "mismatched-SHA classification must never reach initialize"
-    );
+    assert_fixture_never_started(&fixture);
 }
 
 #[test]

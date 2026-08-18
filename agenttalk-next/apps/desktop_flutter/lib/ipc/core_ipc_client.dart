@@ -2961,14 +2961,20 @@ class CoreIpcClient {
   Future<DiscoveryStartResult> discoveryStart({
     required String sessionId,
     required String requestId,
+    String? explicitExecutablePath,
   }) async {
+    final payload = <String, dynamic>{};
+    if (explicitExecutablePath != null &&
+        explicitExecutablePath.trim().isNotEmpty) {
+      payload['explicitExecutablePath'] = explicitExecutablePath;
+    }
     final response = await request({
       'kind': 'command',
       'protocol': {'major': protocolMajor, 'minor': 0},
       'requestId': requestId,
       'sessionId': sessionId,
       'command': 'agent.discovery.start',
-      'payload': <String, dynamic>{},
+      'payload': payload,
     });
     return DiscoveryStartResult.fromResponse(response);
   }

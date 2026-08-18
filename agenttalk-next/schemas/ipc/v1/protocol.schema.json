@@ -64,7 +64,14 @@
     "AgentDiscoveryStartPayload": {
       "type": "object",
       "additionalProperties": false,
-      "maxProperties": 0
+      "properties": {
+        "explicitExecutablePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        }
+      },
+      "maxProperties": 1
     },
     "AgentDiscoveryVerifyPayload": {
       "type": "object",

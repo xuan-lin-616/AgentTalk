@@ -6,6 +6,7 @@ import '../gen/l10n.dart';
 import '../ipc/core_ipc_client.dart';
 import '../ipc/local_discovery.dart';
 import '../ipc/protocol_v1.dart';
+import '../platform/folder_picker.dart';
 import 'discovery_error_text.dart';
 import 'local_agent_import_dialog.dart';
 
@@ -30,6 +31,7 @@ class LocalAgentScanDialog extends StatefulWidget {
     required this.projectId,
     required this.onImported,
     this.onManualAdd,
+    this.filePickerClient,
   });
 
   final CoreIpcClient client;
@@ -37,6 +39,7 @@ class LocalAgentScanDialog extends StatefulWidget {
   final String? projectId;
   final ValueChanged<LocalAgentImportResult> onImported;
   final VoidCallback? onManualAdd;
+  final FilePickerClient? filePickerClient;
 
   @override
   State<LocalAgentScanDialog> createState() => _LocalAgentScanDialogState();
@@ -101,7 +104,7 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
     }
   }
 
-  Future<void> _startScan() async {
+  Future<void> _startScan({String? explicitExecutablePath}) async {
     final client = widget.client;
     final sessionId = widget.sessionId;
     if (mounted) {
@@ -116,6 +119,7 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
       final start = await client.discoveryStart(
         sessionId: sessionId,
         requestId: _requestId('discovery-start'),
+        explicitExecutablePath: explicitExecutablePath,
       );
       if (!mounted) return;
       setState(() {
@@ -135,6 +139,20 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
         });
       }
     }
+  }
+
+  Future<void> _pickExecutableAndScan() async {
+    if (_starting || _busyCandidateId != null) return;
+    final result = await (widget.filePickerClient ?? createFilePickerClient())
+        .pickFile();
+    if (!mounted || result.status == FilePickerStatus.cancelled) return;
+    if (!result.hasSelection) {
+      setState(() {
+        _error = result.message ?? '文件选择失败；未使用默认路径。';
+      });
+      return;
+    }
+    await _startScan(explicitExecutablePath: result.path);
   }
 
   Future<void> _subscribeAndRefresh(String epoch) async {
@@ -432,6 +450,13 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
                       : const Icon(Icons.refresh, size: 18),
                   label: Text(l10n.refresh),
                 ),
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  key: const Key('local-agent-select-executable'),
+                  onPressed: busy ? null : () => unawaited(_pickExecutableAndScan()),
+                  icon: const Icon(Icons.folder_open_outlined, size: 18),
+                  label: Text(l10n.localAgentSelectExecutable),
+                ),
                 if (widget.onManualAdd != null) ...[
                   const SizedBox(width: 8),
                   OutlinedButton.icon(
@@ -553,6 +578,7 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
                     busy: _busyCandidateId == entry.candidate.candidateId,
                     onVerify:
                         entry.candidate.isAgent &&
+                            entry.candidate.hasUserSelectedEvidence &&
                             entry.lifecycleState == 'identified'
                         ? () => unawaited(_verifyCandidate(entry.candidate))
                         : null,

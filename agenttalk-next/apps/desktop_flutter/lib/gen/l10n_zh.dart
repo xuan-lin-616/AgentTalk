@@ -247,6 +247,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get localAgentManualAdd => '手动添加';
 
   @override
+  String get localAgentSelectExecutable => '选择文件并验证';
+
+  @override
   String get localAgentScanning => '正在扫描…';
 
   @override

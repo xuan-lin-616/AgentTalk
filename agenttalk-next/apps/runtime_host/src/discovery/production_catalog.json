@@ -1,37 +1,1379 @@
 {
   "version": 1,
   "generation": 1,
-  "revision": "agenttalk-v1",
+  "revision": "agenttalk-v2",
   "createdAtMs": 0,
-  "registrySha256": "c20b4ee9fc7039523a1386008b0979076c9a82a413af560d5ecfb0b0a06cc83a",
+  "registrySha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032",
   "manifests": [
     {
       "schemaVersion": "agenttalk.adapter.v1",
-      "id": "com.github.copilot-cli.acp",
-      "displayName": "GitHub Copilot CLI",
+      "id": "agoragentic-acp",
+      "displayName": "Agoragentic",
       "category": "agent_protocol",
-      "protocol": { "kind": "acp", "major": 1 },
-      "match": { "executableNames": ["copilot.exe"], "sha256": "9e9825123b868a979aca1778ef33f64a2b793e9b685533d968a0a2fb25c89518" },
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "agoragentic-acp"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "agoragentic-mcp@1.3.0",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "agoragentic-acp",
+        "version": "1.3.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "amp-acp",
+      "displayName": "Amp",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "amp-acp.exe"
+        ],
+        "registryIds": [
+          "amp-acp"
+        ]
+      },
       "launch": {
         "kind": "direct",
         "transport": "stdio",
-        "executableRef": "matched-observation",
-        "args": ["--acp", "--stdio"],
-        "environmentAllowlist": []
+        "executableRef": "amp-acp.exe",
+        "args": [],
+        "environmentAllowlist": [],
+        "archiveSha256": "3b2c3d14d703fcf9572da9733e4941703a7744bd37ec4aaa75421d6002c0157b"
       },
-      "verification": { "kind": "acp_initialize", "timeoutMs": 10000 },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
       "capabilityPolicy": {
-        "filesystem": "forbidden",
-        "shell": "forbidden",
-        "streaming": "negotiate",
-        "cancel": "negotiate"
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
       },
       "source": {
-        "kind": "agenttalk_manifest",
-        "id": "com.github.copilot-cli.acp",
-        "version": "1",
-        "revision": "agenttalk-v1",
-        "catalogSha256": "c20b4ee9fc7039523a1386008b0979076c9a82a413af560d5ecfb0b0a06cc83a"
+        "kind": "acp_registry",
+        "id": "amp-acp",
+        "version": "0.9.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "auggie",
+      "displayName": "Auggie CLI",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "auggie"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@augmentcode/auggie@0.35.0",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": [
+          "AUGMENT_DISABLE_AUTO_UPDATE"
+        ]
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "auggie",
+        "version": "0.35.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "autohand",
+      "displayName": "Autohand Code",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "autohand"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@autohandai/autohand-acp@0.2.1",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "autohand",
+        "version": "0.2.1",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "claude-acp",
+      "displayName": "Claude Agent",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "claude-acp"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@agentclientprotocol/claude-agent-acp@0.70.0",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "claude-acp",
+        "version": "0.70.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "cline",
+      "displayName": "Cline",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "cline"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "cline@3.0.55",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "cline",
+        "version": "3.0.55",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "codebuddy-code",
+      "displayName": "Codebuddy Code",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "codebuddy-code"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@tencent-ai/codebuddy-code@2.106.7",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "codebuddy-code",
+        "version": "2.106.7",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "codex-acp",
+      "displayName": "Codex",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "codex-acp"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@agentclientprotocol/codex-acp@1.4.0",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "codex-acp",
+        "version": "1.4.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "corust-agent",
+      "displayName": "Corust Agent",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "corust-agent-acp.exe"
+        ],
+        "registryIds": [
+          "corust-agent"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "corust-agent-acp.exe",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "corust-agent",
+        "version": "0.6.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "crow-cli",
+      "displayName": "crow-cli",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "crow-cli.exe"
+        ],
+        "registryIds": [
+          "crow-cli"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "crow-cli.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "crow-cli",
+        "version": "0.1.24",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "deepagents",
+      "displayName": "DeepAgents",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "deepagents"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "deepagents-acp@0.1.7",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "deepagents",
+        "version": "0.1.7",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "dimcode",
+      "displayName": "DimCode",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "dimcode"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "dimcode@0.3.16",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "dimcode",
+        "version": "0.3.16",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "dirac",
+      "displayName": "Dirac",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "dirac"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "dirac-cli@0.4.37",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "dirac",
+        "version": "0.4.37",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "factory-droid",
+      "displayName": "Factory Droid",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "factory-droid"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "droid@0.198.0",
+        "args": [
+          "exec",
+          "--output-format",
+          "acp-daemon"
+        ],
+        "environmentAllowlist": [
+          "DROID_DISABLE_AUTO_UPDATE",
+          "FACTORY_DROID_AUTO_UPDATE_ENABLED"
+        ]
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "factory-droid",
+        "version": "0.198.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "fast-agent",
+      "displayName": "fast-agent",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "fast-agent"
+        ]
+      },
+      "launch": {
+        "kind": "uvx",
+        "package": "fast-agent-acp==0.10.1",
+        "args": [
+          "-x"
+        ],
+        "environmentAllowlist": [
+          "FAST_AGENT_MODEL"
+        ]
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "fast-agent",
+        "version": "0.10.1",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "gemini",
+      "displayName": "Gemini CLI",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "gemini"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@google/gemini-cli@0.55.1",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "gemini",
+        "version": "0.55.1",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "github-copilot-cli",
+      "displayName": "GitHub Copilot",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "github-copilot-cli"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@github/copilot@1.0.80",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "github-copilot-cli",
+        "version": "1.0.80",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "glm-acp-agent",
+      "displayName": "GLM Agent",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "glm-acp-agent"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "glm-acp-agent@1.6.0",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "glm-acp-agent",
+        "version": "1.6.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "grok-build",
+      "displayName": "Grok Build",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "grok-build"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@xai-official/grok@1.0.5",
+        "args": [
+          "agent",
+          "stdio"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "grok-build",
+        "version": "1.0.5",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "harn",
+      "displayName": "Harn",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "harn.exe"
+        ],
+        "registryIds": [
+          "harn"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "harn.exe",
+        "args": [
+          "serve",
+          "acp"
+        ],
+        "environmentAllowlist": [],
+        "archiveSha256": "06122e148c8155b35c33d5839049337bfe556cb7731b21a6b2dfb76fc20592df"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "harn",
+        "version": "0.10.103",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "kilo",
+      "displayName": "Kilo",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "kilo.exe"
+        ],
+        "registryIds": [
+          "kilo"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "kilo.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": [],
+        "archiveSha256": "d2b06537e2610294f207ccc0dd8413d275f0d3248be00be7d9a4f716b4dcff0a"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "kilo",
+        "version": "7.4.22",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "kimi",
+      "displayName": "Kimi CLI",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "kimi.exe"
+        ],
+        "registryIds": [
+          "kimi"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "kimi.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": [],
+        "archiveSha256": "2acbbc7ca8c8ac4b03dab1d970f53a292bd226168151b423499feab9fc203ddd"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "kimi",
+        "version": "1.49.0",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "minion-code",
+      "displayName": "Minion Code",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "minion-code"
+        ]
+      },
+      "launch": {
+        "kind": "uvx",
+        "package": "minion-code@0.1.44",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "minion-code",
+        "version": "0.1.44",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "mistral-vibe",
+      "displayName": "Mistral Vibe",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "vibe-acp.exe"
+        ],
+        "registryIds": [
+          "mistral-vibe"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "vibe-acp.exe",
+        "args": [],
+        "environmentAllowlist": [],
+        "archiveSha256": "a66329ff18845f8e810359910e8da15bb2071648159c13a10838e5ae7a7d9b81"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "mistral-vibe",
+        "version": "2.24.1",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "nova",
+      "displayName": "Nova",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "nova"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@compass-ai/nova@1.1.35",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "nova",
+        "version": "1.1.35",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "opencode",
+      "displayName": "OpenCode",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "opencode.exe"
+        ],
+        "registryIds": [
+          "opencode"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "opencode.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": [],
+        "archiveSha256": "c6d265376fdb93164013671b0cf402410184f73c34fc15d82d40a16a745b15f4"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "opencode",
+        "version": "1.18.18",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "pi-acp",
+      "displayName": "pi ACP",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "pi-acp"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "pi-acp@0.0.33",
+        "args": [],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "pi-acp",
+        "version": "0.0.33",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "poolside",
+      "displayName": "Poolside",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "pool-windows-amd64.exe"
+        ],
+        "registryIds": [
+          "poolside"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "pool-windows-amd64.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": [],
+        "archiveSha256": "3e324f1a4b5855ba5363232c06461ec9d6d2ae1a341c827221e79779f8f2bc6f"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "poolside",
+        "version": "1.0.16",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "qoder",
+      "displayName": "Qoder CLI",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "qoder"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@qoder-ai/qodercli@0.2.14",
+        "args": [
+          "--acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "qoder",
+        "version": "0.2.14",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "qwen-code",
+      "displayName": "Qwen Code",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "registryIds": [
+          "qwen-code"
+        ]
+      },
+      "launch": {
+        "kind": "npx",
+        "package": "@qwen-code/qwen-code@0.21.13",
+        "args": [
+          "--acp",
+          "--experimental-skills"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "qwen-code",
+        "version": "0.21.13",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "sigit",
+      "displayName": "siGit Code",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "sigit-win-amd64.exe"
+        ],
+        "registryIds": [
+          "sigit"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "sigit-win-amd64.exe",
+        "args": [],
+        "environmentAllowlist": [],
+        "archiveSha256": "6d1a1f11f7d1e32a5995f9ea413e626f2e47dcc56fb000e30bf60cebb68e4f24"
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "sigit",
+        "version": "1.5.2",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "stakpak",
+      "displayName": "Stakpak",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "stakpak.exe"
+        ],
+        "registryIds": [
+          "stakpak"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "stakpak.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": []
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "stakpak",
+        "version": "0.3.88",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
+      }
+    },
+    {
+      "schemaVersion": "agenttalk.adapter.v1",
+      "id": "vtcode",
+      "displayName": "VT Code",
+      "category": "agent_protocol",
+      "protocol": {
+        "kind": "acp",
+        "major": 1
+      },
+      "match": {
+        "executableNames": [
+          "vtcode.exe"
+        ],
+        "registryIds": [
+          "vtcode"
+        ]
+      },
+      "launch": {
+        "kind": "direct",
+        "transport": "stdio",
+        "executableRef": "vtcode.exe",
+        "args": [
+          "acp"
+        ],
+        "environmentAllowlist": [
+          "VT_ACP_ENABLED",
+          "VT_ACP_ZED_ENABLED"
+        ]
+      },
+      "verification": {
+        "kind": "acp_initialize",
+        "timeoutMs": 3000
+      },
+      "capabilityPolicy": {
+        "filesystem": "negotiate",
+        "shell": "negotiate",
+        "streaming": "required",
+        "cancel": "required"
+      },
+      "source": {
+        "kind": "acp_registry",
+        "id": "vtcode",
+        "version": "0.96.14",
+        "revision": "agenttalk-v2",
+        "catalogSha256": "7a10059508bc9fa55734495c6b4c876affc55106f6b335fcad4c1fec86ac1032"
       }
     }
   ]

@@ -572,6 +572,12 @@ abstract class AppLocalizations {
   /// **'Add manually'**
   String get localAgentManualAdd;
 
+  /// No description provided for @localAgentSelectExecutable.
+  ///
+  /// In en, this message translates to:
+  /// **'Select file to verify'**
+  String get localAgentSelectExecutable;
+
   /// No description provided for @localAgentScanning.
   ///
   /// In en, this message translates to:

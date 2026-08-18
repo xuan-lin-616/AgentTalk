@@ -254,6 +254,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get localAgentManualAdd => 'Add manually';
 
   @override
+  String get localAgentSelectExecutable => 'Select file to verify';
+
+  @override
   String get localAgentScanning => 'Scanning…';
 
   @override
