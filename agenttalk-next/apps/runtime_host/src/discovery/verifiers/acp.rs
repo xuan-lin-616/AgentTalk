@@ -232,6 +232,22 @@ impl AcpClassification {
         &self.binding
     }
 
+    pub(crate) fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub(crate) fn executable_identity(&self) -> &str {
+        &self.executable_identity
+    }
+
+    pub(crate) fn executable_sha256(&self) -> &str {
+        &self.executable_sha256
+    }
+
+    pub(crate) fn launch(&self) -> &ManifestLaunch {
+        &self.manifest.launch
+    }
+
     /// Whether the observed executable has an identity independent of its
     /// file name. A filename-only heuristic match (e.g. `copilot.exe` on
     /// PATH) proves nothing about the executable, so it must never reach an

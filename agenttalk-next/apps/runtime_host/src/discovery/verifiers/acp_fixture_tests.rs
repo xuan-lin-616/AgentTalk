@@ -384,6 +384,22 @@ fn verify(
     )
 }
 
+fn execution_request(fixture: &AcpFixture, id: &str) -> RuntimeRequest {
+    RuntimeRequest {
+        execution_run_id: id.to_owned(),
+        agent_identity_id: "agent-acp-fixture".into(),
+        connector_id: "fixture.thirdparty.acp".into(),
+        model_id: None,
+        context_manifest_id: "context-fixture".into(),
+        rendered_context: "write a hello world Rust function and run tests".into(),
+        canonical_cwd: Some(fixture.root.path().display().to_string()),
+        workspace_access: WorkspaceAccess::WorkspaceWrite,
+        timeout_ms: 5_000,
+        thread_policy: "new".into(),
+        signed_scope: "fixture-scope".into(),
+    }
+}
+
 fn process_id_from_marker(path: &Path) -> u32 {
     std::fs::read_to_string(path)
         .expect("read owned ACP fixture process marker")
@@ -487,6 +503,18 @@ fn wait_for_owned_pids_to_exit(root: u32, descendant: u32) {
     );
 }
 
+#[cfg(windows)]
+fn wait_for_owned_pid_to_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if !process_exists(pid) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("owned ACP process {pid} survived cleanup");
+}
+
 #[test]
 fn third_party_acp_manifest_is_identified_then_initialize_only_after_consent() {
     let _guard = suite_guard();
@@ -583,7 +611,7 @@ fn production_passive_observation_classifies_and_verifies_after_candidate_consen
     );
     let adapter = discovery
         .instantiate(&consent, &result)
-        .expect("only the verified production target may create a deferred adapter");
+        .expect("only the verified production target may create an owned adapter");
     assert!(matches!(
         adapter.execute(&RuntimeRequest {
             execution_run_id: "production-fixture-run".into(),
@@ -598,7 +626,7 @@ fn production_passive_observation_classifies_and_verifies_after_candidate_consen
             thread_policy: "fixture".into(),
             signed_scope: "fixture".into(),
         }),
-        Err(crate::RuntimeError::Unsupported)
+        Err(crate::RuntimeError::Permission)
     ));
 }
 
@@ -890,6 +918,111 @@ fn unsupported_major_and_auth_required_are_typed_and_safe() {
         factory.instantiate(&auth_classification, &auth).is_err(),
         "auth-required ACP candidate must not instantiate a deferred adapter"
     );
+}
+
+#[test]
+fn verified_acp_adapter_runs_one_new_session_and_one_prompt_in_owned_process() {
+    let _guard = suite_guard();
+    let fixture = AcpFixture::compile("acp-execute-success");
+    let factory = AcpProtocolAdapterFactory;
+    let classification = classify(
+        &factory,
+        &manifest_for(&fixture, "execute-success"),
+        fixture.executable(),
+    );
+    let verification = verify(
+        &factory,
+        &classification,
+        Duration::from_secs(2),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(
+        verification.report().status,
+        AcpVerificationStatus::Verified
+    );
+    std::fs::remove_file(fixture.root.path().join("root.pid")).expect("reset root marker");
+    let adapter = factory
+        .instantiate(&classification, &verification)
+        .expect("instantiate verified ACP adapter");
+    let events = adapter
+        .execute(&execution_request(&fixture, "acp-execution-success"))
+        .expect("execute one-shot ACP turn");
+    assert_eq!(
+        events.first().map(|event| event.event_type.as_str()),
+        Some("runtime.started")
+    );
+    assert_eq!(
+        events.last().map(|event| event.event_type.as_str()),
+        Some("execution.completed")
+    );
+    assert!(events.iter().any(|event| {
+        event.event_type == "output.delta"
+            && event
+                .payload
+                .get("delta")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.contains("hello_world"))
+    }));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.path().join("session-new.invocations"))
+            .expect("session/new marker"),
+        "1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.path().join("session-prompt.invocations"))
+            .expect("session/prompt marker"),
+        "1"
+    );
+    let pid = process_id_from_marker(&fixture.root.path().join("root.pid"));
+    #[cfg(windows)]
+    wait_for_owned_pid_to_exit(pid);
+    #[cfg(not(windows))]
+    let _ = pid;
+}
+
+#[test]
+fn acp_stream_cancel_sends_session_cancel_and_reaps_owned_process() {
+    let _guard = suite_guard();
+    let fixture = AcpFixture::compile("acp-execute-cancel");
+    let factory = AcpProtocolAdapterFactory;
+    let classification = classify(
+        &factory,
+        &manifest_for(&fixture, "execute-cancel"),
+        fixture.executable(),
+    );
+    let verification = verify(
+        &factory,
+        &classification,
+        Duration::from_secs(2),
+        &AtomicBool::new(false),
+    );
+    std::fs::remove_file(fixture.root.path().join("root.pid")).expect("reset root marker");
+    let adapter = factory
+        .instantiate(&classification, &verification)
+        .expect("instantiate verified ACP adapter");
+    let stream = adapter
+        .stream_events(&execution_request(&fixture, "acp-execution-cancel"))
+        .expect("start ACP stream");
+    wait_for_process_id_from_marker(
+        &fixture.root.path().join("session-prompt.invocations"),
+        "session/prompt marker",
+    );
+    let pid = process_id_from_marker(&fixture.root.path().join("root.pid"));
+    stream.cancel().expect("cancel ACP stream");
+    let cancel_marker = fixture.root.path().join("session-cancel.invocations");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && !cancel_marker.is_file() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        cancel_marker.is_file(),
+        "session/cancel must reach the ACP agent"
+    );
+    drop(stream);
+    #[cfg(windows)]
+    wait_for_owned_pid_to_exit(pid);
+    #[cfg(not(windows))]
+    let _ = pid;
 }
 
 #[test]

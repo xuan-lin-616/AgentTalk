@@ -44,17 +44,15 @@ fn main() {
         .open(marker_path("initialize.invocations"))
         .and_then(|mut file| writeln!(file, "{}", std::process::id()));
 
+    let mut stdin = BufReader::new(std::io::stdin());
     let mut request = String::new();
-    if BufReader::new(std::io::stdin())
-        .read_line(&mut request)
-        .is_err()
-    {
+    if stdin.read_line(&mut request).is_err() {
         std::process::exit(11);
     }
     let initialize_count = request.matches("\"method\":\"initialize\"").count();
     let forbidden_request =
         request.contains("session/") || request.contains("prompt") || request.contains("tool/");
-    if initialize_count != 1 || forbidden_request {
+    if initialize_count != 1 || (forbidden_request && !mode.starts_with("execute-")) {
         std::process::exit(12);
     }
 
@@ -183,6 +181,56 @@ fn main() {
         let _ = stdout.write_all(b"\n");
     }
     let _ = stdout.flush();
+    if mode.starts_with("execute-") {
+        let mut session_request = String::new();
+        let session_read = stdin.read_line(&mut session_request).unwrap_or(0);
+        if session_read == 0 {
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if !session_request.contains("\"method\":\"session/new\"")
+            || !session_request.contains("\"mcpServers\":[]")
+        {
+            std::process::exit(21);
+        }
+        let _ = std::fs::write(marker_path("session-new.invocations"), "1");
+        let _ = stdout.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sessionId\":\"fixture-session\"}}\n",
+        );
+        let _ = stdout.flush();
+
+        let mut prompt_request = String::new();
+        if stdin.read_line(&mut prompt_request).unwrap_or(0) == 0
+            || !prompt_request.contains("\"method\":\"session/prompt\"")
+            || !prompt_request.contains("\"sessionId\":\"fixture-session\"")
+        {
+            std::process::exit(22);
+        }
+        let _ = std::fs::write(marker_path("session-prompt.invocations"), "1");
+        if mode == "execute-cancel" {
+            let mut cancel = String::new();
+            if stdin.read_line(&mut cancel).is_err()
+                || !cancel.contains("\"method\":\"session/cancel\"")
+            {
+                std::process::exit(23);
+            }
+            let _ = std::fs::write(marker_path("session-cancel.invocations"), "1");
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let _ = stdout.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"fixture-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"pub fn hello_world() -> &'static str { \\\"Hello, world!\\\" }\"}}}}\n",
+        );
+        let _ = stdout.write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"stopReason\":\"end_turn\"}}\n",
+        );
+        let _ = stdout.flush();
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     if mode == "response-then-crash" {
         std::process::exit(13);
     }

@@ -648,18 +648,18 @@ pub(crate) fn managed_process_fixture_guard_for_tests() -> MutexGuard<'static, (
     }
 }
 
-struct ManagedExitStatus {
+pub(crate) struct ManagedExitStatus {
     success: bool,
 }
 
 impl ManagedExitStatus {
-    fn success(&self) -> bool {
+    pub(crate) fn success(&self) -> bool {
         self.success
     }
 }
 
 #[cfg(not(windows))]
-struct ManagedChild {
+pub(crate) struct ManagedChild {
     child: std::process::Child,
     job: Option<OwnedJob>,
 }
@@ -670,7 +670,7 @@ impl ManagedChild {
         Self::spawn_parts(&spec.executable, &spec.args, None, &[], &[])
     }
 
-    fn spawn_direct(spec: &ManagedDirectStdioSpec) -> Result<Self, ()> {
+    pub(crate) fn spawn_direct(spec: &ManagedDirectStdioSpec) -> Result<Self, ()> {
         Self::spawn_parts(
             &spec.executable,
             &spec.args,
@@ -718,19 +718,19 @@ impl ManagedChild {
         self.child.id()
     }
 
-    fn take_stdin(&mut self) -> std::process::ChildStdin {
+    pub(crate) fn take_stdin(&mut self) -> std::process::ChildStdin {
         self.child.stdin.take().expect("managed child stdin")
     }
 
-    fn take_stdout(&mut self) -> std::process::ChildStdout {
+    pub(crate) fn take_stdout(&mut self) -> std::process::ChildStdout {
         self.child.stdout.take().expect("managed child stdout")
     }
 
-    fn take_stderr(&mut self) -> std::process::ChildStderr {
+    pub(crate) fn take_stderr(&mut self) -> std::process::ChildStderr {
         self.child.stderr.take().expect("managed child stderr")
     }
 
-    fn try_wait(&mut self) -> Result<Option<ManagedExitStatus>, ()> {
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ManagedExitStatus>, ()> {
         self.child
             .try_wait()
             .map(|status| {
@@ -741,7 +741,7 @@ impl ManagedChild {
             .map_err(|_| ())
     }
 
-    fn terminate(&mut self, deadline: Instant) -> bool {
+    pub(crate) fn terminate(&mut self, deadline: Instant) -> bool {
         let _ = self.child.kill();
         self.close_owned_job();
         loop {
@@ -764,7 +764,7 @@ impl ManagedChild {
 }
 
 #[cfg(windows)]
-struct ManagedChild {
+pub(crate) struct ManagedChild {
     process: windows_sys::Win32::Foundation::HANDLE,
     #[cfg(test)]
     pid: u32,
@@ -787,7 +787,7 @@ impl ManagedChild {
         )
     }
 
-    fn spawn_direct(spec: &ManagedDirectStdioSpec) -> Result<Self, ()> {
+    pub(crate) fn spawn_direct(spec: &ManagedDirectStdioSpec) -> Result<Self, ()> {
         Self::spawn_parts(
             &spec.executable,
             &spec.args,
@@ -995,19 +995,19 @@ impl ManagedChild {
         self.pid
     }
 
-    fn take_stdin(&mut self) -> std::fs::File {
+    pub(crate) fn take_stdin(&mut self) -> std::fs::File {
         self.stdin.take().expect("managed child stdin")
     }
 
-    fn take_stdout(&mut self) -> std::fs::File {
+    pub(crate) fn take_stdout(&mut self) -> std::fs::File {
         self.stdout.take().expect("managed child stdout")
     }
 
-    fn take_stderr(&mut self) -> std::fs::File {
+    pub(crate) fn take_stderr(&mut self) -> std::fs::File {
         self.stderr.take().expect("managed child stderr")
     }
 
-    fn try_wait(&mut self) -> Result<Option<ManagedExitStatus>, ()> {
+    pub(crate) fn try_wait(&mut self) -> Result<Option<ManagedExitStatus>, ()> {
         use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
         use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
         let wait = unsafe { WaitForSingleObject(self.process, 0) };
@@ -1022,7 +1022,7 @@ impl ManagedChild {
         Ok(Some(ManagedExitStatus { success: code == 0 }))
     }
 
-    fn terminate(&mut self, deadline: Instant) -> bool {
+    pub(crate) fn terminate(&mut self, deadline: Instant) -> bool {
         unsafe {
             windows_sys::Win32::System::Threading::TerminateProcess(self.process, 1);
         }
