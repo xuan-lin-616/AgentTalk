@@ -55,8 +55,13 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const AgentTalkDesktopApp());
+    await tester.pumpAndSettle();
     expect(find.text('AgentTalk'), findsOneWidget);
+    expect(find.text('工作台'), findsWidgets);
     expect(find.text('开始你的协作对话'), findsOneWidget);
+
+    await tester.tap(find.text('任务管理'));
+    await tester.pumpAndSettle();
     expect(find.text('@ 接力看板'), findsOneWidget);
   });
 

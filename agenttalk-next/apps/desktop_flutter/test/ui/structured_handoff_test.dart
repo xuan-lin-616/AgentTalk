@@ -55,6 +55,7 @@ void main() {
       ),
     );
     await _settle(tester);
+    await _openTasksSection(tester);
 
     await tester.tap(find.byTooltip('创建结构化交接'));
     await _settle(tester);
@@ -78,7 +79,7 @@ void main() {
     await _settle(tester);
 
     expect(pipe.writtenCommands, ['collaboration.create', 'handoff.create']);
-    expect(find.text('结构化交接已创建'), findsOneWidget);
+    expect(find.text('结构化交接已创建'), findsWidgets);
   });
 
   testWidgets('Structured Handoff rejects missing required selections', (
@@ -102,6 +103,7 @@ void main() {
       ),
     );
     await _settle(tester);
+    await _openTasksSection(tester);
     await tester.tap(find.byTooltip('创建结构化交接'));
     await _settle(tester);
     await tester.tap(find.byKey(const Key('handoff-submit')));
@@ -145,6 +147,7 @@ void main() {
       ),
     );
     await _settle(tester);
+    await _openTasksSection(tester);
     await tester.tap(find.byTooltip('创建结构化交接'));
     await _settle(tester);
     await tester.tap(find.byKey(const Key('handoff-source-run')));
@@ -195,6 +198,7 @@ void main() {
       ),
     );
     await _settle(tester);
+    await _openTasksSection(tester);
 
     expect(find.byTooltip('重试'), findsOneWidget);
     expect(find.byTooltip('按当前设置重新运行'), findsOneWidget);
@@ -248,6 +252,7 @@ void main() {
       ),
     );
     await _settle(tester);
+    await _openTasksSection(tester);
 
     expect(find.byTooltip('批准交接'), findsOneWidget);
     expect(find.byTooltip('拒绝交接'), findsOneWidget);
@@ -261,6 +266,11 @@ void main() {
 
 Future<void> _settle(WidgetTester tester) =>
     tester.pump(const Duration(milliseconds: 500));
+
+Future<void> _openTasksSection(WidgetTester tester) async {
+  await tester.tap(find.text('任务管理'));
+  await tester.pump();
+}
 
 final _snapshot = <String, dynamic>{
   'projects': [

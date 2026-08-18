@@ -30,6 +30,9 @@ import 'ui/retrieval_selection_dialog.dart';
 import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
 import 'ui/orchestration_panel.dart';
+import 'ui/workbench/left_navigation_rail.dart';
+import 'ui/workbench/studio_title_bar.dart';
+import 'ui/workbench/studio_workbench_view.dart';
 
 final _workspaceShellKey = GlobalKey<WorkspaceShellState>();
 
@@ -152,8 +155,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   String? _activeRetrievalSelectionId;
   double _leftPaneWidth = 266;
   double _rightPaneWidth = 336;
-  bool _leftPaneVisible = true;
+  final double _bottomDockHeight = 260;
+  final bool _leftPaneVisible = true;
   bool _rightPaneVisible = true;
+  bool _bottomDockVisible = true;
+  int _activeSection = 0;
   Map<String, dynamic> _snapshot = const <String, dynamic>{};
   String _projectionStatus = '正在连接 AgentTalk Core';
   String? _coreDiagnosticDetails;
@@ -2700,9 +2706,10 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                     final compact = constraints.maxWidth < 1024;
                     return Column(
                       children: [
-                        _Header(
+                        StudioTitleBar(
                           compact: compact,
                           snapshot: _snapshot,
+                          projectionStatus: _projectionStatus,
                           onProjectPressed: _showProjectPicker,
                           onConversationPressed: _showConversationPicker,
                           onConnectorCenterPressed: _showConnectorCenter,
@@ -2710,11 +2717,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                           onConfigTransferPressed: _showConfigTransfer,
                           onSearchPressed: _showMessageSearch,
                           onToggleTheme: widget.onToggleTheme,
-                          onToggleLeftPane: () => setState(() {
-                            _leftPaneVisible = !_leftPaneVisible;
-                          }),
-                          onToggleRightPane: () => setState(() {
+                          onToggleAgentPanel: () => setState(() {
                             _rightPaneVisible = !_rightPaneVisible;
+                          }),
+                          onToggleWorkflowPanel: () => setState(() {
+                            _bottomDockVisible = !_bottomDockVisible;
                           }),
                           onShowAgentPanel: _showAgentSheet,
                           onShowWorkflowPanel: _showWorkflowSheet,
@@ -2735,90 +2742,21 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                               : Row(
                                   children: [
                                     if (_leftPaneVisible) ...[
-                                      SizedBox(
-                                        width: _leftPaneWidth,
-                                        child: _AgentProjection(
-                                          snapshot: _snapshot,
-                                          status: _projectionStatus,
-                                          projectId: _activeProjectId,
-                                          onAdd: () =>
-                                              unawaited(_showCreateAgent()),
-                                          onEdit: (agent) =>
-                                              unawaited(_showEditAgent(agent)),
-                                          onManageAssignments:
-                                              _showProjectAssignmentSheet,
-                                          onScanLocal: _showScanLocalAgents,
-                                        ),
+                                      LeftNavigationRail(
+                                        selectedIndex: _activeSection,
+                                        onSelect: _selectStudioSection,
                                       ),
                                       _ResizeHandle(
                                         onDrag: (delta) => setState(() {
                                           _leftPaneWidth =
                                               (_leftPaneWidth + delta).clamp(
+                                                120,
                                                 220,
-                                                420,
                                               );
                                         }),
                                       ),
                                     ],
-                                    Expanded(
-                                      flex: 57,
-                                      child: _ConversationProjection(
-                                        snapshot: _snapshot,
-                                        projectId: _activeProjectId,
-                                        conversationId: _activeConversationId,
-                                        onSend: _sendMessage,
-                                        onCancel: _cancelExecution,
-                                        onShowContext: _showContextInspector,
-                                        onStoreMemory: _showStoreMemory,
-                                        onStoreRetrieval: _showStoreRetrieval,
-                                        filePickerClient:
-                                            widget.filePickerClient,
-                                      ),
-                                    ),
-                                    if (_rightPaneVisible) ...[
-                                      _ResizeHandle(
-                                        onDrag: (delta) => setState(() {
-                                          _rightPaneWidth =
-                                              (_rightPaneWidth - delta).clamp(
-                                                280,
-                                                460,
-                                              );
-                                        }),
-                                      ),
-                                      SizedBox(
-                                        width: _rightPaneWidth,
-                                        child: Column(
-                                          children: [
-                                            Expanded(
-                                              flex: 5,
-                                              child: _WorkflowProjection(
-                                                snapshot: _snapshot,
-                                                status: _projectionStatus,
-                                                onCancel: _cancelExecution,
-                                                onRetry: _retryExecution,
-                                                onRerunCurrent:
-                                                    _rerunCurrentExecution,
-                                                onCreate: _showCreateWorkflow,
-                                                onCreateHandoff:
-                                                    _showCreateStructuredHandoff,
-                                                onDispatchHandoff:
-                                                    _dispatchStructuredHandoff,
-                                                onTransitionHandoff:
-                                                    _transitionStructuredHandoff,
-                                              ),
-                                            ),
-                                            const SizedBox(height: 8),
-                                            Expanded(
-                                              flex: 4,
-                                              child: OrchestrationPanel(
-                                                client: _client,
-                                                sessionId: _sessionId,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
+                                    Expanded(child: _buildStudioSection()),
                                   ],
                                 ),
                         ),
@@ -2832,6 +2770,171 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         ),
       ),
     );
+  }
+
+  void _selectStudioSection(int index) {
+    if (index < 0 || index > 7 || index == _activeSection) return;
+    setState(() {
+      _activeSection = index;
+    });
+  }
+
+  Widget _buildStudioSection() {
+    switch (_activeSection) {
+      case 1:
+        return _AgentProjection(
+          snapshot: _snapshot,
+          status: _projectionStatus,
+          projectId: _activeProjectId,
+          onAdd: () => unawaited(_showCreateAgent()),
+          onEdit: (agent) => unawaited(_showEditAgent(agent)),
+          onManageAssignments: _showProjectAssignmentSheet,
+          onScanLocal: _showScanLocalAgents,
+        );
+      case 2:
+        return Column(
+          children: [
+            StudioWorkbenchHeader(
+              sectionTitle: '任务管理',
+              status: _projectionStatus,
+            ),
+            Expanded(
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _WorkflowProjection(
+                      snapshot: _snapshot,
+                      status: _projectionStatus,
+                      onCancel: _cancelExecution,
+                      onRetry: _retryExecution,
+                      onRerunCurrent: _rerunCurrentExecution,
+                      onCreate: _showCreateWorkflow,
+                      onCreateHandoff: _showCreateStructuredHandoff,
+                      onDispatchHandoff: _dispatchStructuredHandoff,
+                      onTransitionHandoff: _transitionStructuredHandoff,
+                    ),
+                  ),
+                  SizedBox(
+                    width: 380,
+                    child: OrchestrationPanel(
+                      client: _client,
+                      sessionId: _sessionId,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      case 3:
+        return StudioSectionPlaceholder(
+          icon: Icons.folder_open_rounded,
+          title: '知识库',
+          subtitle: '上下文清单、记忆与检索来源将在此集中展示',
+          actionLabel: '打开上下文检查器',
+          onAction: () => unawaited(_showContextInspector()),
+        );
+      case 4:
+        return StudioSectionPlaceholder(
+          icon: Icons.build_outlined,
+          title: '工具管理',
+          subtitle: 'Connector 发现、健康检查与本地工具接入将在此展示',
+          actionLabel: '打开 Connector 中心',
+          onAction: () => unawaited(_showConnectorCenter()),
+        );
+      case 5:
+        return _ConversationProjection(
+          snapshot: _snapshot,
+          projectId: _activeProjectId,
+          conversationId: _activeConversationId,
+          onSend: _sendMessage,
+          onCancel: _cancelExecution,
+          onShowContext: _showContextInspector,
+          onStoreMemory: _showStoreMemory,
+          onStoreRetrieval: _showStoreRetrieval,
+          filePickerClient: widget.filePickerClient,
+        );
+      case 6:
+        return StudioSectionPlaceholder(
+          icon: Icons.list_alt_rounded,
+          title: '日志中心',
+          subtitle: 'Phase 2 将接入真实事件流日志（events.replay / events.subscribe）',
+        );
+      case 7:
+        return StudioSectionPlaceholder(
+          icon: Icons.settings_outlined,
+          title: '设置',
+          subtitle: '诊断、导入导出、模型绑定矩阵将在此集中展示',
+          actionLabel: '打开高级诊断',
+          onAction: () => unawaited(_showDiagnostics()),
+        );
+      case 0:
+      default:
+        return Column(
+          children: [
+            StudioWorkbenchHeader(
+              sectionTitle: '工作台',
+              status: _projectionStatus,
+            ),
+            Expanded(
+              child: Row(
+                children: [
+                  const Expanded(child: StudioCanvasPlaceholder()),
+                  if (_rightPaneVisible) ...[
+                    _ResizeHandle(
+                      onDrag: (delta) => setState(() {
+                        _rightPaneWidth = (_rightPaneWidth - delta).clamp(
+                          280,
+                          460,
+                        );
+                      }),
+                    ),
+                    SizedBox(
+                      width: _rightPaneWidth,
+                      child: _AgentProjection(
+                        snapshot: _snapshot,
+                        status: _projectionStatus,
+                        projectId: _activeProjectId,
+                        onAdd: () => unawaited(_showCreateAgent()),
+                        onEdit: (agent) => unawaited(_showEditAgent(agent)),
+                        onManageAssignments: _showProjectAssignmentSheet,
+                        onScanLocal: _showScanLocalAgents,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            if (_bottomDockVisible) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                height: _bottomDockHeight,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(flex: 4, child: const StudioLogPlaceholder()),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      flex: 6,
+                      child: _ConversationProjection(
+                        snapshot: _snapshot,
+                        projectId: _activeProjectId,
+                        conversationId: _activeConversationId,
+                        onSend: _sendMessage,
+                        onCancel: _cancelExecution,
+                        onShowContext: _showContextInspector,
+                        onStoreMemory: _showStoreMemory,
+                        onStoreRetrieval: _showStoreRetrieval,
+                        filePickerClient: widget.filePickerClient,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        );
+    }
   }
 }
 
@@ -2868,151 +2971,6 @@ class _ResizeHandle extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
         child: const SizedBox(width: 8, child: VerticalDivider(width: 1)),
-      ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  const _Header({
-    required this.compact,
-    required this.snapshot,
-    this.onProjectPressed,
-    this.onConversationPressed,
-    this.onConnectorCenterPressed,
-    this.onDiagnosticsPressed,
-    this.onConfigTransferPressed,
-    this.onSearchPressed,
-    this.onToggleTheme,
-    this.onToggleLeftPane,
-    this.onToggleRightPane,
-    this.onShowAgentPanel,
-    this.onShowWorkflowPanel,
-  });
-  final bool compact;
-  final Map<String, dynamic> snapshot;
-  final VoidCallback? onProjectPressed;
-  final VoidCallback? onConversationPressed;
-  final VoidCallback? onConnectorCenterPressed;
-  final VoidCallback? onDiagnosticsPressed;
-  final VoidCallback? onConfigTransferPressed;
-  final VoidCallback? onSearchPressed;
-  final VoidCallback? onToggleTheme;
-  final VoidCallback? onToggleLeftPane;
-  final VoidCallback? onToggleRightPane;
-  final VoidCallback? onShowAgentPanel;
-  final VoidCallback? onShowWorkflowPanel;
-
-  @override
-  Widget build(BuildContext context) {
-    final l10n = AppLocalizations.of(context);
-    return SizedBox(
-      height: 64,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Row(
-          children: [
-            Icon(
-              Icons.auto_awesome,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-            const SizedBox(width: 10),
-            Text(
-              l10n?.title ?? 'AgentTalk',
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(width: 28),
-            if (compact) ...[
-              IconButton(
-                tooltip: l10n?.project ?? '项目',
-                onPressed: onProjectPressed,
-                icon: const Icon(Icons.folder_open, size: 18),
-              ),
-              IconButton(
-                tooltip: l10n?.conversation ?? '会话',
-                onPressed: onConversationPressed,
-                icon: const Icon(Icons.chat_bubble_outline, size: 18),
-              ),
-            ] else ...[
-              OutlinedButton.icon(
-                onPressed: onProjectPressed,
-                icon: const Icon(Icons.folder_open, size: 16),
-                label: Text(
-                  _firstName(snapshot, 'projects', l10n?.project ?? '项目'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: onConversationPressed,
-                icon: const Icon(Icons.chat_bubble_outline, size: 16),
-                label: Text(
-                  _firstName(
-                    snapshot,
-                    'conversations',
-                    l10n?.conversation ?? '会话',
-                    'title',
-                  ),
-                ),
-              ),
-            ],
-            const Spacer(),
-            if (!compact)
-              IconButton(
-                tooltip: l10n?.connectorCenter ?? '连接器管理',
-                onPressed: onConnectorCenterPressed,
-                icon: const Icon(Icons.extension_outlined, size: 20),
-              ),
-            if (!compact)
-              IconButton(
-                tooltip: l10n?.diagnostics ?? '高级诊断',
-                onPressed: onDiagnosticsPressed,
-                icon: const Icon(Icons.monitor_heart_outlined, size: 20),
-              ),
-            IconButton(
-              tooltip: '导入/导出配置',
-              onPressed: onConfigTransferPressed,
-              icon: const Icon(Icons.import_export, size: 20),
-            ),
-            if (!compact)
-              IconButton(
-                tooltip: l10n?.searchMessages ?? '搜索消息',
-                onPressed: onSearchPressed,
-                icon: const Icon(Icons.search, size: 20),
-              ),
-            if (!compact)
-              IconButton(
-                tooltip: l10n?.agentPanel ?? '智能体面板',
-                onPressed: onToggleLeftPane,
-                icon: const Icon(Icons.people_outline, size: 20),
-              ),
-            if (!compact)
-              IconButton(
-                tooltip: l10n?.workflowPanel ?? '工作流面板',
-                onPressed: onToggleRightPane,
-                icon: const Icon(Icons.view_sidebar_outlined, size: 20),
-              ),
-            if (compact)
-              IconButton(
-                tooltip: l10n?.agentPanel ?? '智能体面板',
-                onPressed: onShowAgentPanel,
-                icon: const Icon(Icons.people_outline, size: 20),
-              ),
-            if (compact)
-              IconButton(
-                tooltip: l10n?.workflowPanel ?? '工作流面板',
-                onPressed: onShowWorkflowPanel,
-                icon: const Icon(Icons.account_tree_outlined, size: 20),
-              ),
-            const SizedBox(width: 16),
-            IconButton(
-              tooltip: l10n?.toggleTheme ?? '切换主题',
-              onPressed: onToggleTheme,
-              icon: const Icon(Icons.brightness_6_outlined, size: 20),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -3577,29 +3535,36 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
         children: [
           Expanded(
             child: messages.isEmpty
-                ? Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 920),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(
-                            Icons.forum_outlined,
-                            size: 48,
-                            color: Color(0xff94a3b8),
+                ? LayoutBuilder(
+                    builder: (context, constraints) => SingleChildScrollView(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: 920,
+                          minHeight: constraints.maxHeight,
+                        ),
+                        child: Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(
+                                Icons.forum_outlined,
+                                size: 48,
+                                color: Color(0xff94a3b8),
+                              ),
+                              const SizedBox(height: 14),
+                              Text(
+                                '开始你的协作对话',
+                                style: Theme.of(context).textTheme.headlineSmall
+                                    ?.copyWith(fontWeight: FontWeight.w700),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                '输入消息，使用 @ 可指定智能体...',
+                                style: Theme.of(context).textTheme.bodyMedium,
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 14),
-                          Text(
-                            '开始你的协作对话',
-                            style: Theme.of(context).textTheme.headlineSmall
-                                ?.copyWith(fontWeight: FontWeight.w700),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            '输入消息，使用 @ 可指定智能体...',
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                        ],
+                        ),
                       ),
                     ),
                   )
@@ -4452,16 +4417,4 @@ String? activeRunIdForConversation(
     }
   }
   return null;
-}
-
-String _firstName(
-  Map<String, dynamic> snapshot,
-  String key,
-  String fallback, [
-  String labelKey = 'name',
-]) {
-  final values = _list(snapshot, key);
-  if (values.isEmpty) return fallback;
-  final value = values.first[labelKey]?.toString();
-  return value == null || value.isEmpty ? fallback : value;
 }
