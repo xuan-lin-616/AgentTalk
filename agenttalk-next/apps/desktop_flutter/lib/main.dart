@@ -30,10 +30,14 @@ import 'ui/retrieval_selection_dialog.dart';
 import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
 import 'ui/orchestration_panel.dart';
+import 'ui/workbench/approval_panel.dart';
 import 'ui/workbench/execution_log_panel.dart';
 import 'ui/workbench/flow_canvas_view.dart';
 import 'ui/workbench/left_navigation_rail.dart';
+import 'ui/workbench/model_binding_matrix_view.dart';
+import 'ui/workbench/orchestration_inspector_panel.dart';
 import 'ui/workbench/orchestration_run_projection.dart';
+import 'ui/workbench/studio_approval_request.dart';
 import 'ui/workbench/studio_event_log.dart';
 import 'ui/workbench/studio_title_bar.dart';
 import 'ui/workbench/studio_workbench_view.dart';
@@ -173,6 +177,8 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   final List<StudioLogEntry> _eventLog = [];
   final List<StudioStreamingDelta> _streamingDeltas = [];
   final Set<String> _seenEventIds = {};
+  final List<StudioApprovalRequest> _pendingApprovals = [];
+  bool _approvalBusy = false;
   String? _orchestrationRunId;
   OrchestrationRunProjection? _orchestrationProjection;
   bool _orchestrationLoading = false;
@@ -263,10 +269,108 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     }
   }
 
+  void _ingestApprovalMap(Map<String, dynamic> event) {
+    final eventType = event['event'];
+    final payload = event['payload'];
+    if (eventType is String && payload is Map<String, dynamic>) {
+      final handoffId = payload['handoffId']?.toString();
+      if (handoffId != null && handoffId.isNotEmpty) {
+        _removeApprovalsForHandoff(handoffId, eventType);
+      }
+    }
+    final approval = studioApprovalFromEventMap(event);
+    if (approval == null) return;
+    if (_seenEventIds.contains(approval.id) == false) return;
+    if (!mounted) return;
+    setState(() {
+      _pendingApprovals.removeWhere((item) => item.id == approval.id);
+      _pendingApprovals.add(approval);
+    });
+  }
+
+  void _ingestApprovalEnvelope(EventEnvelope event) {
+    final handoffId = event.payload['handoffId']?.toString();
+    if (handoffId != null && handoffId.isNotEmpty) {
+      _removeApprovalsForHandoff(handoffId, event.event);
+    }
+    final approval = studioApprovalFromEnvelope(event);
+    if (approval == null) return;
+    if (!mounted) return;
+    setState(() {
+      _pendingApprovals.removeWhere((item) => item.id == approval.id);
+      _pendingApprovals.add(approval);
+    });
+  }
+
+  void _removeApprovalsForHandoff(String handoffId, String eventType) {
+    if (eventType == 'tool.requested' || eventType == 'handoff.proposed') {
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _pendingApprovals.removeWhere((item) => item.handoffId == handoffId);
+    });
+  }
+
+  void _dismissApproval(StudioApprovalRequest request) {
+    setState(() {
+      _pendingApprovals.removeWhere((item) => item.id == request.id);
+    });
+  }
+
+  Future<void> _approveApproval(StudioApprovalRequest request) async {
+    await _transitionApproval(request, 'approved');
+  }
+
+  Future<void> _rejectApproval(StudioApprovalRequest request) async {
+    await _transitionApproval(request, 'rejected');
+  }
+
+  Future<void> _transitionApproval(
+    StudioApprovalRequest request,
+    String targetStatus,
+  ) async {
+    final client = _client;
+    final sessionId = _sessionId;
+    final handoffId = request.handoffId;
+    if (client == null ||
+        sessionId == null ||
+        handoffId == null ||
+        handoffId.isEmpty ||
+        _approvalBusy) {
+      return;
+    }
+    setState(() => _approvalBusy = true);
+    try {
+      await client.transitionHandoff(
+        sessionId: sessionId,
+        handoffId: handoffId,
+        targetStatus: targetStatus,
+      );
+      if (!mounted) return;
+      setState(() {
+        _pendingApprovals.removeWhere((item) => item.id == request.id);
+        _approvalBusy = false;
+        _projectionStatus = targetStatus == 'approved'
+            ? '交接已批准：$handoffId'
+            : '交接已拒绝：$handoffId';
+      });
+      await _refreshProjection(client, sessionId);
+    } on Object catch (error) {
+      if (!mounted) return;
+      final message = _describeCoreError(error);
+      setState(() {
+        _approvalBusy = false;
+        _projectionStatus = '审批被 Core 拒绝：$message';
+      });
+    }
+  }
+
   void _ingestEventMap(Map<String, dynamic> event) {
     final entry = studioLogEntryFromEventMap(event);
     if (entry == null) return;
     if (!_seenEventIds.add(entry.id)) return;
+    _ingestApprovalMap(event);
     final delta = studioStreamingDeltaFromEventMap(event);
     if (!mounted) return;
     setState(() {
@@ -288,6 +392,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
 
   void _ingestEventEnvelope(EventEnvelope event) {
     if (!_seenEventIds.add(event.eventId)) return;
+    _ingestApprovalEnvelope(event);
     final delta = studioStreamingDeltaFromEnvelope(event);
     if (!mounted) return;
     setState(() {
@@ -2847,6 +2952,115 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     });
   }
 
+  Future<void> _showOrchestrationInspector() async {
+    final projection = _orchestrationProjection;
+    if (projection == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('编排检查器'),
+        content: OrchestrationInspectorPanel(projection: projection),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showOrchestrationRecoveryState() async {
+    final client = _client;
+    final sessionId = _sessionId;
+    final runId = _orchestrationRunId;
+    if (client == null || sessionId == null) return;
+    if (runId == null || runId.isEmpty) {
+      await _pickOrchestrationRun();
+      return;
+    }
+    try {
+      final state = await client.queryOrchestrationRecoveryState(
+        sessionId: sessionId,
+        runId: runId,
+      );
+      if (!mounted) return;
+      final nodes = (state['nodes'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .toList(growable: false);
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('编排恢复状态'),
+          content: SizedBox(
+            width: 480,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'runId: ',
+                  style: const TextStyle(color: StudioColors.textPrimary),
+                ),
+                Text(
+                  'coordinatorGeneration: ${state['coordinatorGeneration'] ?? '-'}',
+                  style: const TextStyle(color: StudioColors.textSecondary),
+                ),
+                const SizedBox(height: 10),
+                if (nodes.isEmpty)
+                  const Text(
+                    '暂无节点恢复信息',
+                    style: TextStyle(color: StudioColors.textTertiary),
+                  )
+                else
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final node in nodes)
+                          ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            leading: const Icon(
+                              Icons.memory_outlined,
+                              size: 18,
+                            ),
+                            title: Text(
+                              node['nodeId']?.toString() ?? '-',
+                              style: const TextStyle(
+                                color: StudioColors.textPrimary,
+                                fontSize: 12,
+                              ),
+                            ),
+                            subtitle: Text(
+                              '${node['status'] ?? '-'} · attemptCount ${node['attemptCount'] ?? '-'}',
+                              style: const TextStyle(
+                                color: StudioColors.textTertiary,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      );
+    } on Object catch (error) {
+      if (!mounted) return;
+      final message = _describeCoreError(error);
+      setState(() => _projectionStatus = '恢复状态读取失败：$message');
+    }
+  }
+
   Future<void> _pickOrchestrationRun() async {
     if (_orchestrationLoading) return;
     final runId = await _showOrchestrationRunPicker();
@@ -3089,6 +3303,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
             StudioWorkbenchHeader(
               sectionTitle: '任务管理',
               status: _projectionStatus,
+              trailing: OutlinedButton.icon(
+                onPressed: _showOrchestrationRecoveryState,
+                icon: const Icon(Icons.healing_outlined, size: 16),
+                label: const Text('恢复状态'),
+              ),
             ),
             Expanded(
               child: Row(
@@ -3127,12 +3346,20 @@ class WorkspaceShellState extends State<WorkspaceShell> {
           onAction: () => unawaited(_showContextInspector()),
         );
       case 4:
-        return StudioSectionPlaceholder(
-          icon: Icons.build_outlined,
-          title: '工具管理',
-          subtitle: 'Connector 发现、健康检查与本地工具接入将在此展示',
-          actionLabel: '打开 Connector 中心',
-          onAction: () => unawaited(_showConnectorCenter()),
+        final client = _client;
+        final sessionId = _sessionId;
+        if (client == null || sessionId == null) {
+          return StudioSectionPlaceholder(
+            icon: Icons.build_outlined,
+            title: '工具管理',
+            subtitle: 'Core 未连接，无法读取模型绑定矩阵。',
+          );
+        }
+        return ModelBindingMatrixView(
+          client: client,
+          sessionId: sessionId,
+          projectId: _activeProjectId,
+          agents: _projectAgents(_snapshot, _activeProjectId),
         );
       case 5:
         return _ConversationProjection(
@@ -3184,6 +3411,13 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                 ],
               ),
             ),
+            ApprovalPanel(
+              requests: _pendingApprovals,
+              busy: _approvalBusy,
+              onApprove: (request) => unawaited(_approveApproval(request)),
+              onReject: (request) => unawaited(_rejectApproval(request)),
+              onDismiss: _dismissApproval,
+            ),
             Expanded(
               child: Row(
                 children: [
@@ -3195,6 +3429,9 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                       onPickRun: _pickOrchestrationRun,
                       onRetryNode: _retryOrchestrationNode,
                       onCancelRun: _cancelSelectedOrchestrationRun,
+                      onShowInspector: _orchestrationProjection == null
+                          ? null
+                          : _showOrchestrationInspector,
                       busy: _orchestrationLoading,
                     ),
                   ),

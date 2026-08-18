@@ -19,6 +19,7 @@ class FlowCanvasView extends StatelessWidget {
     this.onPickRun,
     this.onRetryNode,
     this.onCancelRun,
+    this.onShowInspector,
     this.busy = false,
   });
 
@@ -28,6 +29,7 @@ class FlowCanvasView extends StatelessWidget {
   final VoidCallback? onPickRun;
   final ValueChanged<String>? onRetryNode;
   final VoidCallback? onCancelRun;
+  final VoidCallback? onShowInspector;
   final bool busy;
 
   @override
@@ -78,6 +80,7 @@ class FlowCanvasView extends StatelessWidget {
             busy: busy,
             onPickRun: onPickRun,
             onCancelRun: onCancelRun,
+            onShowInspector: onShowInspector,
           ),
           Expanded(
             child: ClipRect(
@@ -133,6 +136,7 @@ class _CanvasToolbar extends StatelessWidget {
     required this.busy,
     this.onPickRun,
     this.onCancelRun,
+    this.onShowInspector,
   });
 
   final String runId;
@@ -142,6 +146,7 @@ class _CanvasToolbar extends StatelessWidget {
   final bool busy;
   final VoidCallback? onPickRun;
   final VoidCallback? onCancelRun;
+  final VoidCallback? onShowInspector;
 
   @override
   Widget build(BuildContext context) {
@@ -176,6 +181,12 @@ class _CanvasToolbar extends StatelessWidget {
               onPressed: busy ? null : onPickRun,
               icon: const Icon(Icons.folder_open, size: 16),
               label: const Text('选择 Run'),
+            ),
+          if (onShowInspector != null)
+            TextButton.icon(
+              onPressed: busy ? null : onShowInspector,
+              icon: const Icon(Icons.fact_check_outlined, size: 16),
+              label: const Text('详情'),
             ),
           if (onCancelRun != null &&
               status != 'completed' &&
