@@ -24,6 +24,7 @@ import 'ui/memory_write_dialog.dart';
 import 'ui/local_agent_scan_dialog.dart';
 import 'ui/project_agent_assignment_panel.dart';
 import 'ui/projection_entity_dialog.dart';
+import 'ui/theme/studio_colors.dart';
 import 'ui/retrieval_source_write_dialog.dart';
 import 'ui/retrieval_selection_dialog.dart';
 import 'ui/retrieval_preview_dialog.dart';
@@ -67,43 +68,14 @@ class _AgentTalkDesktopAppState extends State<AgentTalkDesktopApp> {
 
   @override
   Widget build(BuildContext context) {
-    final lightScheme =
-        ColorScheme.fromSeed(
-          seedColor: const Color(0xff6366f1),
-          brightness: Brightness.light,
-        ).copyWith(
-          surface: const Color(0xfff8fafc),
-          surfaceContainerLowest: const Color(0xfffbfcfe),
-          surfaceContainerLow: const Color(0xfffbfcfe),
-          surfaceContainer: const Color(0xfff1f5f9),
-          surfaceContainerHigh: const Color(0xffe2e8f0),
-          surfaceContainerHighest: const Color(0xffcbd5e1),
-          outlineVariant: const Color(0xffcbd5e1),
-        );
-    final darkScheme =
-        ColorScheme.fromSeed(
-          seedColor: const Color(0xff6366f1),
-          brightness: Brightness.dark,
-        ).copyWith(
-          surface: const Color(0xff111827),
-          surfaceContainerLowest: const Color(0xff0f172a),
-          surfaceContainerLow: const Color(0xff111827),
-          surfaceContainer: const Color(0xff1e293b),
-          surfaceContainerHigh: const Color(0xff273449),
-          surfaceContainerHighest: const Color(0xff334155),
-          onSurface: const Color(0xfff8fafc),
-          onSurfaceVariant: const Color(0xffcbd5e1),
-          outline: const Color(0xff334155),
-          outlineVariant: const Color(0xff475569),
-        );
     return MaterialApp(
       onGenerateTitle: (context) => _appTitle(context),
       debugShowCheckedModeBanner: false,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       locale: const Locale('zh'),
-      theme: _agentTalkTheme(lightScheme),
-      darkTheme: _agentTalkTheme(darkScheme),
+      theme: buildStudioTheme(studioLightColorScheme),
+      darkTheme: buildStudioTheme(studioDarkColorScheme),
       themeMode: _themeMode,
       home: WorkspaceShell(
         key: widget.shellKey,
@@ -128,51 +100,8 @@ ThemeMode _initialThemeMode() {
   return switch (value) {
     'dark' => ThemeMode.dark,
     'system' => ThemeMode.system,
-    _ => ThemeMode.light,
+    _ => ThemeMode.dark,
   };
-}
-
-ThemeData _agentTalkTheme(ColorScheme scheme) {
-  return ThemeData(
-    useMaterial3: true,
-    colorScheme: scheme,
-    fontFamily: 'Segoe UI',
-    fontFamilyFallback: const ['Microsoft YaHei', 'Segoe UI', 'sans-serif'],
-    scaffoldBackgroundColor: scheme.surface,
-    cardTheme: CardThemeData(
-      elevation: 0,
-      color: scheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
-    ),
-    dialogTheme: DialogThemeData(
-      elevation: 6,
-      backgroundColor: scheme.surface,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
-    ),
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: scheme.surfaceContainerLowest,
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: scheme.outlineVariant),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: scheme.primary),
-      ),
-      disabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide(color: scheme.outlineVariant),
-      ),
-    ),
-  );
 }
 
 class WorkspaceShell extends StatefulWidget {
