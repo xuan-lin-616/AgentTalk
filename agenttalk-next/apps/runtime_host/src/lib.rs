@@ -50,7 +50,7 @@ use discovery::{
     DiscoveryContext, DiscoveryCoordinator, DiscoveryProvider, DiscoveryProviderError,
     DiscoveryProviderExecution, ManagedProviderOutcome, ManagedProviderProcessSpec,
     ManagedProviderWorkerKind, ManagedProviderWorkerRequest, Observation, ObservationFingerprint,
-    ObservationLocator,
+    ObservationLocator, RunnerInstallationMetadata,
 };
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -402,6 +402,11 @@ pub fn discover_windows_passive_report_with_config_and_cancelled(
             config: config.clone(),
         }),
         Box::new(WindowsPassiveDiscoveryProvider {
+            kind: ManagedProviderWorkerKind::WindowsRunnerInstallations,
+            source_kind: ObservationSourceKind::ExecutableInventory,
+            config: config.clone(),
+        }),
+        Box::new(WindowsPassiveDiscoveryProvider {
             kind: ManagedProviderWorkerKind::WindowsLoopbackListeners,
             source_kind: ObservationSourceKind::LoopbackListener,
             config: config.clone(),
@@ -474,6 +479,7 @@ fn run_local_discovery_worker() -> Result<(), DiscoveryDiagnosticCode> {
         ManagedProviderWorkerKind::WindowsPath
         | ManagedProviderWorkerKind::WindowsAppPaths
         | ManagedProviderWorkerKind::WindowsPackages
+        | ManagedProviderWorkerKind::WindowsRunnerInstallations
         | ManagedProviderWorkerKind::WindowsLoopbackListeners
         | ManagedProviderWorkerKind::ExplicitSources => {
             let config: WindowsPassiveWorkerConfig = serde_json::from_value(request.payload)
@@ -616,6 +622,9 @@ fn collect_windows_passive_provider(
         }
         ManagedProviderWorkerKind::WindowsPackages => {
             collect_windows_package_observations(config, deadline, cancelled, max_observations)
+        }
+        ManagedProviderWorkerKind::WindowsRunnerInstallations => {
+            collect_windows_runner_installations(config, deadline, cancelled, max_observations)
         }
         ManagedProviderWorkerKind::WindowsLoopbackListeners => {
             collect_windows_loopback_observations(config, deadline, cancelled, max_observations)
@@ -1061,6 +1070,10 @@ const MAX_PACKAGE_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_REAL_APP_PATH_RECORDS: usize = 512;
 const MAX_REAL_PACKAGE_RECORDS: usize = 512;
 const MAX_REAL_LOOPBACK_RECORDS: usize = 2048;
+const MAX_RUNNER_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_RUNNER_INSTALLATIONS: usize = 128;
+const MAX_RUNNER_PACKAGE_TREE_FILES: usize = 512;
+const MAX_RUNNER_PACKAGE_TREE_BYTES: u64 = 4 * 1024 * 1024;
 
 fn collect_windows_path_observations(
     config: &WindowsPassiveWorkerConfig,
@@ -1248,6 +1261,651 @@ fn collect_windows_package_observations(
     collection
 }
 
+/// Enumerates globally installed npm packages and uv tools without launching a
+/// package.  The resulting package ID is classification metadata only: it is
+/// intentionally not an executable identity and cannot authorize ACP verify.
+fn collect_windows_runner_installations(
+    config: &WindowsPassiveWorkerConfig,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    max_observations: usize,
+) -> WindowsProviderCollection {
+    let mut collection = WindowsProviderCollection::default();
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return collection;
+    }
+
+    collect_npm_runner_installations(
+        config.path_env.as_deref(),
+        deadline,
+        cancelled,
+        max_observations,
+        &mut collection,
+    );
+    if collection.observations.len() >= max_observations
+        || cancelled.load(Ordering::Acquire)
+        || Instant::now() >= deadline
+    {
+        return collection;
+    }
+    collect_uvx_runner_installations(
+        config.path_env.as_deref(),
+        deadline,
+        cancelled,
+        max_observations,
+        &mut collection,
+    );
+    collection
+}
+
+fn collect_npm_runner_installations(
+    path_env: Option<&str>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    max_observations: usize,
+    collection: &mut WindowsProviderCollection,
+) {
+    let Some(runner) = find_runner_executable(path_env, "npx") else {
+        return;
+    };
+    let fingerprint = match stable_file_fingerprint_with_deadline(&runner, deadline, cancelled) {
+        Ok(fingerprint) => fingerprint,
+        Err(code) => {
+            collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+            return;
+        }
+    };
+    let output = match run_readonly_runner_command(
+        "npm",
+        &["ls", "-g", "--depth=0", "--json", "--offline"],
+        deadline,
+        cancelled,
+    ) {
+        Ok(output) => output,
+        Err(code) => {
+            collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+            return;
+        }
+    };
+    let records = match parse_npm_global_list(&output) {
+        Ok(records) => records,
+        Err(code) => {
+            collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+            return;
+        }
+    };
+    for record in records.into_iter().take(MAX_RUNNER_INSTALLATIONS) {
+        if collection.observations.len() >= max_observations
+            || cancelled.load(Ordering::Acquire)
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+        match runner_installation_observation(
+            "npx",
+            &runner,
+            &fingerprint,
+            record,
+            deadline,
+            cancelled,
+        ) {
+            Ok(observation) => {
+                let _ = collection.push_observation(observation, max_observations);
+            }
+            Err(code) => {
+                collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code)
+            }
+        }
+    }
+}
+
+fn collect_uvx_runner_installations(
+    path_env: Option<&str>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    max_observations: usize,
+    collection: &mut WindowsProviderCollection,
+) {
+    let Some(runner) = find_runner_executable(path_env, "uvx") else {
+        return;
+    };
+    let fingerprint = match stable_file_fingerprint_with_deadline(&runner, deadline, cancelled) {
+        Ok(fingerprint) => fingerprint,
+        Err(code) => {
+            collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+            return;
+        }
+    };
+    let output = match run_readonly_runner_command(
+        "uv",
+        &["--offline", "tool", "list"],
+        deadline,
+        cancelled,
+    ) {
+        Ok(output) => output,
+        Err(code) => {
+            collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+            return;
+        }
+    };
+    let install_root =
+        match run_readonly_runner_command("uv", &["--offline", "tool", "dir"], deadline, cancelled)
+        {
+            Ok(root) => match parse_runner_install_root(&root) {
+                Some(root) => root,
+                None => {
+                    collection.push_diagnostic(
+                        ObservationSourceKind::ExecutableInventory,
+                        DiscoveryDiagnosticCode::InvalidSourceRecord,
+                    );
+                    return;
+                }
+            },
+            Err(code) => {
+                collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+                return;
+            }
+        };
+    for (name, version) in parse_uv_tool_list(&output)
+        .into_iter()
+        .take(MAX_RUNNER_INSTALLATIONS)
+    {
+        if collection.observations.len() >= max_observations
+            || cancelled.load(Ordering::Acquire)
+            || Instant::now() >= deadline
+        {
+            break;
+        }
+        let record = RunnerPackageRecord {
+            package_name: name,
+            resolved_version: version,
+            install_root: install_root.clone(),
+            package_integrity: None,
+        };
+        match runner_installation_observation(
+            "uvx",
+            &runner,
+            &fingerprint,
+            record,
+            deadline,
+            cancelled,
+        ) {
+            Ok(observation) => {
+                let _ = collection.push_observation(observation, max_observations);
+            }
+            Err(code) => {
+                collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RunnerPackageRecord {
+    package_name: String,
+    resolved_version: String,
+    install_root: PathBuf,
+    package_integrity: Option<String>,
+}
+
+fn runner_installation_observation(
+    runner_kind: &str,
+    runner: &Path,
+    runner_fingerprint: &StableFileFingerprint,
+    record: RunnerPackageRecord,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Observation, DiscoveryDiagnosticCode> {
+    let package_id =
+        canonical_runner_package_id(runner_kind, &record.package_name, &record.resolved_version)
+            .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+    let package_directory =
+        runner_package_directory(runner_kind, &record.install_root, &record.package_name)
+            .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+    let package_tree_digest = bounded_package_tree_digest(&package_directory, deadline, cancelled)?;
+    let runner_identity =
+        windows_executable_identity_fingerprint(&runner_fingerprint.stable_identity);
+    let fingerprint = ObservationFingerprint::from_parts(&[
+        "runner-installation".into(),
+        runner_kind.into(),
+        runner_fingerprint.stable_identity.clone(),
+        runner_fingerprint.content_sha256.clone(),
+        package_tree_digest.clone(),
+    ]);
+    Ok(Observation {
+        locator: ObservationLocator::Executable(runner.to_path_buf()),
+        fingerprint,
+        association_fingerprints: vec![runner_identity],
+        package_ids: vec![package_id],
+        runner_installation: Some(RunnerInstallationMetadata {
+            runner_kind: runner_kind.into(),
+            package_name: record.package_name.clone(),
+            resolved_version: record.resolved_version.clone(),
+            install_root: record.install_root,
+            package_integrity: record.package_integrity,
+            package_tree_digest,
+            runner_executable_identity: runner_fingerprint.stable_identity.clone(),
+            runner_executable_sha256: runner_fingerprint.content_sha256.clone(),
+        }),
+        source_kind: ObservationSourceKind::ExecutableInventory,
+        category: CandidateCategory::AgentRuntime,
+        trust_level: ObservationTrustLevel::Heuristic,
+        verification_authority: VerificationAuthority::Unverified,
+        availability_authority: VerificationAuthority::Unverified,
+        discovery_authority: VerificationAuthority::Unverified,
+        compatibility_authority: VerificationAuthority::Unverified,
+        auth_authority: VerificationAuthority::Unverified,
+        health_authority: VerificationAuthority::Unverified,
+        connector_id: LOCAL_DISCOVERY_UNKNOWN_CONNECTOR_ID.into(),
+        runtime_type: LOCAL_DISCOVERY_UNKNOWN_RUNTIME_TYPE.into(),
+        display_name: format!(
+            "{runner_kind} {}@{}",
+            record.package_name, record.resolved_version
+        ),
+        availability: CandidateAvailability::Unconfigured,
+        models: Vec::new(),
+        catalog_revision: None,
+        requires_configuration: true,
+        discovery_state: DiscoveryState::Observed,
+        compatibility_state: CompatibilityState::NotVerified,
+        auth_state: AuthState::Unknown,
+        health_state: HealthState::NotChecked,
+        evidence_summary: vec![
+            DiscoveryEvidence::ExecutableInventory,
+            DiscoveryEvidence::InstallKnown,
+        ],
+        diagnostics: Vec::new(),
+    })
+}
+
+fn find_runner_executable(path_env: Option<&str>, runner: &str) -> Option<PathBuf> {
+    let path_env = path_env?;
+    let names: &[&str] = if cfg!(windows) {
+        &["{runner}.exe", "{runner}.cmd", "{runner}.bat"]
+    } else {
+        &[runner]
+    };
+    for directory in std::env::split_paths(path_env).take(256) {
+        if !directory.is_absolute() || has_reparse_point(&directory) {
+            continue;
+        }
+        for name in names {
+            let name = name.replace("{runner}", runner);
+            let path = directory.join(name);
+            if has_reparse_point(&path) || !is_real_regular_file(&path) {
+                continue;
+            }
+            if let Ok(canonical) = path.canonicalize() {
+                if !has_reparse_point(&canonical) && is_real_regular_file(&canonical) {
+                    return Some(canonical);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_npm_global_list(
+    bytes: &[u8],
+) -> Result<Vec<RunnerPackageRecord>, DiscoveryDiagnosticCode> {
+    #[derive(Deserialize)]
+    struct NpmDependency {
+        version: Option<String>,
+        integrity: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct NpmList {
+        path: Option<String>,
+        dependencies: Option<BTreeMap<String, NpmDependency>>,
+    }
+
+    let parsed: NpmList =
+        serde_json::from_slice(bytes).map_err(|_| DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+    let install_root = parsed
+        .path
+        .and_then(|path| bounded_absolute_path(&path))
+        .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+    let mut records = Vec::new();
+    for (package_name, dependency) in parsed.dependencies.unwrap_or_default() {
+        let Some(version) = dependency.version else {
+            continue;
+        };
+        if canonical_runner_package_id("npx", &package_name, &version).is_none() {
+            continue;
+        }
+        let integrity = dependency
+            .integrity
+            .filter(|value| safe_runner_text(value, 512));
+        records.push(RunnerPackageRecord {
+            package_name,
+            resolved_version: version,
+            install_root: install_root.clone(),
+            package_integrity: integrity,
+        });
+    }
+    Ok(records)
+}
+
+fn parse_uv_tool_list(bytes: &[u8]) -> Vec<(String, String)> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    let mut tools = BTreeSet::new();
+    for line in text.lines().take(MAX_RUNNER_INSTALLATIONS * 2) {
+        let mut parts = line.split_ascii_whitespace();
+        let Some(name) = parts.next() else { continue };
+        let Some(version) = parts.next() else {
+            continue;
+        };
+        let version = version.strip_prefix('v').unwrap_or(version);
+        if parts.next().is_some() || canonical_runner_package_id("uvx", name, version).is_none() {
+            continue;
+        }
+        tools.insert((name.to_ascii_lowercase(), version.to_owned()));
+    }
+    tools.into_iter().collect()
+}
+
+fn parse_runner_install_root(bytes: &[u8]) -> Option<PathBuf> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    bounded_absolute_path(text)
+}
+
+fn bounded_absolute_path(value: &str) -> Option<PathBuf> {
+    safe_runner_text(value, 1024)
+        .then(|| PathBuf::from(value))
+        .filter(|path| path.is_absolute())
+}
+
+fn canonical_runner_package_id(runner_kind: &str, name: &str, version: &str) -> Option<String> {
+    let valid_name = match runner_kind {
+        "npx" => valid_npm_runner_package_name(name),
+        "uvx" => valid_uvx_runner_package_name(name),
+        _ => false,
+    };
+    (valid_name && valid_runner_version(version))
+        .then(|| format!("{}@{}", name.to_ascii_lowercase(), version))
+}
+
+fn valid_npm_runner_package_name(value: &str) -> bool {
+    let name = value.strip_prefix('@').unwrap_or(value);
+    let mut parts = name.split('/');
+    let first = parts.next();
+    let second = parts.next();
+    parts.next().is_none()
+        && match (value.starts_with('@'), first, second) {
+            (true, Some(scope), Some(package)) => {
+                valid_runner_name_part(scope) && valid_runner_name_part(package)
+            }
+            (false, Some(package), None) => valid_runner_name_part(package),
+            _ => false,
+        }
+}
+
+fn valid_uvx_runner_package_name(value: &str) -> bool {
+    !value.contains('/') && valid_runner_name_part(value)
+}
+
+fn valid_runner_name_part(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
+fn valid_runner_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+}
+
+fn safe_runner_text(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && !value.chars().any(|ch| {
+            ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+}
+
+fn runner_package_directory(
+    runner_kind: &str,
+    install_root: &Path,
+    package_name: &str,
+) -> Option<PathBuf> {
+    let root = install_root.canonicalize().ok()?;
+    if has_reparse_point(&root)
+        || !valid_npm_runner_package_name(package_name)
+            && !valid_uvx_runner_package_name(package_name)
+    {
+        return None;
+    }
+    let base = if runner_kind == "npx" {
+        root.join("node_modules")
+    } else {
+        root.clone()
+    };
+    let candidate = package_name
+        .split('/')
+        .fold(base, |path, part| path.join(part));
+    if has_reparse_point(&candidate) {
+        return None;
+    }
+    let canonical = candidate.canonicalize().ok()?;
+    (canonical.starts_with(&root) && canonical.is_dir() && !has_reparse_point(&canonical))
+        .then_some(canonical)
+}
+
+fn bounded_package_tree_digest(
+    package_directory: &Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<String, DiscoveryDiagnosticCode> {
+    let root = package_directory
+        .canonicalize()
+        .map_err(|error| io_diagnostic_code(&error))?;
+    if has_reparse_point(&root) {
+        return Err(DiscoveryDiagnosticCode::ReparsePointRejected);
+    }
+    let mut pending = vec![root.clone()];
+    let mut files = Vec::new();
+    let mut total_bytes = 0u64;
+    while let Some(directory) = pending.pop() {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(DiscoveryDiagnosticCode::ProviderTimeout);
+        }
+        let mut entries = fs::read_dir(&directory)
+            .map_err(|error| io_diagnostic_code(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| io_diagnostic_code(&error))?;
+        entries.sort_by_key(|entry| normalized_path_key(&entry.path()));
+        for entry in entries {
+            let path = entry.path();
+            if has_reparse_point(&path) {
+                return Err(DiscoveryDiagnosticCode::ReparsePointRejected);
+            }
+            let metadata = entry
+                .metadata()
+                .map_err(|error| io_diagnostic_code(&error))?;
+            if metadata.is_dir() {
+                let canonical = path
+                    .canonicalize()
+                    .map_err(|error| io_diagnostic_code(&error))?;
+                if !canonical.starts_with(&root) {
+                    return Err(DiscoveryDiagnosticCode::InvalidSourceRecord);
+                }
+                pending.push(canonical);
+            } else if metadata.is_file() {
+                total_bytes = total_bytes.saturating_add(metadata.len());
+                if files.len() >= MAX_RUNNER_PACKAGE_TREE_FILES
+                    || total_bytes > MAX_RUNNER_PACKAGE_TREE_BYTES
+                {
+                    return Err(DiscoveryDiagnosticCode::OversizedInput);
+                }
+                let canonical = path
+                    .canonicalize()
+                    .map_err(|error| io_diagnostic_code(&error))?;
+                if !canonical.starts_with(&root) {
+                    return Err(DiscoveryDiagnosticCode::InvalidSourceRecord);
+                }
+                files.push((canonical, metadata.len()));
+            }
+        }
+    }
+    files.sort_by_key(|left| normalized_path_key(&left.0));
+    let mut hasher = Sha256::new();
+    hasher.update(b"agenttalk-runner-package-tree-v1");
+    for (path, len) in files {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(DiscoveryDiagnosticCode::ProviderTimeout);
+        }
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+        hasher.update(normalized_relative_identity(relative)?.as_bytes());
+        hasher.update([0]);
+        hasher.update(len.to_le_bytes());
+        let mut file = fs::File::open(&path).map_err(|error| io_diagnostic_code(&error))?;
+        let mut remaining = len;
+        let mut buffer = [0u8; 8192];
+        while remaining > 0 {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err(DiscoveryDiagnosticCode::ProviderTimeout);
+            }
+            let to_read = remaining.min(buffer.len() as u64) as usize;
+            let read = file
+                .read(&mut buffer[..to_read])
+                .map_err(|_| DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+            if read == 0 {
+                return Err(DiscoveryDiagnosticCode::FingerprintChanged);
+            }
+            hasher.update(&buffer[..read]);
+            remaining -= read as u64;
+        }
+    }
+    Ok(sha256_hex(&hasher.finalize()))
+}
+
+fn run_readonly_runner_command(
+    executable: &str,
+    args: &[&str],
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Vec<u8>, DiscoveryDiagnosticCode> {
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("npm_config_offline", "true")
+        .env("npm_config_audit", "false")
+        .env("npm_config_fund", "false")
+        .env("UV_OFFLINE", "1")
+        .env("UV_NO_PROGRESS", "1");
+    let mut child = command
+        .spawn()
+        .map_err(|_| DiscoveryDiagnosticCode::ProviderFailed)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(DiscoveryDiagnosticCode::ProviderFailed)?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(DiscoveryDiagnosticCode::ProviderFailed)?;
+    let stdout_reader =
+        thread::spawn(move || read_limited_stream(stdout, MAX_RUNNER_COMMAND_OUTPUT_BYTES));
+    let stderr_reader =
+        thread::spawn(move || read_limited_stream(stderr, MAX_RUNNER_COMMAND_OUTPUT_BYTES));
+    loop {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(DiscoveryDiagnosticCode::ProviderTimeout);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = stdout_reader
+                    .join()
+                    .map_err(|_| DiscoveryDiagnosticCode::ProviderFailed)??;
+                let _ = stderr_reader
+                    .join()
+                    .map_err(|_| DiscoveryDiagnosticCode::ProviderFailed)??;
+                return status
+                    .success()
+                    .then_some(stdout)
+                    .ok_or(DiscoveryDiagnosticCode::ProviderFailed);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(DiscoveryDiagnosticCode::ProviderFailed);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod runner_installation_tests {
+    use super::*;
+
+    #[test]
+    fn npm_global_json_projects_version_integrity_and_root() {
+        let bytes = br#"{"path":"C:\\npm","dependencies":{"@scope/agent":{"version":"1.2.3","integrity":"sha512-abc"},"bad":{"version":"not a version"}}}"#;
+        let records = parse_npm_global_list(bytes).expect("npm list parses");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].package_name, "@scope/agent");
+        assert_eq!(records[0].resolved_version, "1.2.3");
+        assert_eq!(records[0].package_integrity.as_deref(), Some("sha512-abc"));
+    }
+
+    #[test]
+    fn uv_tool_list_projects_only_safe_name_version_pairs() {
+        let records = parse_uv_tool_list(b"agent 1.2.3\ninvalid/name 1.0.0\nother v2.0.0\n");
+        assert_eq!(
+            records,
+            vec![
+                ("agent".into(), "1.2.3".into()),
+                ("other".into(), "2.0.0".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn package_id_is_match_key_and_not_identity_authority() {
+        assert_eq!(
+            canonical_runner_package_id("npx", "@scope/agent", "1.2.3").as_deref(),
+            Some("@scope/agent@1.2.3")
+        );
+        assert_eq!(
+            canonical_runner_package_id("uvx", "agent", "1.2.3").as_deref(),
+            Some("agent@1.2.3")
+        );
+    }
+}
+
+fn read_limited_stream<R: Read>(
+    reader: R,
+    max_bytes: usize,
+) -> Result<Vec<u8>, DiscoveryDiagnosticCode> {
+    let mut bytes = Vec::new();
+    reader
+        .take((max_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DiscoveryDiagnosticCode::ProviderFailed)?;
+    (bytes.len() <= max_bytes)
+        .then_some(bytes)
+        .ok_or(DiscoveryDiagnosticCode::OversizedInput)
+}
+
 fn collect_windows_loopback_observations(
     config: &WindowsPassiveWorkerConfig,
     deadline: Instant,
@@ -1403,6 +2061,8 @@ fn unknown_executable_observation(
         locator: ObservationLocator::Executable(canonical),
         fingerprint: executable_identity.clone(),
         association_fingerprints: vec![executable_identity],
+        package_ids: Vec::new(),
+        runner_installation: None,
         source_kind,
         category: CandidateCategory::Unknown,
         trust_level,
@@ -1438,6 +2098,8 @@ fn unknown_endpoint_observation(endpoint_ref: &str) -> Observation {
             endpoint_ref.to_owned(),
         ]),
         association_fingerprints: Vec::new(),
+        package_ids: Vec::new(),
+        runner_installation: None,
         source_kind: ObservationSourceKind::UserSelected,
         category: CandidateCategory::Unknown,
         trust_level: ObservationTrustLevel::UserSelected,
@@ -2511,6 +3173,8 @@ fn codex_observation(deadline: Instant, cancelled: &AtomicBool, binary: &Path) -
             file_identity,
         ]),
         association_fingerprints: Vec::new(),
+        package_ids: Vec::new(),
+        runner_installation: None,
         source_kind: ObservationSourceKind::ExecutableInventory,
         category: CandidateCategory::AgentRuntime,
         trust_level: ObservationTrustLevel::Heuristic,
@@ -2566,6 +3230,8 @@ fn kun_observation(
             },
             fingerprint: kun_fingerprint(&record),
             association_fingerprints: Vec::new(),
+            package_ids: Vec::new(),
+            runner_installation: None,
             source_kind: ObservationSourceKind::RuntimeRecord,
             category: CandidateCategory::AgentRuntime,
             trust_level,
@@ -2644,6 +3310,8 @@ fn kun_observation(
             },
             fingerprint: kun_fingerprint(&record),
             association_fingerprints: Vec::new(),
+            package_ids: Vec::new(),
+            runner_installation: None,
             source_kind: ObservationSourceKind::RuntimeRecord,
             category: CandidateCategory::AgentRuntime,
             trust_level: ObservationTrustLevel::FirstParty,

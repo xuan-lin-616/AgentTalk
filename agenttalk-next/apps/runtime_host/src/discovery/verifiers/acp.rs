@@ -125,6 +125,7 @@ pub struct AcpPassiveObservation {
     executable_identity: String,
     executable_sha256: String,
     source_kind: ObservationSourceKind,
+    package_ids: Vec<String>,
 }
 
 impl std::fmt::Debug for AcpPassiveObservation {
@@ -162,6 +163,7 @@ impl AcpPassiveObservation {
             executable_identity: fingerprint.stable_identity,
             executable_sha256: fingerprint.content_sha256,
             source_kind: observation.source_kind,
+            package_ids: observation.package_ids.clone(),
         })
     }
 
@@ -182,6 +184,7 @@ impl AcpPassiveObservation {
             executable_identity: fingerprint.stable_identity,
             executable_sha256: fingerprint.content_sha256,
             source_kind,
+            package_ids: Vec::new(),
         })
     }
 }
@@ -369,7 +372,7 @@ pub fn classify(
     let projection = crate::match_manifest_passively(
         &ManifestMatchInput {
             executable_name,
-            package_ids: Vec::new(),
+            package_ids: observation.package_ids.clone(),
             registry_ids: Vec::new(),
             executable_sha256: Some(observation.executable_sha256.clone()),
             publisher_subject: None,

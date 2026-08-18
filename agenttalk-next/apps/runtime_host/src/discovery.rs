@@ -92,6 +92,10 @@ pub(crate) struct Observation {
     pub(crate) fingerprint: ObservationFingerprint,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) association_fingerprints: Vec<ObservationFingerprint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) package_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runner_installation: Option<RunnerInstallationMetadata>,
     pub(crate) source_kind: ObservationSourceKind,
     pub(crate) category: CandidateCategory,
     pub(crate) trust_level: ObservationTrustLevel,
@@ -114,6 +118,19 @@ pub(crate) struct Observation {
     pub(crate) health_state: HealthState,
     pub(crate) evidence_summary: Vec<DiscoveryEvidence>,
     pub(crate) diagnostics: Vec<DiscoveryDiagnostic>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RunnerInstallationMetadata {
+    pub(crate) runner_kind: String,
+    pub(crate) package_name: String,
+    pub(crate) resolved_version: String,
+    pub(crate) install_root: PathBuf,
+    pub(crate) package_integrity: Option<String>,
+    pub(crate) package_tree_digest: String,
+    pub(crate) runner_executable_identity: String,
+    pub(crate) runner_executable_sha256: String,
 }
 
 impl Observation {
@@ -1523,6 +1540,7 @@ pub(crate) enum ManagedProviderWorkerKind {
     WindowsPackages,
     WindowsLoopbackListeners,
     ExplicitSources,
+    WindowsRunnerInstallations,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -3088,6 +3106,8 @@ mod tests {
             locator: context.locator,
             fingerprint: ObservationFingerprint::from_parts(&context.stable_key),
             association_fingerprints: Vec::new(),
+            package_ids: Vec::new(),
+            runner_installation: None,
             source_kind: if context
                 .evidence_summary
                 .contains(&DiscoveryEvidence::RuntimeRecord)

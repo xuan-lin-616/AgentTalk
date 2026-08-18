@@ -566,7 +566,10 @@ fn validate_package_id(value: &str) -> Result<(), ManifestValidationError> {
         && value.len() <= 180
         && value
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'));
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '@' | '/'))
+        && !looks_like_path_or_uri(value)
+        && !value.contains("..")
+        && value.matches('@').count() >= 1;
     if valid {
         Ok(())
     } else {

@@ -834,6 +834,7 @@ fn convert_registry_agent(
         .or(uvx)
         .ok_or_else(|| CatalogError::new(CatalogErrorCode::PlatformMismatch))?;
     let manifest_id = normalize_registry_id(&agent.id)?;
+    let package_ids = registry_runner_package_ids(&launch);
     let manifest = AdapterManifest {
         schema_version: "agenttalk.adapter.v1".into(),
         id: manifest_id.clone(),
@@ -847,7 +848,7 @@ fn convert_registry_agent(
             executable_names: registry_executable_names(&launch),
             publisher_subjects: Vec::new(),
             registry_ids: vec![manifest_id.clone()],
-            package_ids: Vec::new(),
+            package_ids,
             sha256: None,
         },
         launch,
@@ -879,6 +880,38 @@ fn convert_registry_agent(
         launch_kind,
         source_revision: source_revision.to_owned(),
     })
+}
+
+/// Package IDs are passive correlation keys.  They deliberately preserve the
+/// runner package's pinned version but never act as executable identity.
+fn registry_runner_package_ids(launch: &ManifestLaunch) -> Vec<String> {
+    let package = match launch {
+        ManifestLaunch::Npx { package, .. } => npx_package_match_id(package),
+        ManifestLaunch::Uvx { package, .. } => uvx_package_match_id(package),
+        ManifestLaunch::Direct { .. } => None,
+    };
+    package.into_iter().collect()
+}
+
+fn npx_package_match_id(package: &str) -> Option<String> {
+    let (name, version) = split_npx_package_version(package)?;
+    Some(format!("{}@{}", name.to_ascii_lowercase(), version))
+}
+
+fn uvx_package_match_id(package: &str) -> Option<String> {
+    if let Some((name, version)) = package.split_once("==") {
+        return Some(format!("{}@{}", name.to_ascii_lowercase(), version));
+    }
+    npx_package_match_id(package)
+}
+
+fn split_npx_package_version(package: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = package.strip_prefix('@') {
+        let slash = rest.find('/')? + 1;
+        let version_offset = package[slash..].rfind('@')? + slash;
+        return Some((&package[..version_offset], &package[version_offset + 1..]));
+    }
+    package.rsplit_once('@')
 }
 
 fn registry_binary_launch(dist: AcpBinaryDistribution) -> Result<ManifestLaunch, CatalogError> {
@@ -2210,6 +2243,10 @@ mod tests {
             }
             _ => panic!("npx launch"),
         }
+        assert_eq!(
+            converted.manifest.match_rules.package_ids,
+            vec!["agoragentic-mcp@1.3.0"]
+        );
     }
 
     #[test]
