@@ -35,7 +35,7 @@ abstract final class StudioColors {
   // Text hierarchy
   static const Color textPrimary = Color(0xFFF3F4F6);
   static const Color textSecondary = Color(0xFF9CA3AF);
-  static const Color textTertiary = Color(0xFF4B5563);
+  static const Color textTertiary = Color(0xFF8A93A5);
 
   static const Color transparent = Color(0x00000000);
 }
@@ -116,11 +116,71 @@ final ColorScheme studioLightColorScheme =
 
 /// Shared component theme for the studio shell.
 ThemeData buildStudioTheme(ColorScheme scheme) {
+  final baseTextTheme = scheme.brightness == Brightness.dark
+      ? ThemeData.dark().textTheme
+      : ThemeData.light().textTheme;
+  final textTheme = baseTextTheme
+      .apply(
+        bodyColor: scheme.onSurface,
+        displayColor: scheme.onSurface,
+        fontFamily: 'Microsoft YaHei',
+      )
+      .copyWith(
+        headlineSmall: baseTextTheme.headlineSmall?.copyWith(
+          fontSize: 20,
+          fontWeight: FontWeight.w700,
+          color: scheme.onSurface,
+        ),
+        titleLarge: baseTextTheme.titleLarge?.copyWith(
+          fontSize: 17,
+          fontWeight: FontWeight.w700,
+          color: scheme.onSurface,
+        ),
+        titleMedium: baseTextTheme.titleMedium?.copyWith(
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+          color: scheme.onSurface,
+        ),
+        titleSmall: baseTextTheme.titleSmall?.copyWith(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: scheme.onSurface,
+        ),
+        bodyLarge: baseTextTheme.bodyLarge?.copyWith(
+          fontSize: 14,
+          height: 1.45,
+          color: scheme.onSurface,
+        ),
+        bodyMedium: baseTextTheme.bodyMedium?.copyWith(
+          fontSize: 12.5,
+          height: 1.45,
+          color: scheme.onSurface,
+        ),
+        bodySmall: baseTextTheme.bodySmall?.copyWith(
+          fontSize: 11,
+          height: 1.4,
+          color: scheme.onSurfaceVariant,
+        ),
+        labelLarge: baseTextTheme.labelLarge?.copyWith(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        ),
+        labelMedium: baseTextTheme.labelMedium?.copyWith(
+          fontSize: 11,
+          color: scheme.onSurfaceVariant,
+        ),
+        labelSmall: baseTextTheme.labelSmall?.copyWith(
+          fontSize: 10,
+          color: scheme.onSurfaceVariant,
+        ),
+      );
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
-    fontFamily: 'Segoe UI',
-    fontFamilyFallback: const ['Microsoft YaHei', 'Segoe UI', 'sans-serif'],
+    textTheme: textTheme,
+    fontFamily: 'Microsoft YaHei',
+    fontFamilyFallback: const ['Segoe UI', 'PingFang SC', 'sans-serif'],
     scaffoldBackgroundColor: scheme.brightness == Brightness.dark
         ? StudioColors.bgRoot
         : scheme.surface,

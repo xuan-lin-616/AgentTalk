@@ -21,10 +21,10 @@ class LeftNavigationRail extends StatelessWidget {
     (icon: Icons.dashboard_outlined, label: '工作台'),
     (icon: Icons.smart_toy_outlined, label: '智能体管理'),
     (icon: Icons.assignment_outlined, label: '任务管理'),
-    (icon: Icons.folder_open_rounded, label: '知识库'),
+    (icon: Icons.folder_open_outlined, label: '知识库'),
     (icon: Icons.build_outlined, label: '工具管理'),
     (icon: Icons.chat_bubble_outline_rounded, label: '对话中心'),
-    (icon: Icons.list_alt_rounded, label: '日志中心'),
+    (icon: Icons.list_alt_outlined, label: '日志中心'),
     (icon: Icons.settings_outlined, label: '设置'),
   ];
 
@@ -117,7 +117,7 @@ class SystemResourcePlaceholder extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 16),
       decoration: const BoxDecoration(
         border: Border(top: BorderSide(color: StudioColors.borderSubtle)),
       ),
@@ -136,7 +136,7 @@ class SystemResourcePlaceholder extends StatelessWidget {
                 ),
               ),
               Icon(
-                Icons.tune_rounded,
+                Icons.tune_outlined,
                 size: 12,
                 color: StudioColors.textTertiary,
               ),
@@ -144,7 +144,7 @@ class SystemResourcePlaceholder extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           const _MetricRow(
-            icon: Icons.memory_rounded,
+            icon: Icons.memory_outlined,
             label: 'CPU',
             value: '--', // TODO(接真实X): Core 无进程监控能力
           ),
@@ -154,7 +154,7 @@ class SystemResourcePlaceholder extends StatelessWidget {
             value: '--', // TODO(接真实X): Core 无进程监控能力
           ),
           const _MetricRow(
-            icon: Icons.developer_board_rounded,
+            icon: Icons.developer_board_outlined,
             label: 'GPU',
             value: '--', // TODO(接真实X): Core 无进程监控能力
           ),

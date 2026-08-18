@@ -7,10 +7,7 @@ import 'orchestration_run_projection.dart';
 /// milestones. Every row comes from `orchestration.run.snapshot`; this widget
 /// performs no IPC and renders no synthetic records.
 class OrchestrationInspectorPanel extends StatelessWidget {
-  const OrchestrationInspectorPanel({
-    super.key,
-    required this.projection,
-  });
+  const OrchestrationInspectorPanel({super.key, required this.projection});
 
   final OrchestrationRunProjection projection;
 
@@ -230,11 +227,7 @@ class _SectionHeader extends StatelessWidget {
 }
 
 class _DigestTile extends StatelessWidget {
-  const _DigestTile({
-    required this.title,
-    required this.subtitle,
-    this.digest,
-  });
+  const _DigestTile({required this.title, required this.subtitle, this.digest});
 
   final String title;
   final String subtitle;
@@ -253,17 +246,11 @@ class _DigestTile extends StatelessWidget {
       ),
       title: Text(
         title,
-        style: const TextStyle(
-          color: StudioColors.textPrimary,
-          fontSize: 12,
-        ),
+        style: const TextStyle(color: StudioColors.textPrimary, fontSize: 12),
       ),
       subtitle: Text(
         '$subtitle · digest $digestText',
-        style: const TextStyle(
-          color: StudioColors.textTertiary,
-          fontSize: 10,
-        ),
+        style: const TextStyle(color: StudioColors.textTertiary, fontSize: 10),
       ),
     );
   }

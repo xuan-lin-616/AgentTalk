@@ -100,7 +100,7 @@ class _EmptyLogState extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            Icons.list_alt_rounded,
+            Icons.list_alt_outlined,
             size: 34,
             color: StudioColors.textTertiary,
           ),

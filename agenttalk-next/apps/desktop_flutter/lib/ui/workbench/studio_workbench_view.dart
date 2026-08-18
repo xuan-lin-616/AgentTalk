@@ -116,7 +116,7 @@ class StudioLogPlaceholder extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(
-            Icons.list_alt_rounded,
+            Icons.list_alt_outlined,
             size: 34,
             color: StudioColors.textTertiary,
           ),
@@ -188,7 +188,7 @@ class StudioSectionPlaceholder extends StatelessWidget {
             const SizedBox(height: 14),
             OutlinedButton.icon(
               onPressed: onAction,
-              icon: const Icon(Icons.arrow_forward, size: 16),
+              icon: const Icon(Icons.arrow_forward_outlined, size: 16),
               label: Text(actionLabel!),
             ),
           ],

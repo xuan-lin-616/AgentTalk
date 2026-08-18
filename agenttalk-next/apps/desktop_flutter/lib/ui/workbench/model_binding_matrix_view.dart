@@ -163,9 +163,7 @@ class _ModelBindingMatrixViewState extends State<ModelBindingMatrixView> {
               child: ListTile(
                 dense: true,
                 leading: Icon(
-                  option.isDefault
-                      ? Icons.star_outlined
-                      : Icons.tune_outlined,
+                  option.isDefault ? Icons.star_outlined : Icons.tune_outlined,
                   size: 18,
                   color: option.isDefault
                       ? StudioColors.warning
@@ -204,7 +202,11 @@ class _MatrixHeader extends StatelessWidget {
       padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       child: Row(
         children: [
-          Icon(Icons.table_chart_outlined, size: 18, color: StudioColors.primaryHover),
+          Icon(
+            Icons.table_chart_outlined,
+            size: 18,
+            color: StudioColors.primaryHover,
+          ),
           SizedBox(width: 8),
           Text(
             '模型绑定矩阵',

@@ -12,6 +12,7 @@ import 'ipc/protocol_v1.dart';
 import 'platform/app_lifecycle.dart';
 import 'platform/folder_picker.dart';
 import 'platform/windows_runtime.dart';
+import 'platform/windows_title_bar.dart';
 import 'ui/agent_identity_dialog.dart';
 import 'ui/conversation_agent_assignment_panel.dart';
 import 'ui/context_inspector_drawer.dart';
@@ -53,6 +54,7 @@ Future<void> main() async {
     },
   );
   runApp(AgentTalkDesktopApp(shellKey: _workspaceShellKey));
+  await applyDarkWindowsTitleBar();
 }
 
 class AgentTalkDesktopApp extends StatefulWidget {
@@ -1074,7 +1076,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                     Navigator.of(dialogContext).pop();
                     await _showCreateProject();
                   },
-                  icon: const Icon(Icons.add),
+                  icon: const Icon(Icons.add_outlined),
                   label: const Text('新建项目'),
                 ),
               ),
@@ -1280,7 +1282,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                           Navigator.of(dialogContext).pop();
                           await _showCreateConversation();
                         },
-                  icon: const Icon(Icons.add),
+                  icon: const Icon(Icons.add_outlined),
                   label: const Text('新建会话'),
                 ),
               ),
@@ -2364,7 +2366,6 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         height: 420,
         child: _AgentProjection(
           snapshot: _snapshot,
-          status: _projectionStatus,
           projectId: _activeProjectId,
           onAdd: () => unawaited(_showCreateAgent()),
           onEdit: (agent) => unawaited(_showEditAgent(agent)),
@@ -3291,7 +3292,6 @@ class WorkspaceShellState extends State<WorkspaceShell> {
       case 1:
         return _AgentProjection(
           snapshot: _snapshot,
-          status: _projectionStatus,
           projectId: _activeProjectId,
           onAdd: () => unawaited(_showCreateAgent()),
           onEdit: (agent) => unawaited(_showEditAgent(agent)),
@@ -3340,7 +3340,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         );
       case 3:
         return StudioSectionPlaceholder(
-          icon: Icons.folder_open_rounded,
+          icon: Icons.folder_open_outlined,
           title: '知识库',
           subtitle: '上下文清单、记忆与检索来源将在此集中展示',
           actionLabel: '打开上下文检查器',
@@ -3399,14 +3399,14 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                     onPressed: _orchestrationLoading
                         ? null
                         : _pickOrchestrationRun,
-                    icon: const Icon(Icons.folder_open, size: 16),
+                    icon: const Icon(Icons.folder_open_outlined, size: 16),
                     label: const Text('读取 Run'),
                   ),
                   FilledButton.icon(
                     onPressed: _orchestrationLoading
                         ? null
                         : _showCreateOrchestrationRun,
-                    icon: const Icon(Icons.play_arrow_rounded, size: 16),
+                    icon: const Icon(Icons.play_arrow_outlined, size: 16),
                     label: const Text('运行'),
                   ),
                 ],
@@ -3449,7 +3449,6 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                       width: _rightPaneWidth,
                       child: _AgentProjection(
                         snapshot: _snapshot,
-                        status: _projectionStatus,
                         projectId: _activeProjectId,
                         onAdd: () => unawaited(_showCreateAgent()),
                         onEdit: (agent) => unawaited(_showEditAgent(agent)),
@@ -3569,7 +3568,6 @@ String _appTitle(BuildContext context) {
 class _AgentProjection extends StatelessWidget {
   const _AgentProjection({
     required this.snapshot,
-    required this.status,
     this.projectId,
     this.onAdd,
     this.onEdit,
@@ -3578,7 +3576,6 @@ class _AgentProjection extends StatelessWidget {
   });
 
   final Map<String, dynamic> snapshot;
-  final String status;
   final String? projectId;
   final VoidCallback? onAdd;
   final ValueChanged<Map<String, dynamic>>? onEdit;
@@ -3638,12 +3635,12 @@ class _AgentProjection extends StatelessWidget {
               children: [
                 FilledButton.icon(
                   onPressed: onAdd,
-                  icon: const Icon(Icons.add, size: 18),
+                  icon: const Icon(Icons.add_outlined, size: 18),
                   label: const Text('添加智能体'),
                 ),
                 OutlinedButton.icon(
                   onPressed: onManageAssignments,
-                  icon: const Icon(Icons.tune, size: 18),
+                  icon: const Icon(Icons.tune_outlined, size: 18),
                   label: const Text('管理分配'),
                 ),
               ],
@@ -3651,52 +3648,58 @@ class _AgentProjection extends StatelessWidget {
             const SizedBox(height: 14),
             Expanded(
               child: projectAgents.isEmpty
-                  ? Align(
-                      alignment: Alignment.topCenter,
-                      child: Padding(
-                        padding: const EdgeInsets.only(top: 8),
+                  ? LayoutBuilder(
+                      builder: (context, constraints) => SingleChildScrollView(
                         child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 260),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.smart_toy_outlined,
-                                size: 42,
-                                color: cs.onSurfaceVariant,
-                              ),
-                              const SizedBox(height: 10),
-                              Text(
-                                emptyTitle,
-                                style: theme.textTheme.titleSmall?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                emptySubtitle,
-                                style: theme.textTheme.bodySmall?.copyWith(
+                          constraints: BoxConstraints(
+                            minHeight: constraints.maxHeight,
+                            maxWidth: 260,
+                          ),
+                          child: Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.smart_toy_outlined,
+                                  size: 42,
                                   color: cs.onSurfaceVariant,
                                 ),
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 14),
-                              FilledButton.icon(
-                                onPressed: onAdd,
-                                icon: const Icon(Icons.add, size: 18),
-                                label: const Text('添加智能体'),
-                              ),
-                              const SizedBox(height: 8),
-                              OutlinedButton.icon(
-                                onPressed: onScanLocal,
-                                icon: const Icon(
-                                  Icons.radar_outlined,
-                                  size: 18,
+                                const SizedBox(height: 10),
+                                Text(
+                                  emptyTitle,
+                                  style: theme.textTheme.titleSmall?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                  textAlign: TextAlign.center,
                                 ),
-                                label: const Text('扫描本地智能体'),
-                              ),
-                            ],
+                                const SizedBox(height: 6),
+                                Text(
+                                  emptySubtitle,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: cs.onSurfaceVariant,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 14),
+                                FilledButton.icon(
+                                  onPressed: onAdd,
+                                  icon: const Icon(
+                                    Icons.add_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('添加智能体'),
+                                ),
+                                const SizedBox(height: 8),
+                                OutlinedButton.icon(
+                                  onPressed: onScanLocal,
+                                  icon: const Icon(
+                                    Icons.radar_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('扫描本地智能体'),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -3724,13 +3727,6 @@ class _AgentProjection extends StatelessWidget {
                         );
                       },
                     ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              status,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: cs.onSurfaceVariant,
-              ),
             ),
           ],
         ),
@@ -4259,10 +4255,14 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
             child: TextField(
               controller: _composer,
               minLines: 1,
-              maxLines: 5,
+              maxLines: 3,
               onSubmitted: (_) => _send(),
               decoration: InputDecoration(
                 hintText: '输入消息，使用 @ 可指定智能体...',
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
                 prefixIcon: PopupMenuButton<String>(
                   tooltip: '编写器工具',
                   onSelected: _selectComposerTool,
@@ -4298,7 +4298,7 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                                   strokeWidth: 2,
                                 ),
                               )
-                            : const Icon(Icons.send),
+                            : const Icon(Icons.send_outlined),
                       ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -4629,7 +4629,7 @@ class RunCard extends StatelessWidget {
         IconButton(
           tooltip: '重试',
           onPressed: () => onRetry!(runId),
-          icon: const Icon(Icons.refresh, size: 18),
+          icon: const Icon(Icons.refresh_outlined, size: 18),
         ),
       if (showRetry && onRerunCurrent != null)
         IconButton(
@@ -4714,7 +4714,7 @@ class _WorkflowProjection extends StatelessWidget {
               if (onCreate != null)
                 TextButton.icon(
                   onPressed: onCreate,
-                  icon: const Icon(Icons.add, size: 18),
+                  icon: const Icon(Icons.add_outlined, size: 18),
                   label: const Text('创建工作流'),
                 ),
               if (onCreateHandoff != null)

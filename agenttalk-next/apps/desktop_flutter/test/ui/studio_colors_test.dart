@@ -14,7 +14,7 @@ void main() {
     expect(StudioColors.nodeAnalyzer, const Color(0xFF8B5CF6));
     expect(StudioColors.textPrimary, const Color(0xFFF3F4F6));
     expect(StudioColors.textSecondary, const Color(0xFF9CA3AF));
-    expect(StudioColors.textTertiary, const Color(0xFF4B5563));
+    expect(StudioColors.textTertiary, const Color(0xFF8A93A5));
   });
 
   test('dark scheme maps Material surfaces onto the dark layers', () {

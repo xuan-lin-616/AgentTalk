@@ -223,7 +223,7 @@ class _CanvasToolbar extends StatelessWidget {
           if (onPickRun != null)
             TextButton.icon(
               onPressed: busy ? null : onPickRun,
-              icon: const Icon(Icons.folder_open, size: 16),
+              icon: const Icon(Icons.folder_open_outlined, size: 16),
               label: const Text('选择 Run'),
             ),
           if (onShowInspector != null)
@@ -357,7 +357,7 @@ class _FlowNodeCardState extends State<_FlowNodeCard>
                           child: const Padding(
                             padding: EdgeInsets.all(2),
                             child: Icon(
-                              Icons.refresh,
+                              Icons.refresh_outlined,
                               size: 16,
                               color: StudioColors.danger,
                             ),
@@ -460,7 +460,7 @@ class _CanvasEmptyState extends StatelessWidget {
             const SizedBox(height: 14),
             OutlinedButton.icon(
               onPressed: onAction,
-              icon: const Icon(Icons.arrow_forward, size: 16),
+              icon: const Icon(Icons.arrow_forward_outlined, size: 16),
               label: Text(actionLabel!),
             ),
           ],

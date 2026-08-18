@@ -55,7 +55,7 @@ class StudioTitleBar extends StatelessWidget {
       child: Row(
         children: [
           const Icon(
-            Icons.hub_rounded,
+            Icons.hub_outlined,
             color: StudioColors.nodeAnalyzer,
             size: 20,
           ),
@@ -79,7 +79,7 @@ class StudioTitleBar extends StatelessWidget {
                   IconButton(
                     tooltip: l10n?.project ?? '项目',
                     onPressed: onProjectPressed,
-                    icon: const Icon(Icons.folder_open, size: 18),
+                    icon: const Icon(Icons.folder_open_outlined, size: 18),
                   ),
                   IconButton(
                     tooltip: l10n?.conversation ?? '会话',
@@ -89,7 +89,7 @@ class StudioTitleBar extends StatelessWidget {
                 ] else ...[
                   Flexible(
                     child: _PickerButton(
-                      icon: Icons.folder_open,
+                      icon: Icons.folder_open_outlined,
                       label: _firstName(
                         snapshot,
                         'projects',
@@ -139,7 +139,7 @@ class StudioTitleBar extends StatelessWidget {
             IconButton(
               tooltip: l10n?.searchMessages ?? '搜索消息',
               onPressed: onSearchPressed,
-              icon: const Icon(Icons.search, size: 20),
+              icon: const Icon(Icons.search_outlined, size: 20),
             ),
           if (!compact)
             IconButton(
@@ -212,30 +212,34 @@ class _ConnectionStatusChip extends StatelessWidget {
         status.contains('已恢复') ||
         status.contains('事件订阅');
     final color = connected ? StudioColors.success : StudioColors.warning;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              connected ? '本地服务运行中' : status,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: color, fontSize: 11),
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 260),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
             ),
-          ),
-        ],
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                connected ? '本地服务运行中' : status,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                softWrap: false,
+                style: TextStyle(color: color, fontSize: 11),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
