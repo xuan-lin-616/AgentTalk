@@ -31,7 +31,9 @@ import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
 import 'ui/orchestration_panel.dart';
 import 'ui/workbench/execution_log_panel.dart';
+import 'ui/workbench/flow_canvas_view.dart';
 import 'ui/workbench/left_navigation_rail.dart';
+import 'ui/workbench/orchestration_run_projection.dart';
 import 'ui/workbench/studio_event_log.dart';
 import 'ui/workbench/studio_title_bar.dart';
 import 'ui/workbench/studio_workbench_view.dart';
@@ -171,6 +173,10 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   final List<StudioLogEntry> _eventLog = [];
   final List<StudioStreamingDelta> _streamingDeltas = [];
   final Set<String> _seenEventIds = {};
+  String? _orchestrationRunId;
+  OrchestrationRunProjection? _orchestrationProjection;
+  bool _orchestrationLoading = false;
+  String? _orchestrationError;
   static const int _maxEventLogEntries = 500;
   static const int _maxStreamingDeltas = 200;
 
@@ -2841,6 +2847,230 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     });
   }
 
+  Future<void> _pickOrchestrationRun() async {
+    if (_orchestrationLoading) return;
+    final runId = await _showOrchestrationRunPicker();
+    if (runId == null || runId.isEmpty || !mounted) return;
+    await _loadOrchestrationRun(runId);
+  }
+
+  Future<String?> _showOrchestrationRunPicker() async {
+    final controller = TextEditingController(text: _orchestrationRunId ?? '');
+    final runId = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('读取 Orchestration Run'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Run ID',
+            hintText: '输入 Core 中的 orchestration runId',
+          ),
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: const Text('读取'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return runId;
+  }
+
+  Future<void> _loadOrchestrationRun(String runId) async {
+    final client = _client;
+    final sessionId = _sessionId;
+    if (client == null || sessionId == null || runId.isEmpty) return;
+    setState(() {
+      _orchestrationLoading = true;
+      _orchestrationError = null;
+      _orchestrationRunId = runId;
+    });
+    try {
+      final payload = await client.queryOrchestrationRunSnapshot(
+        sessionId: sessionId,
+        runId: runId,
+      );
+      final projection = tryParseOrchestrationProjection(payload);
+      if (!mounted) return;
+      setState(() {
+        _orchestrationProjection = projection;
+        _orchestrationLoading = false;
+        _projectionStatus = '已读取编排 Run：$runId';
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _orchestrationLoading = false;
+        _orchestrationError = _describeCoreError(error);
+        _orchestrationProjection = null;
+      });
+    }
+  }
+
+  Future<void> _showCreateOrchestrationRun() async {
+    final client = _client;
+    final sessionId = _sessionId;
+    final projectId = _activeProjectId;
+    if (client == null || sessionId == null || projectId == null) {
+      setState(() => _projectionStatus = 'Core 或当前项目不可用，无法创建编排 Run');
+      return;
+    }
+    final runIdController = TextEditingController(
+      text: 'orchestration-run-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    final briefSnapshotIdController = TextEditingController();
+    final briefTreeDigestController = TextEditingController();
+    final dagSnapshotDigestController = TextEditingController();
+    final roleBindingSnapshotDigestController = TextEditingController();
+    final created = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('创建编排 Run'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: runIdController,
+                  decoration: const InputDecoration(labelText: 'Run ID'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: briefSnapshotIdController,
+                  decoration: const InputDecoration(
+                    labelText: 'briefSnapshotId (sha256:<hex64>)',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: briefTreeDigestController,
+                  decoration: const InputDecoration(
+                    labelText: 'briefTreeDigest (<hex64>)',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: dagSnapshotDigestController,
+                  decoration: const InputDecoration(
+                    labelText: 'dagSnapshotDigest (<hex64>)',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: roleBindingSnapshotDigestController,
+                  decoration: const InputDecoration(
+                    labelText: 'roleBindingSnapshotDigest (<hex64>)',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    if (created != true || !mounted) {
+      runIdController.dispose();
+      briefSnapshotIdController.dispose();
+      briefTreeDigestController.dispose();
+      dagSnapshotDigestController.dispose();
+      roleBindingSnapshotDigestController.dispose();
+      return;
+    }
+    final runId = runIdController.text.trim();
+    final briefSnapshotId = briefSnapshotIdController.text.trim();
+    final briefTreeDigest = briefTreeDigestController.text.trim();
+    final dagSnapshotDigest = dagSnapshotDigestController.text.trim();
+    final roleBindingSnapshotDigest = roleBindingSnapshotDigestController.text
+        .trim();
+    runIdController.dispose();
+    briefSnapshotIdController.dispose();
+    briefTreeDigestController.dispose();
+    dagSnapshotDigestController.dispose();
+    roleBindingSnapshotDigestController.dispose();
+    try {
+      await client.createOrchestrationRun(
+        sessionId: sessionId,
+        projectId: projectId,
+        runId: runId,
+        briefSnapshotId: briefSnapshotId,
+        briefTreeDigest: briefTreeDigest,
+        dagSnapshotDigest: dagSnapshotDigest,
+        roleBindingSnapshotDigest: roleBindingSnapshotDigest,
+      );
+      if (!mounted) return;
+      setState(() => _projectionStatus = '编排 Run 已创建：$runId');
+      await _loadOrchestrationRun(runId);
+    } on Object catch (error) {
+      if (!mounted) return;
+      final message = _describeCoreError(error);
+      setState(() => _projectionStatus = '创建编排 Run 被 Core 拒绝：$message');
+    }
+  }
+
+  Future<void> _cancelSelectedOrchestrationRun() async {
+    final client = _client;
+    final sessionId = _sessionId;
+    final runId = _orchestrationRunId;
+    if (client == null || sessionId == null || runId == null || runId.isEmpty) {
+      return;
+    }
+    try {
+      await client.cancelOrchestrationRun(
+        sessionId: sessionId,
+        runId: runId,
+        reason: 'cancelled_from_workbench_canvas',
+      );
+      if (!mounted) return;
+      setState(() => _projectionStatus = '编排 Run 已取消：$runId');
+      await _loadOrchestrationRun(runId);
+    } on Object catch (error) {
+      if (!mounted) return;
+      final message = _describeCoreError(error);
+      setState(() => _projectionStatus = '取消编排 Run 被 Core 拒绝：$message');
+    }
+  }
+
+  Future<void> _retryOrchestrationNode(String nodeId) async {
+    final client = _client;
+    final sessionId = _sessionId;
+    if (client == null || sessionId == null || nodeId.isEmpty) return;
+    try {
+      await client.retryOrchestrationTask(sessionId: sessionId, nodeId: nodeId);
+      if (!mounted) return;
+      setState(() => _projectionStatus = '节点重试已提交：$nodeId');
+      final runId = _orchestrationRunId;
+      if (runId != null && runId.isNotEmpty) {
+        await _loadOrchestrationRun(runId);
+      }
+    } on Object catch (error) {
+      if (!mounted) return;
+      final message = _describeCoreError(error);
+      setState(() => _projectionStatus = '节点重试被 Core 拒绝：$message');
+    }
+  }
+
   Widget _buildStudioSection() {
     switch (_activeSection) {
       case 1:
@@ -2934,11 +3164,40 @@ class WorkspaceShellState extends State<WorkspaceShell> {
             StudioWorkbenchHeader(
               sectionTitle: '工作台',
               status: _projectionStatus,
+              trailing: Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _orchestrationLoading
+                        ? null
+                        : _pickOrchestrationRun,
+                    icon: const Icon(Icons.folder_open, size: 16),
+                    label: const Text('读取 Run'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: _orchestrationLoading
+                        ? null
+                        : _showCreateOrchestrationRun,
+                    icon: const Icon(Icons.play_arrow_rounded, size: 16),
+                    label: const Text('运行'),
+                  ),
+                ],
+              ),
             ),
             Expanded(
               child: Row(
                 children: [
-                  const Expanded(child: StudioCanvasPlaceholder()),
+                  Expanded(
+                    child: FlowCanvasView(
+                      projection: _orchestrationProjection,
+                      loading: _orchestrationLoading,
+                      error: _orchestrationError,
+                      onPickRun: _pickOrchestrationRun,
+                      onRetryNode: _retryOrchestrationNode,
+                      onCancelRun: _cancelSelectedOrchestrationRun,
+                      busy: _orchestrationLoading,
+                    ),
+                  ),
                   if (_rightPaneVisible) ...[
                     _ResizeHandle(
                       onDrag: (delta) => setState(() {
@@ -2971,7 +3230,10 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Expanded(flex: 4, child: const StudioLogPlaceholder()),
+                    Expanded(
+                      flex: 4,
+                      child: ExecutionLogPanel(entries: _eventLog),
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       flex: 6,
