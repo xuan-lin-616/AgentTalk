@@ -30,7 +30,9 @@ import 'ui/retrieval_selection_dialog.dart';
 import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
 import 'ui/orchestration_panel.dart';
+import 'ui/workbench/execution_log_panel.dart';
 import 'ui/workbench/left_navigation_rail.dart';
+import 'ui/workbench/studio_event_log.dart';
 import 'ui/workbench/studio_title_bar.dart';
 import 'ui/workbench/studio_workbench_view.dart';
 
@@ -166,6 +168,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
 
   final List<EventEnvelope> _eventQueue = [];
   bool _eventQueueProcessing = false;
+  final List<StudioLogEntry> _eventLog = [];
+  final List<StudioStreamingDelta> _streamingDeltas = [];
+  final Set<String> _seenEventIds = {};
+  static const int _maxEventLogEntries = 500;
+  static const int _maxStreamingDeltas = 200;
 
   Future<void> _processEventQueue() async {
     if (_eventQueueProcessing || _eventQueue.isEmpty) return;
@@ -197,6 +204,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     if (client == null || sessionId == null) return;
 
     try {
+      _ingestEventEnvelope(event);
       if (event.event == 'projection.changed' ||
           event.event.startsWith('execution.')) {
         await _refreshProjection(client, sessionId);
@@ -247,6 +255,58 @@ class WorkspaceShellState extends State<WorkspaceShell> {
       _activeSubscriptionId = null;
       _eventQueue.clear();
     }
+  }
+
+  void _ingestEventMap(Map<String, dynamic> event) {
+    final entry = studioLogEntryFromEventMap(event);
+    if (entry == null) return;
+    if (!_seenEventIds.add(entry.id)) return;
+    final delta = studioStreamingDeltaFromEventMap(event);
+    if (!mounted) return;
+    setState(() {
+      _eventLog.add(entry);
+      if (_eventLog.length > _maxEventLogEntries) {
+        _eventLog.removeRange(0, _eventLog.length - _maxEventLogEntries);
+      }
+      if (delta != null) {
+        _streamingDeltas.add(delta);
+        if (_streamingDeltas.length > _maxStreamingDeltas) {
+          _streamingDeltas.removeRange(
+            0,
+            _streamingDeltas.length - _maxStreamingDeltas,
+          );
+        }
+      }
+    });
+  }
+
+  void _ingestEventEnvelope(EventEnvelope event) {
+    if (!_seenEventIds.add(event.eventId)) return;
+    final delta = studioStreamingDeltaFromEnvelope(event);
+    if (!mounted) return;
+    setState(() {
+      _eventLog.add(studioLogEntryFromEnvelope(event));
+      if (_eventLog.length > _maxEventLogEntries) {
+        _eventLog.removeRange(0, _eventLog.length - _maxEventLogEntries);
+      }
+      if (delta != null) {
+        _streamingDeltas.add(delta);
+        if (_streamingDeltas.length > _maxStreamingDeltas) {
+          _streamingDeltas.removeRange(
+            0,
+            _streamingDeltas.length - _maxStreamingDeltas,
+          );
+        }
+      }
+    });
+  }
+
+  void _clearEventLog() {
+    setState(() {
+      _eventLog.clear();
+      _streamingDeltas.clear();
+      _seenEventIds.clear();
+    });
   }
 
   @override
@@ -509,6 +569,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         if (sequence is int && sequence > _eventCursor) {
           _eventCursor = sequence;
         }
+        _ingestEventMap(event);
         if (event['event'] == 'projection.changed') {
           projectionChanged = true;
         }
@@ -2738,6 +2799,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                                   onStoreMemory: _showStoreMemory,
                                   onStoreRetrieval: _showStoreRetrieval,
                                   filePickerClient: widget.filePickerClient,
+                                  streamingDeltas: _streamingDeltas,
                                 )
                               : Row(
                                   children: [
@@ -2853,13 +2915,10 @@ class WorkspaceShellState extends State<WorkspaceShell> {
           onStoreMemory: _showStoreMemory,
           onStoreRetrieval: _showStoreRetrieval,
           filePickerClient: widget.filePickerClient,
+          streamingDeltas: _streamingDeltas,
         );
       case 6:
-        return StudioSectionPlaceholder(
-          icon: Icons.list_alt_rounded,
-          title: '日志中心',
-          subtitle: 'Phase 2 将接入真实事件流日志（events.replay / events.subscribe）',
-        );
+        return ExecutionLogPanel(entries: _eventLog, onClear: _clearEventLog);
       case 7:
         return StudioSectionPlaceholder(
           icon: Icons.settings_outlined,
@@ -2926,6 +2985,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                         onStoreMemory: _showStoreMemory,
                         onStoreRetrieval: _showStoreRetrieval,
                         filePickerClient: widget.filePickerClient,
+                        streamingDeltas: _streamingDeltas,
                       ),
                     ),
                   ],
@@ -3300,6 +3360,7 @@ class _ConversationProjection extends StatefulWidget {
     this.onStoreMemory,
     this.onStoreRetrieval,
     this.filePickerClient,
+    this.streamingDeltas = const [],
   });
 
   final Map<String, dynamic> snapshot;
@@ -3316,6 +3377,7 @@ class _ConversationProjection extends StatefulWidget {
   final Future<void> Function()? onStoreMemory;
   final Future<void> Function()? onStoreRetrieval;
   final FilePickerClient? filePickerClient;
+  final List<StudioStreamingDelta> streamingDeltas;
 
   @override
   State<_ConversationProjection> createState() =>
@@ -3529,12 +3591,25 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
         )
         .toList(growable: false);
     final activeRunId = _activeRunId();
+    final visibleDeltas = widget.streamingDeltas
+        .where((delta) {
+          if (delta.executionRunId != null) {
+            return activeRunId == null || delta.executionRunId == activeRunId;
+          }
+          if (delta.conversationId != null) {
+            return widget.conversationId == null ||
+                delta.conversationId == widget.conversationId;
+          }
+          return true;
+        })
+        .toList(growable: false);
+    final hasContent = messages.isNotEmpty || visibleDeltas.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 22),
       child: Column(
         children: [
           Expanded(
-            child: messages.isEmpty
+            child: !hasContent
                 ? LayoutBuilder(
                     builder: (context, constraints) => SingleChildScrollView(
                       child: ConstrainedBox(
@@ -3570,20 +3645,40 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 12),
-                    itemCount: messages.length,
+                    itemCount: messages.length + visibleDeltas.length,
                     itemBuilder: (context, index) {
-                      final message = messages[index];
+                      if (index < messages.length) {
+                        final message = messages[index];
+                        return Align(
+                          alignment: Alignment.centerRight,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 720),
+                            child: Card(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.primaryContainer,
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Text(
+                                  message['content']?.toString() ?? '',
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }
+                      final delta = visibleDeltas[index - messages.length];
                       return Align(
-                        alignment: Alignment.centerRight,
+                        alignment: Alignment.centerLeft,
                         child: ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 720),
                           child: Card(
                             color: Theme.of(
                               context,
-                            ).colorScheme.primaryContainer,
+                            ).colorScheme.surfaceContainerLow,
                             child: Padding(
                               padding: const EdgeInsets.all(12),
-                              child: Text(message['content']?.toString() ?? ''),
+                              child: Text(delta.delta),
                             ),
                           ),
                         ),
@@ -3592,7 +3687,7 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                   ),
           ),
           Text(
-            '当前对话 ${messages.length} 条消息 · 工作区 ${_list(widget.snapshot, 'conversations').length} 个对话',
+            '当前对话 ${messages.length} 条消息 · 流式输出 ${visibleDeltas.length} 条 · 工作区 ${_list(widget.snapshot, 'conversations').length} 个对话',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           if (_pendingAttachments.isNotEmpty || _pickingAttachment) ...[
