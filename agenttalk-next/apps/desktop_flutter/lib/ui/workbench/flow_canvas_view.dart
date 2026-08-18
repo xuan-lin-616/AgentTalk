@@ -84,44 +84,88 @@ class FlowCanvasView extends StatelessWidget {
           ),
           Expanded(
             child: ClipRect(
-              child: InteractiveViewer(
-                constrained: false,
-                boundaryMargin: const EdgeInsets.all(200),
-                minScale: 0.25,
-                maxScale: 2.5,
-                child: SizedBox(
-                  width: layout.canvasSize.width,
-                  height: layout.canvasSize.height,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: CustomPaint(
-                          painter: _FlowCanvasPainter(
-                            layout: layout,
-                            lineColor: cs.outlineVariant,
-                          ),
-                        ),
-                      ),
-                      for (final entry in layout.nodeEntries)
-                        Positioned(
-                          left: entry.position.dx,
-                          top: entry.position.dy,
-                          child: _FlowNodeCard(
-                            node: entry.node,
-                            statusColor: _statusColor(entry.node.status),
-                            onRetry:
-                                onRetryNode == null || !entry.node.isFaulted
-                                ? null
-                                : () => onRetryNode!(entry.node.nodeId),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+              child: _FlowCanvasField(
+                layout: layout,
+                lineColor: cs.outlineVariant,
+                nodeEntries: layout.nodeEntries,
+                onRetryNode: onRetryNode,
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _FlowCanvasField extends StatefulWidget {
+  const _FlowCanvasField({
+    required this.layout,
+    required this.lineColor,
+    required this.nodeEntries,
+    this.onRetryNode,
+  });
+
+  final _DagLayout layout;
+  final Color lineColor;
+  final List<({OrchestrationNode node, Offset position})> nodeEntries;
+  final ValueChanged<String>? onRetryNode;
+
+  @override
+  State<_FlowCanvasField> createState() => _FlowCanvasFieldState();
+}
+
+class _FlowCanvasFieldState extends State<_FlowCanvasField>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _flowController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _flowController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return InteractiveViewer(
+      constrained: false,
+      boundaryMargin: const EdgeInsets.all(200),
+      minScale: 0.25,
+      maxScale: 2.5,
+      child: SizedBox(
+        width: widget.layout.canvasSize.width,
+        height: widget.layout.canvasSize.height,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: _flowController,
+                builder: (context, _) => CustomPaint(
+                  painter: _FlowCanvasPainter(
+                    layout: widget.layout,
+                    lineColor: widget.lineColor,
+                    flowPhase: _flowController.value,
+                  ),
+                ),
+              ),
+            ),
+            for (final entry in widget.nodeEntries)
+              Positioned(
+                left: entry.position.dx,
+                top: entry.position.dy,
+                child: _FlowNodeCard(
+                  node: entry.node,
+                  statusColor: _statusColor(entry.node.status),
+                  onRetry: widget.onRetryNode == null || !entry.node.isFaulted
+                      ? null
+                      : () => widget.onRetryNode!(entry.node.nodeId),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -202,7 +246,7 @@ class _CanvasToolbar extends StatelessWidget {
   }
 }
 
-class _FlowNodeCard extends StatelessWidget {
+class _FlowNodeCard extends StatefulWidget {
   const _FlowNodeCard({
     required this.node,
     required this.statusColor,
@@ -214,85 +258,157 @@ class _FlowNodeCard extends StatelessWidget {
   final VoidCallback? onRetry;
 
   @override
+  State<_FlowNodeCard> createState() => _FlowNodeCardState();
+}
+
+class _FlowNodeCardState extends State<_FlowNodeCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulseController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+  );
+
+  bool get _pulsing =>
+      widget.node.status == 'running' || widget.node.status == 'sealing';
+
+  @override
+  void initState() {
+    super.initState();
+    if (_pulsing) {
+      _pulseController.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _FlowNodeCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_pulsing && !_pulseController.isAnimating) {
+      _pulseController.repeat(reverse: true);
+    } else if (!_pulsing && _pulseController.isAnimating) {
+      _pulseController.stop();
+      _pulseController.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 190,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: StudioColors.bgCard,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: statusColor.withValues(alpha: 0.55)),
-        boxShadow: [
-          BoxShadow(
-            color: statusColor.withValues(alpha: 0.22),
-            blurRadius: 16,
-            spreadRadius: 1,
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: statusColor,
-                  shape: BoxShape.circle,
-                ),
+    final color = widget.statusColor;
+    return AnimatedBuilder(
+      animation: _pulseController,
+      builder: (context, child) {
+        final glowAlpha = _pulsing
+            ? 0.18 + 0.16 * _pulseController.value
+            : 0.22;
+        final glowBlur = _pulsing ? 12.0 + 10.0 * _pulseController.value : 16.0;
+        return Container(
+          width: 190,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: StudioColors.bgCard,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withValues(alpha: 0.55)),
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: glowAlpha),
+                blurRadius: glowBlur,
+                spreadRadius: 1,
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  node.nodeKey,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: StudioColors.textPrimary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              if (onRetry != null)
-                InkWell(
-                  onTap: onRetry,
-                  borderRadius: BorderRadius.circular(4),
-                  child: const Padding(
-                    padding: EdgeInsets.all(2),
-                    child: Icon(
-                      Icons.refresh,
-                      size: 16,
-                      color: StudioColors.danger,
-                    ),
-                  ),
-                ),
             ],
           ),
-          const SizedBox(height: 6),
-          Text(
-            node.status,
-            style: TextStyle(
-              color: statusColor,
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-            ),
+          child: Stack(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: color,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          widget.node.nodeKey,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: StudioColors.textPrimary,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      if (widget.onRetry != null)
+                        InkWell(
+                          onTap: widget.onRetry,
+                          borderRadius: BorderRadius.circular(4),
+                          child: const Padding(
+                            padding: EdgeInsets.all(2),
+                            child: Icon(
+                              Icons.refresh,
+                              size: 16,
+                              color: StudioColors.danger,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    widget.node.status,
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${widget.node.attemptCount}/${widget.node.maxAttempts} attempts'
+                    '${widget.node.roleId == null ? '' : ' · role ${widget.node.roleId}'}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: StudioColors.textTertiary,
+                      fontSize: 9,
+                    ),
+                  ),
+                ],
+              ),
+              const Positioned(left: -16, top: 34, child: _PortDot()),
+              const Positioned(right: -16, top: 34, child: _PortDot()),
+            ],
           ),
-          const SizedBox(height: 4),
-          Text(
-            '${node.attemptCount}/${node.maxAttempts} attempts'
-            '${node.roleId == null ? '' : ' · role ${node.roleId}'}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: StudioColors.textTertiary,
-              fontSize: 9,
-            ),
-          ),
-        ],
+        );
+      },
+    );
+  }
+}
+
+class _PortDot extends StatelessWidget {
+  const _PortDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: StudioColors.borderStrong,
+        shape: BoxShape.circle,
+        border: Border.all(color: StudioColors.bgRoot, width: 2),
       ),
     );
   }
@@ -455,10 +571,15 @@ class _DagLayout {
 }
 
 class _FlowCanvasPainter extends CustomPainter {
-  _FlowCanvasPainter({required this.layout, required this.lineColor});
+  _FlowCanvasPainter({
+    required this.layout,
+    required this.lineColor,
+    required this.flowPhase,
+  });
 
   final _DagLayout layout;
   final Color lineColor;
+  final double flowPhase;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -492,6 +613,21 @@ class _FlowCanvasPainter extends CustomPainter {
         ..style = PaintingStyle.stroke;
       canvas.drawPath(path, paint);
 
+      final pathMetric = path.computeMetrics().firstOrNull;
+      if (pathMetric != null && pathMetric.length > 0) {
+        final flowOffset = (flowPhase * pathMetric.length) % pathMetric.length;
+        final extract = pathMetric.extractPath(
+          flowOffset,
+          (flowOffset + 26).clamp(0, pathMetric.length).toDouble(),
+        );
+        final flowPaint = Paint()
+          ..color = StudioColors.primaryHover.withValues(alpha: 0.9)
+          ..strokeWidth = 2.4
+          ..strokeCap = StrokeCap.round
+          ..style = PaintingStyle.stroke;
+        canvas.drawPath(extract, flowPaint);
+      }
+
       final arrowAngle = atan2(target.dy - source.dy, target.dx - source.dx);
       final arrowLength = 8.0;
       final arrowTip = Offset(target.dx - 6, target.dy);
@@ -512,7 +648,9 @@ class _FlowCanvasPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _FlowCanvasPainter oldDelegate) {
-    return oldDelegate.layout != layout || oldDelegate.lineColor != lineColor;
+    return oldDelegate.layout != layout ||
+        oldDelegate.lineColor != lineColor ||
+        oldDelegate.flowPhase != flowPhase;
   }
 }
 

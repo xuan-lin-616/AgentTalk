@@ -40,6 +40,7 @@ import 'ui/workbench/orchestration_run_projection.dart';
 import 'ui/workbench/studio_approval_request.dart';
 import 'ui/workbench/studio_event_log.dart';
 import 'ui/workbench/studio_title_bar.dart';
+import 'ui/workbench/simple_markdown_text.dart';
 import 'ui/workbench/studio_workbench_view.dart';
 
 final _workspaceShellKey = GlobalKey<WorkspaceShellState>();
@@ -163,7 +164,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   String? _activeRetrievalSelectionId;
   double _leftPaneWidth = 266;
   double _rightPaneWidth = 336;
-  final double _bottomDockHeight = 260;
+  double _bottomDockHeight = 260;
   final bool _leftPaneVisible = true;
   bool _rightPaneVisible = true;
   bool _bottomDockVisible = true;
@@ -3461,6 +3462,14 @@ class WorkspaceShellState extends State<WorkspaceShell> {
               ),
             ),
             if (_bottomDockVisible) ...[
+              _HorizontalResizeHandle(
+                onDrag: (delta) => setState(() {
+                  _bottomDockHeight = (_bottomDockHeight - delta).clamp(
+                    180.0,
+                    420.0,
+                  );
+                }),
+              ),
               const SizedBox(height: 8),
               SizedBox(
                 height: _bottomDockHeight,
@@ -3530,6 +3539,24 @@ class _ResizeHandle extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
         child: const SizedBox(width: 8, child: VerticalDivider(width: 1)),
+      ),
+    );
+  }
+}
+
+class _HorizontalResizeHandle extends StatelessWidget {
+  const _HorizontalResizeHandle({required this.onDrag});
+
+  final ValueChanged<double> onDrag;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeRow,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: (details) => onDrag(details.delta.dy),
+        child: const SizedBox(height: 8, child: Divider(height: 1)),
       ),
     );
   }
@@ -4158,8 +4185,8 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                               ).colorScheme.primaryContainer,
                               child: Padding(
                                 padding: const EdgeInsets.all(12),
-                                child: Text(
-                                  message['content']?.toString() ?? '',
+                                child: SimpleMarkdownText(
+                                  text: message['content']?.toString() ?? '',
                                 ),
                               ),
                             ),
@@ -4177,7 +4204,7 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                             ).colorScheme.surfaceContainerLow,
                             child: Padding(
                               padding: const EdgeInsets.all(12),
-                              child: Text(delta.delta),
+                              child: SimpleMarkdownText(text: delta.delta),
                             ),
                           ),
                         ),

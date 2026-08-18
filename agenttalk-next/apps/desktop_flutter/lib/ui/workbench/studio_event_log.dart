@@ -60,6 +60,8 @@ final RegExp _absoluteWindowsPathPattern = RegExp(r'[A-Za-z]:\\[^\s,;:]*');
 
 final RegExp _absoluteUnixPathPattern = RegExp(r'(/[A-Za-z0-9_\-\.]+)+');
 
+String studioSafeText(String value) => _redact(value);
+
 String _redact(String value) {
   var result = value.replaceAll(_secretPattern, '<redacted>');
   result = result.replaceAll(_absoluteWindowsPathPattern, '<path-redacted>');
