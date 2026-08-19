@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'gen/l10n.dart';
@@ -32,6 +33,7 @@ import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
 import 'ui/orchestration_panel.dart';
 import 'ui/workbench/approval_panel.dart';
+import 'ui/workbench/demo_studio_data.dart';
 import 'ui/workbench/execution_log_panel.dart';
 import 'ui/workbench/flow_canvas_view.dart';
 import 'ui/workbench/left_navigation_rail.dart';
@@ -180,6 +182,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   final List<StudioLogEntry> _eventLog = [];
   final List<StudioStreamingDelta> _streamingDeltas = [];
   final Set<String> _seenEventIds = {};
+  bool _demoMode = false;
+  Map<String, dynamic> _demoSnapshot = const <String, dynamic>{};
+  List<StudioLogEntry> _demoEventLog = const [];
+  List<StudioStreamingDelta> _demoStreamingDeltas = const [];
+  OrchestrationRunProjection? _demoOrchestrationProjection;
   final List<StudioApprovalRequest> _pendingApprovals = [];
   bool _approvalBusy = false;
   String? _orchestrationRunId;
@@ -415,6 +422,66 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     });
   }
 
+  Map<String, dynamic> get _displaySnapshot =>
+      _demoMode ? _demoSnapshot : _snapshot;
+
+  List<StudioLogEntry> get _displayEventLog =>
+      _demoMode ? _demoEventLog : _eventLog;
+
+  List<StudioStreamingDelta> get _displayStreamingDeltas =>
+      _demoMode ? _demoStreamingDeltas : _streamingDeltas;
+
+  OrchestrationRunProjection? get _displayOrchestrationProjection =>
+      _demoMode ? _demoOrchestrationProjection : _orchestrationProjection;
+
+  Future<void> _showDemoOrchestrationInspector() async {
+    final projection = _demoOrchestrationProjection;
+    if (projection == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('编排检查器（演示数据）'),
+        content: OrchestrationInspectorPanel(projection: projection),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _toggleDemoData() {
+    if (_demoMode) {
+      _exitDemoMode();
+    } else {
+      _enterDemoMode();
+    }
+  }
+
+  void _enterDemoMode() {
+    setState(() {
+      _demoMode = true;
+      _demoSnapshot = DemoStudioData.snapshot();
+      _demoEventLog = DemoStudioData.eventLog();
+      _demoStreamingDeltas = DemoStudioData.streamingDeltas();
+      _demoOrchestrationProjection = DemoStudioData.orchestrationProjection();
+      _activeProjectId = DemoStudioData.projectId;
+      _activeConversationId = DemoStudioData.conversationId;
+    });
+  }
+
+  void _exitDemoMode() {
+    setState(() {
+      _demoMode = false;
+      _demoSnapshot = const <String, dynamic>{};
+      _demoEventLog = const [];
+      _demoStreamingDeltas = const [];
+      _demoOrchestrationProjection = null;
+    });
+  }
+
   void _clearEventLog() {
     setState(() {
       _eventLog.clear();
@@ -567,6 +634,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         _snapshot = payload;
         _projectionStatus = '已连接本地 Core';
         _coreDiagnosticDetails = null;
+        _demoMode = false;
+        _demoSnapshot = const <String, dynamic>{};
+        _demoEventLog = const [];
+        _demoStreamingDeltas = const [];
+        _demoOrchestrationProjection = null;
       });
       _startEventPolling();
     } catch (error) {
@@ -905,6 +977,11 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     setState(() {
       _snapshot = payload;
       _projectionStatus = '已连接本地 Core';
+      _demoMode = false;
+      _demoSnapshot = const <String, dynamic>{};
+      _demoEventLog = const [];
+      _demoStreamingDeltas = const [];
+      _demoOrchestrationProjection = null;
     });
   }
 
@@ -2882,8 +2959,10 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                       children: [
                         StudioTitleBar(
                           compact: compact,
-                          snapshot: _snapshot,
-                          projectionStatus: _projectionStatus,
+                          snapshot: _displaySnapshot,
+                          projectionStatus: _demoMode
+                              ? '演示数据（非真实）'
+                              : _projectionStatus,
                           onProjectPressed: _showProjectPicker,
                           onConversationPressed: _showConversationPicker,
                           onConnectorCenterPressed: _showConnectorCenter,
@@ -2903,16 +2982,22 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                         Expanded(
                           child: compact
                               ? _ConversationProjection(
-                                  snapshot: _snapshot,
+                                  snapshot: _displaySnapshot,
                                   projectId: _activeProjectId,
                                   conversationId: _activeConversationId,
-                                  onSend: _sendMessage,
-                                  onCancel: _cancelExecution,
-                                  onShowContext: _showContextInspector,
-                                  onStoreMemory: _showStoreMemory,
-                                  onStoreRetrieval: _showStoreRetrieval,
+                                  onSend: _demoMode ? null : _sendMessage,
+                                  onCancel: _demoMode ? null : _cancelExecution,
+                                  onShowContext: _demoMode
+                                      ? null
+                                      : _showContextInspector,
+                                  onStoreMemory: _demoMode
+                                      ? null
+                                      : _showStoreMemory,
+                                  onStoreRetrieval: _demoMode
+                                      ? null
+                                      : _showStoreRetrieval,
                                   filePickerClient: widget.filePickerClient,
-                                  streamingDeltas: _streamingDeltas,
+                                  streamingDeltas: _displayStreamingDeltas,
                                 )
                               : Row(
                                   children: [
@@ -3291,19 +3376,21 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     switch (_activeSection) {
       case 1:
         return _AgentProjection(
-          snapshot: _snapshot,
+          snapshot: _displaySnapshot,
           projectId: _activeProjectId,
-          onAdd: () => unawaited(_showCreateAgent()),
-          onEdit: (agent) => unawaited(_showEditAgent(agent)),
-          onManageAssignments: _showProjectAssignmentSheet,
-          onScanLocal: _showScanLocalAgents,
+          onAdd: _demoMode ? null : () => unawaited(_showCreateAgent()),
+          onEdit: _demoMode
+              ? null
+              : (agent) => unawaited(_showEditAgent(agent)),
+          onManageAssignments: _demoMode ? null : _showProjectAssignmentSheet,
+          onScanLocal: _demoMode ? null : _showScanLocalAgents,
         );
       case 2:
         return Column(
           children: [
             StudioWorkbenchHeader(
               sectionTitle: '任务管理',
-              status: _projectionStatus,
+              status: _demoMode ? '演示数据（非真实）' : _projectionStatus,
               trailing: OutlinedButton.icon(
                 onPressed: _showOrchestrationRecoveryState,
                 icon: const Icon(Icons.healing_outlined, size: 16),
@@ -3315,15 +3402,21 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                 children: [
                   Expanded(
                     child: _WorkflowProjection(
-                      snapshot: _snapshot,
-                      status: _projectionStatus,
-                      onCancel: _cancelExecution,
-                      onRetry: _retryExecution,
-                      onRerunCurrent: _rerunCurrentExecution,
-                      onCreate: _showCreateWorkflow,
-                      onCreateHandoff: _showCreateStructuredHandoff,
-                      onDispatchHandoff: _dispatchStructuredHandoff,
-                      onTransitionHandoff: _transitionStructuredHandoff,
+                      snapshot: _displaySnapshot,
+                      status: _demoMode ? '演示数据（非真实）' : _projectionStatus,
+                      onCancel: _demoMode ? null : _cancelExecution,
+                      onRetry: _demoMode ? null : _retryExecution,
+                      onRerunCurrent: _demoMode ? null : _rerunCurrentExecution,
+                      onCreate: _demoMode ? null : _showCreateWorkflow,
+                      onCreateHandoff: _demoMode
+                          ? null
+                          : _showCreateStructuredHandoff,
+                      onDispatchHandoff: _demoMode
+                          ? null
+                          : _dispatchStructuredHandoff,
+                      onTransitionHandoff: _demoMode
+                          ? null
+                          : _transitionStructuredHandoff,
                     ),
                   ),
                   SizedBox(
@@ -3360,23 +3453,26 @@ class WorkspaceShellState extends State<WorkspaceShell> {
           client: client,
           sessionId: sessionId,
           projectId: _activeProjectId,
-          agents: _projectAgents(_snapshot, _activeProjectId),
+          agents: _projectAgents(_displaySnapshot, _activeProjectId),
         );
       case 5:
         return _ConversationProjection(
-          snapshot: _snapshot,
+          snapshot: _displaySnapshot,
           projectId: _activeProjectId,
           conversationId: _activeConversationId,
-          onSend: _sendMessage,
-          onCancel: _cancelExecution,
-          onShowContext: _showContextInspector,
-          onStoreMemory: _showStoreMemory,
-          onStoreRetrieval: _showStoreRetrieval,
+          onSend: _demoMode ? null : _sendMessage,
+          onCancel: _demoMode ? null : _cancelExecution,
+          onShowContext: _demoMode ? null : _showContextInspector,
+          onStoreMemory: _demoMode ? null : _showStoreMemory,
+          onStoreRetrieval: _demoMode ? null : _showStoreRetrieval,
           filePickerClient: widget.filePickerClient,
-          streamingDeltas: _streamingDeltas,
+          streamingDeltas: _displayStreamingDeltas,
         );
       case 6:
-        return ExecutionLogPanel(entries: _eventLog, onClear: _clearEventLog);
+        return ExecutionLogPanel(
+          entries: _displayEventLog,
+          onClear: _demoMode ? null : _clearEventLog,
+        );
       case 7:
         return StudioSectionPlaceholder(
           icon: Icons.settings_outlined,
@@ -3391,10 +3487,22 @@ class WorkspaceShellState extends State<WorkspaceShell> {
           children: [
             StudioWorkbenchHeader(
               sectionTitle: '工作台',
-              status: _projectionStatus,
+              status: _demoMode ? '演示数据（非真实）' : _projectionStatus,
               trailing: Wrap(
                 spacing: 8,
                 children: [
+                  if (kDebugMode)
+                    TextButton.icon(
+                      key: const Key('demo-data-toggle'),
+                      onPressed: _toggleDemoData,
+                      icon: Icon(
+                        _demoMode
+                            ? Icons.science_outlined
+                            : Icons.science_outlined,
+                        size: 16,
+                      ),
+                      label: Text(_demoMode ? '退出演示' : '演示数据'),
+                    ),
                   OutlinedButton.icon(
                     onPressed: _orchestrationLoading
                         ? null
@@ -3424,16 +3532,20 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                 children: [
                   Expanded(
                     child: FlowCanvasView(
-                      projection: _orchestrationProjection,
-                      loading: _orchestrationLoading,
-                      error: _orchestrationError,
-                      onPickRun: _pickOrchestrationRun,
-                      onRetryNode: _retryOrchestrationNode,
-                      onCancelRun: _cancelSelectedOrchestrationRun,
-                      onShowInspector: _orchestrationProjection == null
+                      projection: _displayOrchestrationProjection,
+                      loading: _demoMode ? false : _orchestrationLoading,
+                      error: _demoMode ? null : _orchestrationError,
+                      onPickRun: _demoMode ? null : _pickOrchestrationRun,
+                      onRetryNode: _demoMode ? null : _retryOrchestrationNode,
+                      onCancelRun: _demoMode
+                          ? null
+                          : _cancelSelectedOrchestrationRun,
+                      onShowInspector: _demoMode
+                          ? _showDemoOrchestrationInspector
+                          : _orchestrationProjection == null
                           ? null
                           : _showOrchestrationInspector,
-                      busy: _orchestrationLoading,
+                      busy: false,
                     ),
                   ),
                   if (_rightPaneVisible) ...[
@@ -3448,12 +3560,18 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                     SizedBox(
                       width: _rightPaneWidth,
                       child: _AgentProjection(
-                        snapshot: _snapshot,
+                        snapshot: _displaySnapshot,
                         projectId: _activeProjectId,
-                        onAdd: () => unawaited(_showCreateAgent()),
-                        onEdit: (agent) => unawaited(_showEditAgent(agent)),
-                        onManageAssignments: _showProjectAssignmentSheet,
-                        onScanLocal: _showScanLocalAgents,
+                        onAdd: _demoMode
+                            ? null
+                            : () => unawaited(_showCreateAgent()),
+                        onEdit: _demoMode
+                            ? null
+                            : (agent) => unawaited(_showEditAgent(agent)),
+                        onManageAssignments: _demoMode
+                            ? null
+                            : _showProjectAssignmentSheet,
+                        onScanLocal: _demoMode ? null : _showScanLocalAgents,
                       ),
                     ),
                   ],
@@ -3477,22 +3595,24 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                   children: [
                     Expanded(
                       flex: 4,
-                      child: ExecutionLogPanel(entries: _eventLog),
+                      child: ExecutionLogPanel(entries: _displayEventLog),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       flex: 6,
                       child: _ConversationProjection(
-                        snapshot: _snapshot,
+                        snapshot: _displaySnapshot,
                         projectId: _activeProjectId,
                         conversationId: _activeConversationId,
-                        onSend: _sendMessage,
-                        onCancel: _cancelExecution,
-                        onShowContext: _showContextInspector,
-                        onStoreMemory: _showStoreMemory,
-                        onStoreRetrieval: _showStoreRetrieval,
+                        onSend: _demoMode ? null : _sendMessage,
+                        onCancel: _demoMode ? null : _cancelExecution,
+                        onShowContext: _demoMode ? null : _showContextInspector,
+                        onStoreMemory: _demoMode ? null : _showStoreMemory,
+                        onStoreRetrieval: _demoMode
+                            ? null
+                            : _showStoreRetrieval,
                         filePickerClient: widget.filePickerClient,
-                        streamingDeltas: _streamingDeltas,
+                        streamingDeltas: _displayStreamingDeltas,
                       ),
                     ),
                   ],

@@ -8,19 +8,19 @@ import 'package:flutter/material.dart';
 /// here and no hardcoded fake UI data belongs in this file.
 abstract final class StudioColors {
   // Background layers (dark hierarchy)
-  static const Color bgRoot = Color(0xFF0D0F14); // L0 lowest black
-  static const Color bgSurface = Color(0xFF131720); // L1 panel base
-  static const Color bgCard = Color(0xFF1B202D); // L2 floating/card base
+  static const Color bgRoot = Color(0xFF0F1116); // L0 lowest black
+  static const Color bgSurface = Color(0xFF151821); // L1 panel base
+  static const Color bgCard = Color(0xFF1C202C); // L2 floating/card base
   static const Color bgHover = Color(0xFF262E40); // L3 hover/focus
 
   // Borders and dividers
-  static const Color borderSubtle = Color(0xFF242A3A);
-  static const Color borderStrong = Color(0xFF2E3648);
+  static const Color borderSubtle = Color(0xFF2B3142);
+  static const Color borderStrong = Color(0xFF343D52);
 
   // Brand and status colors
-  static const Color primary = Color(0xFF2563EB);
-  static const Color primaryHover = Color(0xFF3B82F6);
-  static const Color success = Color(0xFF10B981);
+  static const Color primary = Color(0xFF4F6BFF);
+  static const Color primaryHover = Color(0xFF6B83FF);
+  static const Color success = Color(0xFF22C55E);
   static const Color warning = Color(0xFFF59E0B);
   static const Color danger = Color(0xFFEF4444);
   static const Color inactive = Color(0xFF6B7280);
@@ -125,7 +125,7 @@ ThemeData buildStudioTheme(ColorScheme scheme) {
       .apply(
         bodyColor: scheme.onSurface,
         displayColor: scheme.onSurface,
-        fontFamily: 'Segoe UI',
+        fontFamily: 'SourceHanSansSC',
       )
       .copyWith(
         headlineSmall: baseTextTheme.headlineSmall?.copyWith(
@@ -198,11 +198,11 @@ ThemeData buildStudioTheme(ColorScheme scheme) {
     useMaterial3: true,
     colorScheme: scheme,
     textTheme: textTheme,
-    fontFamily: 'Segoe UI',
+    fontFamily: 'SourceHanSansSC',
     fontFamilyFallback: const [
+      'Noto Sans SC',
       'Microsoft YaHei UI',
       'PingFang SC',
-      'Noto Sans SC',
       'sans-serif',
     ],
     scaffoldBackgroundColor: scheme.brightness == Brightness.dark
