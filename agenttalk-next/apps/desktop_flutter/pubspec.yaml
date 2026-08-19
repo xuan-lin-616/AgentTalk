@@ -64,14 +64,14 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # TODO(字体文件待放 assets/fonts/): 字体文件放入后，取消下面 fonts 块注释
-  # 即可自动打包 Source Han Sans SC Regular/Medium。
-  # fonts:
-  #   - family: SourceHanSansSC
-  #     fonts:
-  #       - asset: assets/fonts/SourceHanSansSC-Regular.ttf
-  #       - asset: assets/fonts/SourceHanSansSC-Medium.ttf
-  #         weight: 500
+  # 内置 Source Han Sans SC（SIL OFL 许可）Regular/Medium，
+  # 消除 Windows 中文字体回退到宋体导致的锯齿/生硬。
+  fonts:
+    - family: SourceHanSansSC
+      fonts:
+        - asset: assets/fonts/SourceHanSansSC-Regular.otf
+        - asset: assets/fonts/SourceHanSansSC-Medium.otf
+          weight: 500
 
   # To add assets to your application, add an assets section, like this:
   # assets:

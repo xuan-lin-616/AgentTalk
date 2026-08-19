@@ -32,6 +32,7 @@ import 'ui/retrieval_selection_dialog.dart';
 import 'ui/retrieval_preview_dialog.dart';
 import 'ui/workflow_create_dialog.dart';
 import 'ui/orchestration_panel.dart';
+import 'ui/workbench/agent_management_view.dart';
 import 'ui/workbench/approval_panel.dart';
 import 'ui/workbench/demo_studio_data.dart';
 import 'ui/workbench/execution_log_panel.dart';
@@ -3375,15 +3376,19 @@ class WorkspaceShellState extends State<WorkspaceShell> {
   Widget _buildStudioSection() {
     switch (_activeSection) {
       case 1:
-        return _AgentProjection(
+        return AgentManagementView(
           snapshot: _displaySnapshot,
           projectId: _activeProjectId,
           onAdd: _demoMode ? null : () => unawaited(_showCreateAgent()),
           onEdit: _demoMode
               ? null
               : (agent) => unawaited(_showEditAgent(agent)),
-          onManageAssignments: _demoMode ? null : _showProjectAssignmentSheet,
           onScanLocal: _demoMode ? null : _showScanLocalAgents,
+          onManageAssignments: _demoMode ? null : _showProjectAssignmentSheet,
+          onCreateProject: _demoMode
+              ? null
+              : () => unawaited(_showCreateProject()),
+          onSelectProject: _demoMode ? null : _showProjectPicker,
         );
       case 2:
         return Column(
