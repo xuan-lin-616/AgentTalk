@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "agenttalk.adapter.v1",
+  "id": "local.claude-code-acp",
+  "displayName": "Claude Code ACP (local)",
+  "category": "agent_protocol",
+  "protocol": {
+    "kind": "acp",
+    "major": 1
+  },
+  "match": {
+    "executableNames": [
+      "claude.exe"
+    ]
+  },
+  "launch": {
+    "kind": "direct",
+    "transport": "stdio",
+    "executableRef": "claude.exe",
+    "args": [
+      "--acp"
+    ],
+    "environmentAllowlist": [
+      "LOCALAPPDATA",
+      "PATH",
+      "USERPROFILE"
+    ]
+  },
+  "verification": {
+    "kind": "acp_initialize",
+    "timeoutMs": 10000
+  },
+  "capabilityPolicy": {
+    "filesystem": "negotiate",
+    "shell": "negotiate",
+    "streaming": "required",
+    "cancel": "required"
+  },
+  "source": {
+    "kind": "agenttalk_manifest",
+    "id": "local.claude-code-acp",
+    "version": "1.0.0"
+  }
+}

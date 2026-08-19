@@ -5,15 +5,16 @@ use agenttalk_domain::{
 #[cfg(test)]
 use agenttalk_domain::{CandidateCategory, ObservationTrustLevel, VerificationAuthority};
 use agenttalk_events::RuntimeEvent;
-#[cfg(test)]
-use agenttalk_runtime_host::ManifestLaunch;
 use agenttalk_runtime_host::{
-    bundled_production_catalog, discover_windows_passive_report_with_config_and_cancelled,
-    load_catalog_for_scan, AcpCompatibilityReport, AcpDiscoverySession, AcpImportPlanMetadata,
-    AcpVerificationConsent, AcpVerificationDiagnosticCode, AcpVerificationResult,
-    AcpVerificationStatus, CatalogSnapshot, ExplicitDiscoverySource, NetworkCounter,
-    WindowsPassiveDiscoveryConfig,
+    bundled_production_catalog, default_local_manifest_directory,
+    discover_windows_passive_report_with_config_and_cancelled, load_catalog_for_scan,
+    load_local_manifest_directory, AcpCompatibilityReport, AcpDiscoverySession,
+    AcpImportPlanMetadata, AcpVerificationConsent, AcpVerificationDiagnosticCode,
+    AcpVerificationResult, AcpVerificationStatus, CatalogSnapshot, ExplicitDiscoverySource,
+    NetworkCounter, WindowsPassiveDiscoveryConfig,
 };
+#[cfg(test)]
+use agenttalk_runtime_host::{AdapterManifest, CatalogLoadReport, ManifestLaunch};
 use getrandom::fill as fill_random;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -391,6 +392,7 @@ struct VerificationWork {
 struct LocalDiscoveryConfiguration {
     scan: WindowsPassiveDiscoveryConfig,
     catalog: CatalogConfiguration,
+    catalog_diagnostics: Vec<DiscoveryDiagnostic>,
     import_plan_hold: Duration,
 }
 
@@ -2062,6 +2064,7 @@ impl LocalDiscoveryService {
             candidates.insert(projection.candidate_id.clone(), projection.clone());
         }
         let mut diagnostics = report.diagnostics;
+        diagnostics.extend(self.configuration.catalog_diagnostics.iter().cloned());
         diagnostics.extend(acp_session.diagnostics().iter().cloned());
         sort_diagnostics(&mut diagnostics);
         let mut candidate_states = BTreeMap::new();
@@ -3264,16 +3267,31 @@ impl LocalDiscoveryConfiguration {
                             ..WindowsPassiveDiscoveryConfig::default()
                         },
                         catalog,
+                        catalog_diagnostics: Vec::new(),
                         import_plan_hold,
                     };
                 }
                 return Self {
                     scan: inert_scan_configuration(),
                     catalog: CatalogConfiguration::Unavailable,
+                    catalog_diagnostics: Vec::new(),
                     import_plan_hold,
                 };
             }
         }
+        let (catalog, catalog_diagnostics) = match bundled_production_catalog() {
+            Ok(mut snapshot) => {
+                let mut diagnostics = Vec::new();
+                if let Some(directory) =
+                    default_local_manifest_directory().filter(|directory| directory.exists())
+                {
+                    let local_report = load_local_manifest_directory(&directory);
+                    diagnostics.extend(merge_local_manifest_report(&mut snapshot, local_report));
+                }
+                (CatalogConfiguration::Available(snapshot), diagnostics)
+            }
+            Err(_) => (CatalogConfiguration::Unavailable, Vec::new()),
+        };
         Self {
             scan: WindowsPassiveDiscoveryConfig::default(),
             // W8.3: the production Core ships a bundled, offline ACP catalog
@@ -3282,12 +3300,34 @@ impl LocalDiscoveryConfiguration {
             // any corrupt, empty, duplicate, or secret-like content, so the
             // discovery scan then surfaces a typed failure instead of running
             // silently without a catalog.
-            catalog: bundled_production_catalog()
-                .map(CatalogConfiguration::Available)
-                .unwrap_or(CatalogConfiguration::Unavailable),
+            catalog,
+            catalog_diagnostics,
             import_plan_hold,
         }
     }
+}
+
+fn merge_local_manifest_report(
+    bundled: &mut CatalogSnapshot,
+    local: agenttalk_runtime_host::CatalogLoadReport,
+) -> Vec<DiscoveryDiagnostic> {
+    let mut diagnostics = local.diagnostics;
+    let mut ids = bundled
+        .manifests
+        .iter()
+        .map(|manifest| manifest.id.clone())
+        .collect::<BTreeSet<_>>();
+    for manifest in local.snapshot.manifests {
+        if ids.insert(manifest.id.clone()) {
+            bundled.manifests.push(manifest);
+        } else {
+            diagnostics.push(DiscoveryDiagnostic {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: DiscoveryDiagnosticCode::CatalogConflict,
+            });
+        }
+    }
+    diagnostics
 }
 
 fn inert_scan_configuration() -> WindowsPassiveDiscoveryConfig {
@@ -3921,6 +3961,7 @@ mod tests {
                     revision: "test".into(),
                     manifests: Vec::new(),
                 }),
+                catalog_diagnostics: Vec::new(),
                 import_plan_hold: Duration::ZERO,
             },
             limits: LocalDiscoveryLimits {
@@ -4017,6 +4058,48 @@ mod tests {
                 panic!("production bundled catalog must be available");
             }
         }
+    }
+
+    #[test]
+    fn local_manifest_report_merges_with_bundled_catalog_and_conflicts_fail_closed() {
+        let local_manifest = AdapterManifest::validate_json_bytes(include_bytes!(
+            "../../../examples/local-agent-manifests/claude-code.agenttalk-agent.json"
+        ))
+        .expect("example local manifest");
+        let mut bundled = bundled_production_catalog().expect("bundled catalog");
+        let before = bundled.manifests.len();
+        let diagnostics = merge_local_manifest_report(
+            &mut bundled,
+            CatalogLoadReport {
+                snapshot: CatalogSnapshot {
+                    revision: "local-test".into(),
+                    manifests: vec![local_manifest.clone()],
+                },
+                diagnostics: Vec::new(),
+            },
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(bundled.manifests.len(), before + 1);
+        assert!(bundled
+            .manifests
+            .iter()
+            .any(|manifest| manifest.id == local_manifest.id));
+
+        let after_first_merge = bundled.manifests.len();
+        let conflict = merge_local_manifest_report(
+            &mut bundled,
+            CatalogLoadReport {
+                snapshot: CatalogSnapshot {
+                    revision: "local-conflict".into(),
+                    manifests: vec![local_manifest],
+                },
+                diagnostics: Vec::new(),
+            },
+        );
+        assert_eq!(bundled.manifests.len(), after_first_merge);
+        assert!(conflict
+            .iter()
+            .any(|diagnostic| { diagnostic.code == DiscoveryDiagnosticCode::CatalogConflict }));
     }
 
     #[test]
@@ -4575,6 +4658,7 @@ mod tests {
             configuration: LocalDiscoveryConfiguration {
                 scan: inert_scan_configuration(),
                 catalog: CatalogConfiguration::Unavailable,
+                catalog_diagnostics: Vec::new(),
                 import_plan_hold: Duration::ZERO,
             },
             limits: LocalDiscoveryLimits {

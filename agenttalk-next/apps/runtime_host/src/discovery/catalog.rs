@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +26,10 @@ const MAX_REGISTRY_AGENTS: usize = 256;
 const MAX_CACHE_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const CURRENT_CATALOG_GENERATION: u64 = 1;
 const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const MAX_LOCAL_MANIFEST_BYTES: usize = 64 * 1024;
+const MAX_LOCAL_MANIFEST_FILES: usize = 64;
+const MAX_LOCAL_MANIFEST_DIRECTORY_ENTRIES: usize = 256;
+const LOCAL_MANIFEST_REVISION: &str = "agenttalk-local-manifests-v1";
 
 /// AgentTalk-maintained bundled production catalog, compiled into the Core.
 /// `registrySha256` is the SHA-256 of this JSON text with both hash fields
@@ -39,6 +43,251 @@ pub const PRODUCTION_CATALOG_BYTES: &[u8] = include_bytes!("production_catalog.j
 /// revision.
 pub fn bundled_production_catalog() -> Result<CatalogSnapshot, CatalogErrorCode> {
     bundled_production_catalog_from_bytes(PRODUCTION_CATALOG_BYTES)
+}
+
+/// Returns the user-scoped, offline directory used for local adapter
+/// manifests. The value contains no credentials and is only a lookup root.
+pub fn default_local_manifest_directory() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|path| path.join("AgentTalk").join("adapters"))
+}
+
+/// Loads user-authored `*.json` adapter manifests from one non-recursive,
+/// reparse-free directory. Each file is independently bounded and validated;
+/// malformed entries are discarded with a typed diagnostic while valid sibling
+/// manifests remain usable. No launch, network, or credential read occurs.
+pub fn load_local_manifest_directory(directory: &Path) -> CatalogLoadReport {
+    let mut diagnostics = Vec::new();
+    let mut manifests = BTreeMap::<String, AdapterManifest>::new();
+    let Some(root) = canonical_local_manifest_root(directory, &mut diagnostics) else {
+        return CatalogLoadReport {
+            snapshot: CatalogSnapshot {
+                revision: LOCAL_MANIFEST_REVISION.into(),
+                manifests: Vec::new(),
+            },
+            diagnostics,
+        };
+    };
+    let mut entries = match fs::read_dir(&root) {
+        Ok(entries) => {
+            let mut accepted = Vec::new();
+            for (index, entry) in entries.enumerate() {
+                if index >= MAX_LOCAL_MANIFEST_DIRECTORY_ENTRIES {
+                    diagnostics.push(DiscoveryDiagnostic {
+                        source_kind: ObservationSourceKind::ExecutableInventory,
+                        code: DiscoveryDiagnosticCode::OversizedInput,
+                    });
+                    break;
+                }
+                match entry {
+                    Ok(entry) => accepted.push(entry),
+                    Err(error) => diagnostics.push(DiscoveryDiagnostic {
+                        source_kind: ObservationSourceKind::ExecutableInventory,
+                        code: local_manifest_io_code(&error),
+                    }),
+                }
+            }
+            accepted
+        }
+        Err(error) => {
+            diagnostics.push(DiscoveryDiagnostic {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: local_manifest_io_code(&error),
+            });
+            return CatalogLoadReport {
+                snapshot: CatalogSnapshot {
+                    revision: LOCAL_MANIFEST_REVISION.into(),
+                    manifests: Vec::new(),
+                },
+                diagnostics,
+            };
+        }
+    };
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut json_entries = Vec::new();
+    for entry in entries {
+        if !entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            continue;
+        }
+        json_entries.push(entry);
+    }
+    if json_entries.len() > MAX_LOCAL_MANIFEST_FILES {
+        diagnostics.push(DiscoveryDiagnostic {
+            source_kind: ObservationSourceKind::ExecutableInventory,
+            code: DiscoveryDiagnosticCode::OversizedInput,
+        });
+        json_entries.truncate(MAX_LOCAL_MANIFEST_FILES);
+    }
+    let mut duplicate_ids = BTreeSet::new();
+    for entry in json_entries {
+        if !local_manifest_file_is_safe(&root, &entry.path()) {
+            diagnostics.push(DiscoveryDiagnostic {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: DiscoveryDiagnosticCode::ReparsePointRejected,
+            });
+            continue;
+        }
+        let bytes = match read_local_manifest_bounded(&entry.path()) {
+            Ok(bytes) => bytes,
+            Err(DiscoveryDiagnosticCode::OversizedInput) => {
+                diagnostics.push(DiscoveryDiagnostic {
+                    source_kind: ObservationSourceKind::ExecutableInventory,
+                    code: DiscoveryDiagnosticCode::OversizedInput,
+                });
+                continue;
+            }
+            Err(code) => {
+                diagnostics.push(DiscoveryDiagnostic {
+                    source_kind: ObservationSourceKind::ExecutableInventory,
+                    code,
+                });
+                continue;
+            }
+        };
+        let manifest = match AdapterManifest::validate_json_bytes(&bytes) {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                diagnostics.push(DiscoveryDiagnostic {
+                    source_kind: ObservationSourceKind::ExecutableInventory,
+                    code: DiscoveryDiagnosticCode::InvalidSourceRecord,
+                });
+                continue;
+            }
+        };
+        if manifest
+            .source
+            .as_ref()
+            .is_some_and(|source| source.kind != ManifestSourceKind::AgenttalkManifest)
+        {
+            diagnostics.push(DiscoveryDiagnostic {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: DiscoveryDiagnosticCode::InvalidSourceRecord,
+            });
+            continue;
+        }
+        if manifests.contains_key(&manifest.id) {
+            duplicate_ids.insert(manifest.id.clone());
+        } else {
+            manifests.insert(manifest.id.clone(), manifest);
+        }
+    }
+    for duplicate_id in duplicate_ids {
+        manifests.remove(&duplicate_id);
+        diagnostics.push(DiscoveryDiagnostic {
+            source_kind: ObservationSourceKind::ExecutableInventory,
+            code: DiscoveryDiagnosticCode::CatalogConflict,
+        });
+    }
+    CatalogLoadReport {
+        snapshot: CatalogSnapshot {
+            revision: LOCAL_MANIFEST_REVISION.into(),
+            manifests: manifests.into_values().collect(),
+        },
+        diagnostics,
+    }
+}
+
+fn read_local_manifest_bounded(path: &Path) -> Result<Vec<u8>, DiscoveryDiagnosticCode> {
+    let file = File::open(path).map_err(|error| local_manifest_io_code(&error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| local_manifest_io_code(&error))?;
+    if !metadata.is_file() || metadata.len() > MAX_LOCAL_MANIFEST_BYTES as u64 {
+        return Err(DiscoveryDiagnosticCode::OversizedInput);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_LOCAL_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| local_manifest_io_code(&error))?;
+    if bytes.len() > MAX_LOCAL_MANIFEST_BYTES {
+        Err(DiscoveryDiagnosticCode::OversizedInput)
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn canonical_local_manifest_root(
+    directory: &Path,
+    diagnostics: &mut Vec<DiscoveryDiagnostic>,
+) -> Option<PathBuf> {
+    if !directory.is_absolute() || local_manifest_path_has_reparse_component(directory) {
+        diagnostics.push(DiscoveryDiagnostic {
+            source_kind: ObservationSourceKind::ExecutableInventory,
+            code: DiscoveryDiagnosticCode::ReparsePointRejected,
+        });
+        return None;
+    }
+    match directory.canonicalize() {
+        Ok(root) if root.is_dir() && !local_manifest_path_has_reparse_component(&root) => {
+            Some(root)
+        }
+        Ok(_) => {
+            diagnostics.push(DiscoveryDiagnostic {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: DiscoveryDiagnosticCode::InvalidSourceRecord,
+            });
+            None
+        }
+        Err(error) => {
+            diagnostics.push(DiscoveryDiagnostic {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: local_manifest_io_code(&error),
+            });
+            None
+        }
+    }
+}
+
+fn local_manifest_file_is_safe(root: &Path, path: &Path) -> bool {
+    if local_manifest_path_has_reparse_component(path) {
+        return false;
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    path.canonicalize().ok().is_some_and(|canonical| {
+        canonical.parent() == Some(root) && !local_manifest_path_has_reparse_component(&canonical)
+    })
+}
+
+fn local_manifest_path_has_reparse_component(path: &Path) -> bool {
+    path.ancestors()
+        .filter(|ancestor| ancestor.exists())
+        .any(local_manifest_reparse_point)
+}
+
+fn local_manifest_reparse_point(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+    }
+}
+
+fn local_manifest_io_code(error: &std::io::Error) -> DiscoveryDiagnosticCode {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => DiscoveryDiagnosticCode::SourceDisappeared,
+        std::io::ErrorKind::PermissionDenied => DiscoveryDiagnosticCode::AccessDenied,
+        _ => DiscoveryDiagnosticCode::InvalidSourceRecord,
+    }
 }
 
 /// Injectable parser/validator gate for the bundled production catalog. It
@@ -3074,6 +3323,160 @@ mod tests {
         let path = std::env::temp_dir().join(suffix);
         fs::create_dir_all(&path).expect("create temp dir");
         TempCatalogDir { path }
+    }
+
+    fn local_manifest_value(id: &str, executable: &str) -> Value {
+        json!({
+            "schemaVersion": "agenttalk.adapter.v1",
+            "id": id,
+            "displayName": format!("{id} local agent"),
+            "category": "agent_protocol",
+            "protocol": {"kind": "acp", "major": 1},
+            "match": {"executableNames": [executable]},
+            "launch": {
+                "kind": "direct",
+                "transport": "stdio",
+                "executableRef": executable,
+                "args": ["--acp"],
+                "environmentAllowlist": ["PATH", "USERPROFILE"]
+            },
+            "verification": {"kind": "acp_initialize", "timeoutMs": 3000},
+            "capabilityPolicy": {
+                "filesystem": "negotiate",
+                "shell": "negotiate",
+                "streaming": "required",
+                "cancel": "required"
+            },
+            "source": {
+                "kind": "agenttalk_manifest",
+                "id": id,
+                "version": "1.0.0"
+            }
+        })
+    }
+
+    #[test]
+    fn local_manifest_directory_loads_and_participates_in_passive_matching() {
+        let root = temp_dir("local-manifest-match");
+        let manifest = local_manifest_value("local-claude-code", "claude.exe");
+        fs::write(
+            root.join("claude.agenttalk-agent.json"),
+            serde_json::to_vec_pretty(&manifest).expect("manifest bytes"),
+        )
+        .expect("write manifest");
+
+        let report = load_local_manifest_directory(&root);
+        assert!(report.diagnostics.is_empty());
+        assert_eq!(report.snapshot.manifests.len(), 1);
+        let projection = match_manifest_passively(
+            &ManifestMatchInput {
+                executable_name: Some("claude.exe".into()),
+                package_ids: Vec::new(),
+                registry_ids: Vec::new(),
+                executable_sha256: Some("a".repeat(64)),
+                publisher_subject: None,
+                category: CandidateCategory::Unknown,
+                source_kind: ObservationSourceKind::WindowsPath,
+            },
+            &report.snapshot.manifests,
+            None,
+        );
+        assert_eq!(projection.discovery_state, DiscoveryState::Identified);
+        assert_eq!(projection.runtime_type, "acp");
+        assert_eq!(
+            projection.compatibility_state,
+            CompatibilityState::NotVerified
+        );
+    }
+
+    #[test]
+    fn shipped_local_manifest_examples_are_schema_valid_and_value_free() {
+        for bytes in [
+            include_bytes!("../../../../examples/local-agent-manifests/dsh.agenttalk-agent.json")
+                .as_slice(),
+            include_bytes!(
+                "../../../../examples/local-agent-manifests/claude-code.agenttalk-agent.json"
+            )
+            .as_slice(),
+        ] {
+            let manifest = AdapterManifest::validate_json_bytes(bytes)
+                .expect("local manifest example validates");
+            assert_eq!(manifest.protocol.kind, ManifestProtocolKind::Acp);
+            assert!(matches!(
+                manifest.launch,
+                ManifestLaunch::Direct {
+                    transport: ManifestTransport::Stdio,
+                    ..
+                }
+            ));
+            let text = String::from_utf8_lossy(bytes);
+            assert!(!text.contains("Bearer "));
+            assert!(!text.contains("apiKey"));
+        }
+    }
+
+    #[test]
+    fn local_manifest_malformed_unknown_and_oversized_files_fail_closed() {
+        let root = temp_dir("local-manifest-invalid");
+        fs::write(root.join("malformed.json"), b"{not-json").expect("write malformed");
+        let mut unknown = local_manifest_value("local-unknown-field", "unknown.exe");
+        unknown["unexpected"] = Value::Bool(true);
+        fs::write(
+            root.join("unknown.json"),
+            serde_json::to_vec(&unknown).expect("unknown bytes"),
+        )
+        .expect("write unknown");
+        fs::write(
+            root.join("oversized.json"),
+            vec![b'x'; MAX_LOCAL_MANIFEST_BYTES + 1],
+        )
+        .expect("write oversized");
+
+        let report = load_local_manifest_directory(&root);
+        assert!(report.snapshot.manifests.is_empty());
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == DiscoveryDiagnosticCode::InvalidSourceRecord }));
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == DiscoveryDiagnosticCode::OversizedInput }));
+    }
+
+    #[test]
+    fn local_manifest_count_is_bounded_and_duplicate_ids_are_rejected() {
+        let root = temp_dir("local-manifest-bounds");
+        for index in 0..=MAX_LOCAL_MANIFEST_FILES {
+            let manifest = local_manifest_value(&format!("local-agent-{index}"), "agent.exe");
+            fs::write(
+                root.join(format!("{index:03}.json")),
+                serde_json::to_vec(&manifest).expect("manifest bytes"),
+            )
+            .expect("write manifest");
+        }
+        let report = load_local_manifest_directory(&root);
+        assert_eq!(report.snapshot.manifests.len(), MAX_LOCAL_MANIFEST_FILES);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == DiscoveryDiagnosticCode::OversizedInput }));
+
+        let duplicate_root = temp_dir("local-manifest-duplicate");
+        let duplicate = local_manifest_value("local-duplicate", "agent.exe");
+        for name in ["first.json", "second.json"] {
+            fs::write(
+                duplicate_root.join(name),
+                serde_json::to_vec(&duplicate).expect("duplicate bytes"),
+            )
+            .expect("write duplicate");
+        }
+        let duplicate_report = load_local_manifest_directory(&duplicate_root);
+        assert!(duplicate_report.snapshot.manifests.is_empty());
+        assert!(duplicate_report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == DiscoveryDiagnosticCode::CatalogConflict }));
     }
 
     #[test]

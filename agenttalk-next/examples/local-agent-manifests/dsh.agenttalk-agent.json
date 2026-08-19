@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "agenttalk.adapter.v1",
+  "id": "local.dsh-acp",
+  "displayName": "dsh ACP (local)",
+  "category": "agent_protocol",
+  "protocol": {
+    "kind": "acp",
+    "major": 1
+  },
+  "match": {
+    "executableNames": [
+      "node.exe"
+    ]
+  },
+  "launch": {
+    "kind": "direct",
+    "transport": "stdio",
+    "executableRef": "node.exe",
+    "args": [
+      "--import",
+      "tsx",
+      "C:\\path\\to\\deepseek-harness\\packages\\examples\\acp-demo\\src\\bin.ts",
+      "--config",
+      "C:\\path\\to\\deepseek-harness\\examples\\acp-agent\\cordis.yml"
+    ],
+    "environmentAllowlist": [
+      "LOCALAPPDATA",
+      "PATH",
+      "USERPROFILE"
+    ],
+    "credentialEnvironment": [
+      "LX_API_KEY"
+    ]
+  },
+  "verification": {
+    "kind": "acp_initialize",
+    "timeoutMs": 10000
+  },
+  "capabilityPolicy": {
+    "filesystem": "negotiate",
+    "shell": "negotiate",
+    "streaming": "required",
+    "cancel": "required"
+  },
+  "source": {
+    "kind": "agenttalk_manifest",
+    "id": "local.dsh-acp",
+    "version": "1.0.0"
+  }
+}

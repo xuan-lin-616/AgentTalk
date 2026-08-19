@@ -12,11 +12,12 @@ pub use discovery::verifiers::acp::{
 pub use discovery::catalog::WindowsAuthenticodeVerifier;
 pub use discovery::catalog::{
     authenticode_evidence_to_safe_projection, bundled_production_catalog,
-    convert_acp_registry_bytes, load_catalog_for_scan, match_manifest_passively,
-    normalized_catalog_digest, refresh_catalog_cache, AuthenticodeEvidence, AuthenticodeStatus,
-    AuthenticodeVerifier, CatalogCache, CatalogError, CatalogErrorCode, CatalogLoadReport,
-    CatalogRefreshSource, CatalogSnapshot, ConvertedRegistryManifest, ManifestMatchInput,
-    NetworkCounter, RefreshRequest, RefreshResponse, RegistryLaunchKind, PRODUCTION_CATALOG_BYTES,
+    convert_acp_registry_bytes, default_local_manifest_directory, load_catalog_for_scan,
+    load_local_manifest_directory, match_manifest_passively, normalized_catalog_digest,
+    refresh_catalog_cache, AuthenticodeEvidence, AuthenticodeStatus, AuthenticodeVerifier,
+    CatalogCache, CatalogError, CatalogErrorCode, CatalogLoadReport, CatalogRefreshSource,
+    CatalogSnapshot, ConvertedRegistryManifest, ManifestMatchInput, NetworkCounter, RefreshRequest,
+    RefreshResponse, RegistryLaunchKind, PRODUCTION_CATALOG_BYTES,
 };
 pub use discovery::manifest::{
     validate_against_embedded_schema, AdapterManifest, CapabilityRequirement,
