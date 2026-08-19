@@ -52,7 +52,7 @@ class FlowCanvasView extends StatelessWidget {
       return _CanvasEmptyState(
         icon: Icons.account_tree_outlined,
         title: '流程画布',
-        subtitle: '选择 Orchestration Run 后，这里会渲染 Core 返回的 sealed DAG。',
+        subtitle: '选择 Orchestration Run 后将渲染 Core 返回的 sealed DAG',
         actionLabel: onPickRun == null ? null : '选择 Run',
         onAction: onPickRun,
       );
@@ -431,43 +431,81 @@ class _CanvasEmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: StudioColors.bgRoot,
-      alignment: Alignment.center,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 46, color: StudioColors.textTertiary),
-          const SizedBox(height: 12),
-          Text(
-            title,
-            style: const TextStyle(
-              color: StudioColors.textPrimary,
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
+    return Stack(
+      children: [
+        const Positioned.fill(
+          child: CustomPaint(painter: FlowDotGridPainter()),
+        ),
+        Center(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420),
+            margin: const EdgeInsets.all(24),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 16),
+            decoration: BoxDecoration(
+              color: StudioColors.bgCard,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: StudioColors.borderSubtle),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 40, color: StudioColors.textTertiary),
+                const SizedBox(height: 10),
+                Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: StudioColors.textPrimary,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  subtitle,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: StudioColors.textSecondary,
+                    fontSize: 11,
+                    height: 1.4,
+                  ),
+                ),
+                if (actionLabel != null && onAction != null) ...[
+                  const SizedBox(height: 14),
+                  OutlinedButton.icon(
+                    onPressed: onAction,
+                    icon: const Icon(Icons.arrow_forward_outlined, size: 16),
+                    label: Text(actionLabel!),
+                  ),
+                ],
+              ],
             ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            subtitle,
-            textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: StudioColors.textSecondary,
-              fontSize: 11,
-            ),
-          ),
-          if (actionLabel != null && onAction != null) ...[
-            const SizedBox(height: 14),
-            OutlinedButton.icon(
-              onPressed: onAction,
-              icon: const Icon(Icons.arrow_forward_outlined, size: 16),
-              label: Text(actionLabel!),
-            ),
-          ],
-        ],
-      ),
+        ),
+      ],
     );
   }
+}
+
+/// Persistent dot-grid backdrop used by the canvas empty state.
+class FlowDotGridPainter extends CustomPainter {
+  const FlowDotGridPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final dotPaint = Paint()
+      ..color = StudioColors.borderSubtle
+      ..strokeWidth = 1;
+    const dotStep = 26.0;
+    for (double x = 0; x < size.width; x += dotStep) {
+      for (double y = 0; y < size.height; y += dotStep) {
+        canvas.drawCircle(Offset(x, y), 1, dotPaint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant FlowDotGridPainter oldDelegate) => false;
 }
 
 class _DagLayout {

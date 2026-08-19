@@ -8,14 +8,14 @@ import 'package:flutter/material.dart';
 /// here and no hardcoded fake UI data belongs in this file.
 abstract final class StudioColors {
   // Background layers (dark hierarchy)
-  static const Color bgRoot = Color(0xFF0D0F12); // lowest black
-  static const Color bgSurface = Color(0xFF13161C); // panel base
-  static const Color bgCard = Color(0xFF191D24); // floating/card base
-  static const Color bgHover = Color(0xFF222732); // hover/focus
+  static const Color bgRoot = Color(0xFF0D0F14); // L0 lowest black
+  static const Color bgSurface = Color(0xFF131720); // L1 panel base
+  static const Color bgCard = Color(0xFF1B202D); // L2 floating/card base
+  static const Color bgHover = Color(0xFF262E40); // L3 hover/focus
 
   // Borders and dividers
-  static const Color borderSubtle = Color(0xFF232834);
-  static const Color borderStrong = Color(0xFF333A4C);
+  static const Color borderSubtle = Color(0xFF242A3A);
+  static const Color borderStrong = Color(0xFF2E3648);
 
   // Brand and status colors
   static const Color primary = Color(0xFF2563EB);
@@ -119,68 +119,92 @@ ThemeData buildStudioTheme(ColorScheme scheme) {
   final baseTextTheme = scheme.brightness == Brightness.dark
       ? ThemeData.dark().textTheme
       : ThemeData.light().textTheme;
+  const double bodyHeight = 1.4;
+  const double bodyLetterSpacing = 0.2;
   final textTheme = baseTextTheme
       .apply(
         bodyColor: scheme.onSurface,
         displayColor: scheme.onSurface,
-        fontFamily: 'Microsoft YaHei',
+        fontFamily: 'Segoe UI',
       )
       .copyWith(
         headlineSmall: baseTextTheme.headlineSmall?.copyWith(
-          fontSize: 20,
+          fontSize: 18,
           fontWeight: FontWeight.w700,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         titleLarge: baseTextTheme.titleLarge?.copyWith(
-          fontSize: 17,
+          fontSize: 16,
           fontWeight: FontWeight.w700,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         titleMedium: baseTextTheme.titleMedium?.copyWith(
-          fontSize: 15,
-          fontWeight: FontWeight.w700,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         titleSmall: baseTextTheme.titleSmall?.copyWith(
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         bodyLarge: baseTextTheme.bodyLarge?.copyWith(
-          fontSize: 14,
-          height: 1.45,
+          fontSize: 13,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         bodyMedium: baseTextTheme.bodyMedium?.copyWith(
-          fontSize: 12.5,
-          height: 1.45,
+          fontSize: 12,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         bodySmall: baseTextTheme.bodySmall?.copyWith(
           fontSize: 11,
-          height: 1.4,
           color: scheme.onSurfaceVariant,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         labelLarge: baseTextTheme.labelLarge?.copyWith(
           fontSize: 12,
           fontWeight: FontWeight.w600,
           color: scheme.onSurface,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         labelMedium: baseTextTheme.labelMedium?.copyWith(
           fontSize: 11,
           color: scheme.onSurfaceVariant,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
         labelSmall: baseTextTheme.labelSmall?.copyWith(
           fontSize: 10,
           color: scheme.onSurfaceVariant,
+          letterSpacing: bodyLetterSpacing,
+          height: bodyHeight,
         ),
       );
   return ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
     textTheme: textTheme,
-    fontFamily: 'Microsoft YaHei',
-    fontFamilyFallback: const ['Segoe UI', 'PingFang SC', 'sans-serif'],
+    fontFamily: 'Segoe UI',
+    fontFamilyFallback: const [
+      'Microsoft YaHei UI',
+      'PingFang SC',
+      'Noto Sans SC',
+      'sans-serif',
+    ],
     scaffoldBackgroundColor: scheme.brightness == Brightness.dark
         ? StudioColors.bgRoot
         : scheme.surface,

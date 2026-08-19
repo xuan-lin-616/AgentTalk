@@ -4,9 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('studio design tokens match the blueprint palette', () {
-    expect(StudioColors.bgRoot, const Color(0xFF0D0F12));
-    expect(StudioColors.bgSurface, const Color(0xFF13161C));
-    expect(StudioColors.bgCard, const Color(0xFF191D24));
+    expect(StudioColors.bgRoot, const Color(0xFF0D0F14));
+    expect(StudioColors.bgSurface, const Color(0xFF131720));
+    expect(StudioColors.bgCard, const Color(0xFF1B202D));
     expect(StudioColors.primary, const Color(0xFF2563EB));
     expect(StudioColors.success, const Color(0xFF10B981));
     expect(StudioColors.warning, const Color(0xFFF59E0B));
