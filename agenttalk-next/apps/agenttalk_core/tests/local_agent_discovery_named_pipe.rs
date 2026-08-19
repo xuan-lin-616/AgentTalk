@@ -1909,26 +1909,20 @@ fn release_core_named_pipe_bounds_same_owner_discovery_scans() {
         .to_owned();
     let _ = wait_for_completed_snapshot(&mut owner, owner_session_id, &second_scan_id);
 
-    send_command(
-        &mut owner,
-        owner_session_id,
-        "w53-owner-start-overflow",
-        "agent.discovery.start",
-        json!({}),
-        Some(5_000),
-    );
-    let overflow = read_error(&mut owner, "same owner discovery scan capacity");
-    assert_eq!(overflow.code, "DISCOVERY_OWNER_SCAN_CAPACITY_EXHAUSTED");
-    assert!(!overflow.retryable);
-    assert_safe_renderer_value(
-        &serde_json::to_value(&overflow).expect("error json"),
-        &fixture,
-    );
+    // Terminal sessions are retained for replay only until the per-owner
+    // retention boundary. Starting a third scan must evict the oldest
+    // completed session instead of reporting capacity exhaustion.
+    let third = start_scan(&mut owner, owner_session_id, "w53-owner-start-3");
+    let third_scan_id = third.payload["scanId"]
+        .as_str()
+        .expect("third scan")
+        .to_owned();
+    let _ = wait_for_completed_snapshot(&mut owner, owner_session_id, &third_scan_id);
 
     send_query(
         &mut owner,
         owner_session_id,
-        "w53-owner-replay-after-overflow",
+        "w53-owner-replay-after-eviction",
         "events.replay",
         json!({
             "streamId": "local-discovery-events",
@@ -1937,15 +1931,30 @@ fn release_core_named_pipe_bounds_same_owner_discovery_scans() {
             "limit": 16,
         }),
     );
-    let replay = read_response(&mut owner, "owner replay after same-owner overflow");
+    let replay = read_response(&mut owner, "owner replay after terminal eviction");
     let replay_json = replay.payload.to_string();
     assert!(replay_json.contains(&first_scan_id));
     assert!(replay_json.contains(&second_scan_id));
-    assert!(!replay_json.contains("w53-owner-start-overflow"));
+    assert!(replay_json.contains(&third_scan_id));
     assert!(!replay_json.contains(&fixture.credential));
 
-    let replayed_first = start_scan(&mut owner, owner_session_id, "w53-owner-start-1");
-    assert_eq!(replayed_first.payload["scanId"], first_scan_id);
+    send_query(
+        &mut owner,
+        owner_session_id,
+        "w53-owner-evicted-snapshot",
+        "agent.discovery.snapshot",
+        json!({"scanId": first_scan_id}),
+    );
+    let evicted = read_error(&mut owner, "evicted terminal session snapshot");
+    assert_eq!(evicted.code, "DISCOVERY_SCAN_NOT_FOUND");
+    assert!(!evicted.retryable);
+    assert_safe_renderer_value(
+        &serde_json::to_value(&evicted).expect("error json"),
+        &fixture,
+    );
+
+    let replacement = start_scan(&mut owner, owner_session_id, "w53-owner-start-1");
+    assert_ne!(replacement.payload["scanId"], first_scan_id);
 
     send_command(
         &mut owner,
