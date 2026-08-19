@@ -896,3 +896,65 @@ fn paths_containing(root: &std::path::Path, needle: &str) -> Vec<std::path::Path
     }
     matches
 }
+
+#[test]
+#[ignore]
+fn real_windows_passive_scan_prints_local_manifest_candidates() {
+    let _guard = env_guard();
+    let _worker_guard = install_fixture_worker();
+    let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+        path_env: std::env::var("PATH").ok(),
+        use_real_app_paths: false,
+        use_real_packages: false,
+        use_real_loopback: false,
+        request_timeout: Duration::from_secs(10),
+        max_path_entries: 25,
+        max_candidates_per_path_entry: 8,
+        max_results: 128,
+        ..WindowsPassiveDiscoveryConfig::default()
+    });
+    let manifests = agenttalk_runtime_host::load_local_manifest_directory(
+        agenttalk_runtime_host::default_local_manifest_directory()
+            .as_deref()
+            .expect("LOCALAPPDATA is available"),
+    )
+    .snapshot
+    .manifests;
+    let session = report.classify_acp(
+        &manifests,
+        Instant::now() + Duration::from_secs(5),
+        &AtomicBool::new(false),
+    );
+    let ids: Vec<String> = session
+        .projections()
+        .iter()
+        .map(|p| p.connector_id.clone())
+        .collect();
+    eprintln!("passive projections: {:?}", report.projections.len());
+    for p in &report.projections {
+        eprintln!(
+            " projection {} {} {:?}",
+            p.connector_id, p.display_name, p.verification_authority
+        );
+    }
+    eprintln!("passive diagnostics: {:?}", report.diagnostics);
+    eprintln!("manifest count: {}", manifests.len());
+    eprintln!(
+        "manifest ids: {:?}",
+        manifests
+            .iter()
+            .map(|m| (m.id.clone(), format!("{:?}", m.launch), m.protocol.clone()))
+            .collect::<Vec<_>>()
+    );
+    eprintln!("ACP projection ids: {ids:?}");
+    assert!(
+        ids.contains(&"local.dsh-acp".to_string()),
+        "missing dsh in {ids:?}"
+    );
+    for p in session.projections() {
+        eprintln!(
+            "{} verification={:?}",
+            p.connector_id, p.verification_authority
+        );
+    }
+}

@@ -96,7 +96,7 @@ pub struct RuntimeDiscovery {
 
 const LOCAL_DISCOVERY_CODEX_CONNECTOR_ID: &str = "local.codex";
 const LOCAL_DISCOVERY_KUN_CONNECTOR_ID: &str = "local.kun.shared-runtime";
-const LOCAL_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const LOCAL_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One read-only local Connector candidate. This intentionally excludes every
 /// credential, endpoint authorization detail, process id, and Runtime body.
@@ -1463,7 +1463,15 @@ fn runner_installation_observation(
     let package_directory =
         runner_package_directory(runner_kind, &record.install_root, &record.package_name)
             .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
-    let package_tree_digest = bounded_package_tree_digest(&package_directory, deadline, cancelled)?;
+    let install_root = record.install_root.to_string_lossy();
+    let package_tree_digest = bounded_package_tree_digest(
+        &package_directory,
+        &record.package_name,
+        &record.resolved_version,
+        &install_root,
+        deadline,
+        cancelled,
+    )?;
     let runner_identity =
         windows_executable_identity_fingerprint(&runner_fingerprint.stable_identity);
     let fingerprint = ObservationFingerprint::from_parts(&[
@@ -1699,7 +1707,58 @@ fn runner_package_directory(
         .then_some(canonical)
 }
 
+/// Discovery-time lightweight package identity: hashes only the package
+/// `package.json` plus the package name, resolved version, and install root.
+/// The full content-tree hash is intentionally NOT performed on the passive
+/// discovery hot path; verification/import must call
+/// `full_runner_package_tree_digest` when content tamper-evidence is required.
 fn bounded_package_tree_digest(
+    package_directory: &Path,
+    package_name: &str,
+    resolved_version: &str,
+    install_root: &str,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<String, DiscoveryDiagnosticCode> {
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(DiscoveryDiagnosticCode::ProviderTimeout);
+    }
+    let root = package_directory
+        .canonicalize()
+        .map_err(|error| io_diagnostic_code(&error))?;
+    if has_reparse_point(&root) {
+        return Err(DiscoveryDiagnosticCode::ReparsePointRejected);
+    }
+    let package_json = root.join("package.json");
+    if has_reparse_point(&package_json) {
+        return Err(DiscoveryDiagnosticCode::ReparsePointRejected);
+    }
+    let metadata = package_json
+        .metadata()
+        .map_err(|error| io_diagnostic_code(&error))?;
+    if !metadata.is_file() || metadata.len() > MAX_RUNNER_PACKAGE_TREE_BYTES {
+        return Err(DiscoveryDiagnosticCode::InvalidSourceRecord);
+    }
+    let bytes = fs::read(&package_json).map_err(|error| io_diagnostic_code(&error))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"agenttalk-runner-package-manifest-v1");
+    hasher.update(normalized_relative_identity(Path::new(package_name))?.as_bytes());
+    hasher.update([0]);
+    hasher.update(resolved_version.as_bytes());
+    hasher.update([0]);
+    hasher.update(normalized_relative_identity(Path::new(install_root))?.as_bytes());
+    hasher.update([0]);
+    hasher.update(bytes.len().to_le_bytes());
+    hasher.update(&bytes);
+    Ok(sha256_hex(&hasher.finalize()))
+}
+
+/// Full package-tree content digest, preserved for the verify/import stage.
+/// It is intentionally not called on the passive discovery hot path.
+/// // TODO(verify 期全树完整性): call this from ACP verify/import after the
+/// candidate has been explicitly selected and identity verification starts.
+#[allow(dead_code)]
+fn full_runner_package_tree_digest(
     package_directory: &Path,
     deadline: Instant,
     cancelled: &AtomicBool,

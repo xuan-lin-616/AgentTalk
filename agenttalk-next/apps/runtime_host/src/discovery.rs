@@ -315,7 +315,10 @@ impl DiscoveryCoordinator {
                             diagnostics.extend(outcome.diagnostics);
                             (Ok(()), outcome.observations, false, false)
                         }
-                        Err(error) => (Err(error), Vec::new(), false, true),
+                        Err(error) => {
+                            let stop = error.code != DiscoveryDiagnosticCode::ProviderTimeout;
+                            (Err(error), Vec::new(), false, stop)
+                        }
                     }
                 } else if !provider.execution().allows_inline() {
                     (
@@ -370,7 +373,7 @@ impl DiscoveryCoordinator {
                     source_kind: error.source_kind,
                     code: error.code,
                 });
-                if stop_on_error || error.code == DiscoveryDiagnosticCode::ProviderTimeout {
+                if stop_on_error {
                     break;
                 }
                 continue;
@@ -2533,6 +2536,9 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct InlineProviderTimeoutProvider;
+
+    #[derive(Clone)]
     struct OwnedBlockingWorkloadProvider {
         marker: String,
         owned_processes: Arc<Mutex<Vec<OwnedProcessTreeRecord>>>,
@@ -2599,6 +2605,27 @@ mod tests {
         auth_state: AuthState,
         health_state: HealthState,
         evidence_summary: Vec<DiscoveryEvidence>,
+    }
+
+    impl DiscoveryProvider for InlineProviderTimeoutProvider {
+        fn source_kind(&self) -> ObservationSourceKind {
+            ObservationSourceKind::ExecutableInventory
+        }
+
+        fn execution(&self) -> DiscoveryProviderExecution {
+            DiscoveryProviderExecution::InlineAllowedForTests
+        }
+
+        fn collect(
+            &self,
+            _context: &DiscoveryContext<'_>,
+            _emit: &mut dyn FnMut(Observation) -> bool,
+        ) -> Result<(), DiscoveryProviderError> {
+            Err(DiscoveryProviderError {
+                source_kind: ObservationSourceKind::ExecutableInventory,
+                code: DiscoveryDiagnosticCode::ProviderTimeout,
+            })
+        }
     }
 
     impl DiscoveryProvider for FixedProvider {
@@ -3880,6 +3907,40 @@ mod tests {
         assert!(records[0].root_pid > 0);
         assert_owned_process_tree_reaped(&records[0], &marker);
         assert!(wait_for_no_fixture_processes(&marker));
+    }
+
+    #[test]
+    fn provider_timeout_does_not_discard_later_provider_observations() {
+        let fixed = observation(
+            &["provider-timeout-follow-up"],
+            "ProviderTimeoutFollowUp",
+            "available",
+            CompatibilityState::Compatible,
+            AuthState::Unknown,
+            HealthState::Unavailable,
+            Vec::new(),
+        );
+        let coordinator = DiscoveryCoordinator::new(vec![
+            Box::new(InlineProviderTimeoutProvider),
+            Box::new(FixedProvider {
+                observations: vec![fixed.clone()],
+                error: None,
+                call_count: Arc::new(Mutex::new(0)),
+                remaining_budget_seen: Arc::new(Mutex::new(Vec::new())),
+            }),
+        ]);
+        let policy = DiscoveryPolicy {
+            timeout_ms: 1_000,
+            ..DiscoveryPolicy::default()
+        };
+        let cancelled = AtomicBool::new(false);
+        let report = coordinator.discover_report(&policy, &cancelled);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiscoveryDiagnosticCode::ProviderTimeout));
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.candidates[0].display_name, fixed.display_name);
     }
 
     #[test]

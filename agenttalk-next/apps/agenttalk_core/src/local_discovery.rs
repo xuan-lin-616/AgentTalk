@@ -29,7 +29,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const DISCOVERY_MAX_SESSIONS_PER_OWNER: usize = 16;
