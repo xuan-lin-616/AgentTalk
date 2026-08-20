@@ -257,6 +257,9 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
     } on Object catch (error) {
       if (!mounted) return;
       setState(() {
+        if (_isMissingScanError(error)) {
+          _snapshot = null;
+        }
         _error = _renderError(error);
       });
     } finally {
@@ -394,6 +397,11 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
     return discoveryErrorText(AppLocalizations.of(context)!, error);
   }
 
+  bool _isMissingScanError(Object error) =>
+      error is CoreIpcException &&
+      (error.code == 'DISCOVERY_SCAN_NOT_FOUND' ||
+          error.code == 'DISCOVERY_SCAN_EXPIRED');
+
   String _renderNoticeForEventError(Object error) {
     if (error is CoreIpcException && error.isReplayGap) {
       return AppLocalizations.of(context)!.localAgentEventReplayGapNotice;
@@ -453,7 +461,9 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
                   key: const Key('local-agent-select-executable'),
-                  onPressed: busy ? null : () => unawaited(_pickExecutableAndScan()),
+                  onPressed: busy
+                      ? null
+                      : () => unawaited(_pickExecutableAndScan()),
                   icon: const Icon(Icons.folder_open_outlined, size: 18),
                   label: Text(l10n.localAgentSelectExecutable),
                 ),
@@ -521,6 +531,18 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
         child: _error == null
             ? const CircularProgressIndicator()
             : Text(_error!, textAlign: TextAlign.center),
+      );
+    }
+    if (snapshot.state == 'running') {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 12),
+            Text(l10n.localAgentScanning),
+          ],
+        ),
       );
     }
     if (snapshot.candidates.isEmpty) {

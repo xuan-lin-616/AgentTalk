@@ -464,6 +464,107 @@ void main() {
   );
 
   testWidgets(
+    'running empty snapshot stays in scanning state and uses the start epoch',
+    (tester) async {
+      _useDesktopSurface(tester);
+      final pipe = _ScriptedPipe();
+      pipe.responder = (request) {
+        final command = request['command'];
+        final query = request['query'];
+        if (command == 'agent.discovery.start') return _startResponse(request);
+        if (command == 'events.subscribe') return _subscribeResponse(request);
+        if (command == 'events.ack' || command == 'events.unsubscribe') {
+          return _okResponse(request, <String, dynamic>{});
+        }
+        if (query == 'agent.discovery.snapshot') {
+          return _snapshotResponse(
+            request,
+            candidates: <Map<String, dynamic>>[],
+            state: 'running',
+          );
+        }
+        return _errorResponse(request, 'INVALID_COMMAND', 'unexpected request');
+      };
+      final client = _clientFor(pipe);
+      addTearDown(() => unawaited(client.close()));
+
+      await tester.pumpWidget(
+        _host(
+          LocalAgentScanDialog(
+            client: client,
+            sessionId: 'session-w7-test',
+            projectId: 'project-w7',
+            onImported: (_) {},
+          ),
+        ),
+      );
+      for (var attempt = 0; attempt < 50; attempt++) {
+        await tester.pump(const Duration(milliseconds: 10));
+        if (pipe.writtenQueries.contains('agent.discovery.snapshot')) break;
+      }
+
+      expect(pipe.writtenQueries, contains('agent.discovery.snapshot'));
+      expect(find.text('正在扫描…'), findsOneWidget);
+      expect(find.text('没有发现本地候选。'), findsNothing);
+      final subscribePayload = pipe
+          .payloadsForCommand('events.subscribe')
+          .single;
+      final afterCursor =
+          subscribePayload['afterCursor'] as Map<String, dynamic>;
+      expect(afterCursor['streamId'], 'local-discovery-events');
+      expect(afterCursor['epoch'], _epoch);
+      final snapshotIndex = pipe.writtenQueries.indexOf(
+        'agent.discovery.snapshot',
+      );
+      expect(snapshotIndex, isNonNegative);
+      expect(pipe.writtenPayloads.last['scanId'], _scanId);
+    },
+  );
+
+  testWidgets(
+    'ScanNotFound renders an explicit error instead of no candidates',
+    (tester) async {
+      _useDesktopSurface(tester);
+      final pipe = _ScriptedPipe();
+      pipe.responder = (request) {
+        final command = request['command'];
+        final query = request['query'];
+        if (command == 'agent.discovery.start') return _startResponse(request);
+        if (command == 'events.subscribe') return _subscribeResponse(request);
+        if (command == 'events.ack' || command == 'events.unsubscribe') {
+          return _okResponse(request, <String, dynamic>{});
+        }
+        if (query == 'agent.discovery.snapshot') {
+          return _errorResponse(
+            request,
+            'DISCOVERY_SCAN_NOT_FOUND',
+            'scan not found',
+          );
+        }
+        return _errorResponse(request, 'INVALID_COMMAND', 'unexpected request');
+      };
+      final client = _clientFor(pipe);
+      addTearDown(() => unawaited(client.close()));
+
+      await tester.pumpWidget(
+        _host(
+          LocalAgentScanDialog(
+            client: client,
+            sessionId: 'session-w7-test',
+            projectId: 'project-w7',
+            onImported: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('扫描不存在或已过期，请重新扫描。'), findsWidgets);
+      expect(find.text('没有发现本地候选。'), findsNothing);
+      expect(find.textContaining('scan not found'), findsNothing);
+    },
+  );
+
+  testWidgets(
     'verify requires explicit consent before any agent.discovery.verify call',
     (tester) async {
       _useDesktopSurface(tester);
