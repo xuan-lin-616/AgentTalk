@@ -55,6 +55,8 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
   CoreEventSubscription? _subscription;
   CoreIpcClient? _subscriptionClient;
   StreamSubscription<EventEnvelope>? _subscriptionStream;
+  StreamCursor? _lastDiscoveryCursor;
+  String? _snapshotPollingScanId;
   bool _subscribing = false;
   String? _busyCandidateId;
   int _requestCounter = 0;
@@ -107,6 +109,7 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
   Future<void> _startScan({String? explicitExecutablePath}) async {
     final client = widget.client;
     final sessionId = widget.sessionId;
+    CoreIpcClient? pendingSubscriptionClient;
     if (mounted) {
       setState(() {
         _starting = true;
@@ -116,18 +119,44 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
     }
     try {
       await _releaseSubscription();
+      try {
+        // Complete the dedicated connection handshake before production
+        // discovery work starts. A real PATH/registry scan can outlive the
+        // Named Pipe client's bounded read window; opening the connection
+        // after start would then misreport a healthy stream as unavailable.
+        pendingSubscriptionClient = await client.openSubscription(
+          sessionId: sessionId,
+        );
+      } on Object catch (error) {
+        if (mounted) {
+          setState(() {
+            _notice = _renderNoticeForEventError(error);
+          });
+        }
+      }
       final start = await client.discoveryStart(
         sessionId: sessionId,
         requestId: _requestId('discovery-start'),
         explicitExecutablePath: explicitExecutablePath,
       );
-      if (!mounted) return;
+      if (!mounted) {
+        await _closeDedicatedSubscriptionClient(pendingSubscriptionClient);
+        return;
+      }
       setState(() {
         _scanId = start.scanId;
         _snapshot = null;
       });
-      unawaited(_subscribeAndRefresh(start.eventEpoch));
+      final subscriptionClient = pendingSubscriptionClient;
+      pendingSubscriptionClient = null;
+      unawaited(
+        _subscribeAndRefresh(
+          start.eventEpoch,
+          subscriptionClient: subscriptionClient,
+        ),
+      );
     } on Object catch (error) {
+      await _closeDedicatedSubscriptionClient(pendingSubscriptionClient);
       if (!mounted) return;
       setState(() {
         _error = _renderError(error);
@@ -155,31 +184,35 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
     await _startScan(explicitExecutablePath: result.path);
   }
 
-  Future<void> _subscribeAndRefresh(String epoch) async {
-    final client = widget.client;
+  Future<void> _subscribeAndRefresh(
+    String epoch, {
+    required CoreIpcClient? subscriptionClient,
+  }) async {
     final sessionId = widget.sessionId;
-    if (mounted && !_subscribing) {
+    var subscriptionEstablished = false;
+    if (mounted && !_subscribing && subscriptionClient != null) {
       _subscribing = true;
       try {
         // The real Core binds a subscribed connection to events.ack /
         // events.unsubscribe only, so the discovery subscription lives on a
         // dedicated connection; commands and queries stay on the main client.
         // The mock transport reuses the main client, keeping tests unchanged.
-        final subscriptionClient = await client.openSubscription(
-          sessionId: sessionId,
-        );
-        if (!mounted) {
-          await subscriptionClient.close().catchError((Object _) {});
-          return;
-        }
+        final previousCursor = _lastDiscoveryCursor;
+        final afterSequence =
+            previousCursor?.streamId == localDiscoveryEventStreamId &&
+                previousCursor?.epoch == epoch
+            ? previousCursor!.sequence
+            : 0;
         final subscription = await subscriptionClient.subscribeDiscoveryEvents(
           sessionId: sessionId,
           epoch: epoch,
+          afterSequence: afterSequence,
         );
         if (!mounted) {
           await subscription.unsubscribe().catchError(
             (Object _) => <String, dynamic>{},
           );
+          await _closeDedicatedSubscriptionClient(subscriptionClient);
           return;
         }
         setState(() {
@@ -195,21 +228,54 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
             setState(() {
               _notice = _renderNoticeForEventError(error);
             });
-            unawaited(_refreshSnapshot());
+            final scanId = _scanId;
+            if (scanId != null) {
+              unawaited(_pollSnapshotUntilTerminal(scanId));
+            }
           },
         );
+        subscriptionEstablished = true;
       } on Object catch (error) {
+        await _closeDedicatedSubscriptionClient(subscriptionClient);
         if (!mounted) return;
-        if (error is CoreIpcException && error.isReplayGap) {
-          setState(() {
-            _notice = _renderNoticeForEventError(error);
-          });
-        }
+        setState(() {
+          _notice = _renderNoticeForEventError(error);
+        });
       } finally {
         _subscribing = false;
       }
     }
-    await _refreshSnapshot();
+    final scanId = _scanId;
+    if (!subscriptionEstablished && scanId != null) {
+      await _pollSnapshotUntilTerminal(scanId);
+    } else {
+      await _refreshSnapshot();
+    }
+  }
+
+  Future<void> _closeDedicatedSubscriptionClient(CoreIpcClient? client) async {
+    if (client == null || identical(client, widget.client)) return;
+    await client.close().catchError((Object _) {});
+  }
+
+  Future<void> _pollSnapshotUntilTerminal(String scanId) async {
+    if (_snapshotPollingScanId == scanId) return;
+    _snapshotPollingScanId = scanId;
+    try {
+      for (var attempt = 0; attempt < 40; attempt++) {
+        if (!mounted || _scanId != scanId) return;
+        await _refreshSnapshot();
+        if (!mounted || _scanId != scanId) return;
+        final snapshot = _snapshot;
+        if (snapshot?.scanId == scanId && snapshot?.state != 'running') return;
+        if (snapshot == null && _error != null) return;
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    } finally {
+      if (_snapshotPollingScanId == scanId) {
+        _snapshotPollingScanId = null;
+      }
+    }
   }
 
   Future<void> _onDiscoveryEvent(
@@ -230,9 +296,18 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
         summary.type == 'agent.discovery.failed') {
       // Acknowledge the processed cursor before refreshing so the retained
       // discovery stream stays compact.
-      await subscription
-          .ack(subscription.lastEventCursor)
-          .catchError((Object _) => <String, dynamic>{});
+      try {
+        await subscription.ack(envelope.cursor);
+        final previous = _lastDiscoveryCursor;
+        if (previous == null ||
+            previous.streamId != envelope.cursor.streamId ||
+            previous.epoch != envelope.cursor.epoch ||
+            envelope.cursor.sequence > previous.sequence) {
+          _lastDiscoveryCursor = envelope.cursor;
+        }
+      } on Object {
+        // Snapshot refresh remains authoritative when ACK fails.
+      }
       await _refreshSnapshot();
     }
   }

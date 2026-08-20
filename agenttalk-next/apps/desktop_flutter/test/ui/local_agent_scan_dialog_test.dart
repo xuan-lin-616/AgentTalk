@@ -963,6 +963,7 @@ void main() {
     tester,
   ) async {
     _useDesktopSurface(tester);
+    var snapshotCalls = 0;
     final pipe = _ScriptedPipe();
     pipe.responder = (request) {
       final command = request['command'];
@@ -981,6 +982,14 @@ void main() {
         );
       }
       if (query == 'agent.discovery.snapshot') {
+        snapshotCalls += 1;
+        if (snapshotCalls == 1) {
+          return _snapshotResponse(
+            request,
+            candidates: <Map<String, dynamic>>[],
+            state: 'running',
+          );
+        }
         return _snapshotResponse(request, candidates: [_agentIdentified()]);
       }
       return _errorResponse(request, 'INVALID_COMMAND', 'unexpected request');
@@ -1001,6 +1010,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('事件流出现缺口'), findsOneWidget);
+    expect(snapshotCalls, greaterThanOrEqualTo(2));
     expect(
       find.byKey(const Key('local-agent-verify-candidate-agent')),
       findsOneWidget,

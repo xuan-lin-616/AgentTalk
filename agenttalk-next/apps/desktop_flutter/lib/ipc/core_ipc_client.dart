@@ -3175,6 +3175,7 @@ class CoreIpcClient {
   Future<CoreEventSubscription> subscribeDiscoveryEvents({
     required String sessionId,
     required String epoch,
+    int afterSequence = 0,
     int maxInFlightEvents = 64,
     int maxInFlightBytes = 262144,
   }) {
@@ -3182,7 +3183,7 @@ class CoreIpcClient {
       sessionId: sessionId,
       afterCursor: StreamCursor(
         streamId: localDiscoveryEventStreamId,
-        sequence: 0,
+        sequence: afterSequence,
         epoch: epoch,
       ),
       maxInFlightEvents: maxInFlightEvents,
@@ -4300,7 +4301,7 @@ abstract final class _NativePipeResult {
 Future<List<int>> _runNativePipeOperation({
   required int operation,
   required List<Object> arguments,
-  required Duration timeout,
+  required Duration? timeout,
 }) async {
   final resultPort = ReceivePort();
   Isolate? worker;
@@ -4309,7 +4310,10 @@ Future<List<int>> _runNativePipeOperation({
       _nativePipeOperationEntry,
       <Object?>[resultPort.sendPort, operation, ...arguments],
     );
-    final result = await resultPort.first.timeout(timeout);
+    final resultFuture = resultPort.first;
+    final result = timeout == null
+        ? await resultFuture
+        : await resultFuture.timeout(timeout);
     if (result is! List) {
       throw const CoreIpcException(
         'AgentTalk Core Named Pipe native operation returned invalid data',
@@ -4542,7 +4546,11 @@ class _Win32PipeTransport implements _CoreIpcTransport {
     final result = await _runNativePipeOperation(
       operation: _NativePipeOperation.read,
       arguments: <Object>[_readHandle, length],
-      timeout: const Duration(seconds: 5),
+      // An authenticated connection may legitimately be idle while a local
+      // scan or runtime operation is working. Closing the duplicated handle
+      // interrupts the blocking read, so lifecycle shutdown stays bounded
+      // without turning ordinary five-second idle periods into fatal errors.
+      timeout: null,
     );
     if (result[0] == _NativePipeResult.ok) {
       return Uint8List.fromList(result.sublist(1));

@@ -132,6 +132,16 @@ void main() {
       final handshake = await client.handshake(sessionId: sessionId);
       expect(handshake['ok'], true);
 
+      // A healthy authenticated pipe may be quiet for longer than the old
+      // five-second transport read window. The background reader must remain
+      // usable without an application-level heartbeat.
+      await Future<void>.delayed(const Duration(seconds: 6));
+      final idleSnapshot = await query(
+        'projection.snapshot',
+        <String, dynamic>{},
+      );
+      expect(idleSnapshot['ok'], true);
+
       final health = await query('runtime.health', <String, dynamic>{});
       expect(health['payload']['status'], 'ready');
       final models = await query('runtime.models', <String, dynamic>{});

@@ -753,12 +753,14 @@ void main() {
         pipe.responder = (request) {
           final command = request['command'];
           if (command == 'events.subscribe') {
+            final payload = request['payload'] as Map<String, dynamic>;
+            final afterCursor = payload['afterCursor'] as Map<String, dynamic>;
             return _ok(request, {
               'subscriptionId': 'sub-discovery',
               'streamId': 'local-discovery-events',
               'cursor': {
                 'streamId': 'local-discovery-events',
-                'sequence': 0,
+                'sequence': afterCursor['sequence'],
                 'epoch': 'discovery-epoch-1',
               },
               'maxInFlightEvents': 64,
@@ -776,12 +778,17 @@ void main() {
         final subscription = await client.subscribeDiscoveryEvents(
           sessionId: 'session-ipc-test',
           epoch: 'discovery-epoch-1',
+          afterSequence: 17,
         );
         expect(subscription.streamId, 'local-discovery-events');
         final subscribePayload = pipe.writtenPayloads.first;
         expect(
           (subscribePayload['afterCursor'] as Map<String, dynamic>)['streamId'],
           'local-discovery-events',
+        );
+        expect(
+          (subscribePayload['afterCursor'] as Map<String, dynamic>)['sequence'],
+          17,
         );
         await subscription.ack(subscription.lastEventCursor);
         expect(pipe.writtenCommands, contains('events.ack'));
