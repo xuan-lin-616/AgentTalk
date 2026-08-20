@@ -2371,10 +2371,11 @@ impl SqliteStore {
         upsert_local_agent_adapter_binding(&tx, &request.connector, &request.binding)?;
         tx.execute(
             "INSERT INTO agents(id, name, role, specialty, system_prompt, connector_id, model_id, candidate_model_list_revision)
-             VALUES(?1, ?2, 'local_agent', 'acp', '', ?3, ?4, 0)",
+             VALUES(?1, ?2, 'local_agent', ?3, '', ?4, ?5, 0)",
             params![
                 &request.agent_id,
                 &request.agent_name,
+                &request.binding.adapter_kind,
                 &request.connector.connector_id,
                 request.model_selection.model_id.as_deref(),
             ],
@@ -12715,6 +12716,28 @@ mod tests {
         assert!(!schema.to_ascii_lowercase().contains("authorization"));
         assert!(!schema.to_ascii_lowercase().contains("cookie"));
         assert!(!schema.to_ascii_lowercase().contains("path"));
+    }
+
+    #[test]
+    fn local_agent_import_uses_the_verified_adapter_kind_as_specialty() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        store
+            .create_project("project-import", "Import target", None)
+            .unwrap();
+        let mut request = local_agent_import_request("request-codex-import");
+        request.binding.adapter_kind = "codex".into();
+        request.binding.manifest_id = "builtin.codex-app-server".into();
+        request.connector.runtime_type = "codex".into();
+        store.import_local_agent(&request).unwrap();
+        let specialty: String = store
+            .connection
+            .query_row(
+                "SELECT specialty FROM agents WHERE id = ?1",
+                [&request.agent_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(specialty, "codex");
     }
 
     #[test]

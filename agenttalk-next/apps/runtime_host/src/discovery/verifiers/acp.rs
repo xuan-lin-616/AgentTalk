@@ -7,8 +7,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agenttalk_domain::{
-    AuthState, CandidateAvailability, CandidateCategory, CompatibilityState, DiscoveryState,
-    ObservationSourceKind,
+    AuthState, CandidateAvailability, CandidateCategory, CompatibilityState, DiscoveryEvidence,
+    DiscoveryState, ObservationSourceKind,
 };
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
@@ -17,10 +17,12 @@ use sha2::{Digest, Sha256};
 
 use super::super::{
     catalog::ManifestMatchInput, manifest::*, ManagedChild, ManagedDirectStdioSpec, Observation,
+    RunnerInstallationMetadata,
 };
 use crate::{
-    has_reparse_point, is_real_regular_file, is_windows_executable_file,
-    open_verified_executable_guard, stable_file_fingerprint_with_deadline, VerifiedExecutableGuard,
+    bounded_package_tree_digest, has_reparse_point, is_real_regular_file,
+    is_windows_executable_file, open_verified_executable_guard, runner_package_directory,
+    stable_file_fingerprint_with_deadline, VerifiedExecutableGuard,
 };
 
 const ACP_PROTOCOL_MAJOR: u16 = 1;
@@ -126,6 +128,7 @@ pub struct AcpPassiveObservation {
     executable_sha256: String,
     source_kind: ObservationSourceKind,
     package_ids: Vec<String>,
+    runner_installation: Option<RunnerInstallationMetadata>,
 }
 
 impl std::fmt::Debug for AcpPassiveObservation {
@@ -164,6 +167,7 @@ impl AcpPassiveObservation {
             executable_sha256: fingerprint.content_sha256,
             source_kind: observation.source_kind,
             package_ids: observation.package_ids.clone(),
+            runner_installation: observation.runner_installation.clone(),
         })
     }
 
@@ -185,6 +189,7 @@ impl AcpPassiveObservation {
             executable_sha256: fingerprint.content_sha256,
             source_kind,
             package_ids: Vec::new(),
+            runner_installation: None,
         })
     }
 }
@@ -204,6 +209,8 @@ pub struct AcpClassification {
     executable_identity: String,
     executable_sha256: String,
     source_kind: ObservationSourceKind,
+    package_ids: Vec<String>,
+    runner_installation: Option<RunnerInstallationMetadata>,
     projection: agenttalk_domain::CandidateProjection,
     binding: AcpTargetBinding,
 }
@@ -265,6 +272,18 @@ impl AcpClassification {
                 .sha256
                 .as_deref()
                 .is_some_and(|expected| expected == self.executable_sha256)
+            || self.package_identity_matches_manifest()
+    }
+
+    fn package_identity_matches_manifest(&self) -> bool {
+        self.runner_installation.is_some()
+            && self.package_ids.iter().any(|observed| {
+                self.manifest
+                    .match_rules
+                    .package_ids
+                    .iter()
+                    .any(|expected| expected.eq_ignore_ascii_case(observed))
+            })
     }
 }
 
@@ -397,19 +416,46 @@ pub fn classify(
             &manifest.id,
             &observation.executable_identity,
             &observation.executable_sha256,
+            observation
+                .runner_installation
+                .as_ref()
+                .map(|metadata| metadata.package_tree_digest.as_str()),
         ),
     };
     let mut projection = projection;
     projection.candidate_id = observation.candidate_id.clone();
-    Ok(AcpClassification {
+    if observation.runner_installation.is_some()
+        && !projection
+            .evidence_summary
+            .contains(&DiscoveryEvidence::InstallKnown)
+    {
+        projection
+            .evidence_summary
+            .push(DiscoveryEvidence::InstallKnown);
+    }
+    let mut classification = AcpClassification {
         manifest: manifest.clone(),
         executable: observation.executable,
         executable_identity: observation.executable_identity,
         executable_sha256: observation.executable_sha256,
         source_kind: observation.source_kind,
+        package_ids: observation.package_ids,
+        runner_installation: observation.runner_installation,
         projection,
         binding,
-    })
+    };
+    if classification.package_identity_matches_manifest()
+        && !classification
+            .projection
+            .evidence_summary
+            .contains(&DiscoveryEvidence::PackageIdentityMatched)
+    {
+        classification
+            .projection
+            .evidence_summary
+            .push(DiscoveryEvidence::PackageIdentityMatched);
+    }
+    Ok(classification)
 }
 
 pub(crate) fn verify(
@@ -567,6 +613,34 @@ fn identity_is_current(
                 fingerprint.stable_identity == classification.executable_identity
                     && fingerprint.content_sha256 == classification.executable_sha256
             })
+        && package_identity_is_current(classification, deadline, cancelled)
+}
+
+fn package_identity_is_current(
+    classification: &AcpClassification,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> bool {
+    let Some(metadata) = classification.runner_installation.as_ref() else {
+        return true;
+    };
+    let Some(package_directory) = runner_package_directory(
+        &metadata.runner_kind,
+        &metadata.install_root,
+        &metadata.package_name,
+    ) else {
+        return false;
+    };
+    let install_root = metadata.install_root.to_string_lossy();
+    bounded_package_tree_digest(
+        &package_directory,
+        &metadata.package_name,
+        &metadata.resolved_version,
+        &install_root,
+        deadline,
+        cancelled,
+    )
+    .is_ok_and(|digest| digest == metadata.package_tree_digest)
 }
 
 fn verify_in_owned_process(
@@ -1185,6 +1259,7 @@ fn target_binding_digest(
     manifest_id: &str,
     executable_identity: &str,
     executable_sha256: &str,
+    package_tree_digest: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     for value in [
@@ -1194,6 +1269,10 @@ fn target_binding_digest(
         executable_sha256,
     ] {
         hasher.update(value.as_bytes());
+        hasher.update([0xff]);
+    }
+    if let Some(package_tree_digest) = package_tree_digest {
+        hasher.update(package_tree_digest.as_bytes());
         hasher.update([0xff]);
     }
     hasher

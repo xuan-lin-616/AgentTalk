@@ -1651,7 +1651,11 @@ fn passive_projection(
         compatibility_state: CompatibilityState::NotVerified,
         auth_state: AuthState::Unknown,
         health_state: HealthState::NotChecked,
-        evidence_summary: vec![DiscoveryEvidence::CatalogUnavailable],
+        evidence_summary: vec![if manifest.is_some() {
+            DiscoveryEvidence::AdapterManifest
+        } else {
+            DiscoveryEvidence::CatalogUnavailable
+        }],
         diagnostics,
     }
 }

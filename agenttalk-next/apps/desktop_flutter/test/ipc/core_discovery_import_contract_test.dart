@@ -1072,18 +1072,46 @@ class _W8Harness {
       scanId: scanId,
     );
     final candidate = snapshot.candidates.single;
-    await client.discoveryVerify(
+    final candidateId = candidate.candidate.candidateId;
+    final subscriptionClient = await client.openSubscription(
       sessionId: sessionId,
-      requestId: 'w8-classify-verify',
-      scanId: scanId,
-      candidateId: candidate.candidate.candidateId,
-      consent: true,
-      deadline: const Duration(seconds: 3),
     );
+    try {
+      final subscription = await subscriptionClient.subscribeDiscoveryEvents(
+        sessionId: sessionId,
+        epoch: epoch,
+      );
+      final events = StreamIterator<EventEnvelope>(subscription.events);
+      await client.discoveryVerify(
+        sessionId: sessionId,
+        requestId: 'w8-classify-verify',
+        scanId: scanId,
+        candidateId: candidateId,
+        consent: true,
+        deadline: const Duration(seconds: 3),
+      );
+      while (true) {
+        final hasEvent = await events.moveNext().timeout(
+          const Duration(seconds: 15),
+        );
+        expect(hasEvent, isTrue, reason: 'W8 verification event must arrive');
+        final event = events.current;
+        await subscription.ack(event.cursor);
+        if (event.event == 'agent.discovery.candidate_verified' &&
+            event.payload['candidateId'] == candidateId) {
+          break;
+        }
+        if (event.event == 'agent.discovery.failed') {
+          fail('W8 verification failed: ${jsonEncode(event.payload)}');
+        }
+      }
+    } finally {
+      await subscriptionClient.close().catchError((Object _) {});
+    }
     await waitForPidFilesToAppear([
       File('${fixtureRoot.path}${Platform.pathSeparator}root.pid'),
     ]);
-    return candidate.candidate.candidateId;
+    return candidateId;
   }
 
   /// Scans and returns the classified candidate id WITHOUT verifying.

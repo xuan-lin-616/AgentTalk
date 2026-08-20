@@ -656,6 +656,7 @@ fn public_windows_passive_discovery_runs_sources_inside_real_worker() {
         max_path_entries: 16,
         max_candidates_per_path_entry: 16,
         request_timeout: WORKER_DISCOVERY_TIMEOUT,
+        include_known_connectors: false,
     });
 
     assert_eq!(

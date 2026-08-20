@@ -7,6 +7,10 @@ pub use discovery::verifiers::acp::{
     AcpCompatibilityReport, AcpImportPlanMetadata, AcpPassiveObservation, AcpVerificationConsent,
     AcpVerificationDiagnosticCode, AcpVerificationResult, AcpVerificationStatus,
 };
+pub use discovery::verifiers::known::{
+    KnownConnectorClassificationError, KnownConnectorDiscoverySession,
+    KnownConnectorVerificationResult,
+};
 
 #[cfg(windows)]
 pub use discovery::catalog::WindowsAuthenticodeVerifier;
@@ -150,6 +154,23 @@ impl LocalConnectorDiscoveryReport {
             cancelled,
         )
     }
+
+    /// Retains private, re-checkable bindings for first-party Connector
+    /// candidates whose production Runtime already ships with Core. This is
+    /// separate from ACP manifest classification: recognizing a package or
+    /// executable never fabricates a protocol adapter.
+    pub fn classify_known_connectors(
+        &self,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> KnownConnectorDiscoverySession {
+        KnownConnectorDiscoverySession::classify(
+            &self.acp_passive_observations,
+            &self.projections,
+            deadline,
+            cancelled,
+        )
+    }
 }
 
 /// Closed local-discovery source labels. These are renderer-safe display data,
@@ -186,6 +207,11 @@ pub struct WindowsPassiveDiscoveryConfig {
     /// up directly in PATH before the generic PATH enumeration so manifest
     /// matches are never crowded out by large system directories.
     pub manifest_executable_names: Vec<String>,
+    /// Includes the existing first-party local Connector providers (currently
+    /// Codex and Kun) in the same bounded candidate budget as the generic
+    /// Windows evidence providers. Tests and explicit-selection scans keep
+    /// this disabled so they remain isolated from machine-global installs.
+    pub include_known_connectors: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -255,6 +281,7 @@ impl Default for WindowsPassiveDiscoveryConfig {
             max_candidates_per_path_entry: 64,
             request_timeout: LOCAL_DISCOVERY_REQUEST_TIMEOUT,
             manifest_executable_names: Vec::new(),
+            include_known_connectors: false,
         }
     }
 }
@@ -391,38 +418,71 @@ pub fn discover_windows_passive_report_with_config_and_cancelled(
     config: &WindowsPassiveDiscoveryConfig,
     cancelled: &AtomicBool,
 ) -> LocalConnectorDiscoveryReport {
-    let coordinator = DiscoveryCoordinator::new(vec![
-        Box::new(WindowsPassiveDiscoveryProvider {
+    let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
+    // Explicit user authority must be admitted before machine-global noise.
+    providers.push(Box::new(WindowsPassiveDiscoveryProvider {
+        kind: ManagedProviderWorkerKind::ExplicitSources,
+        source_kind: ObservationSourceKind::UserSelected,
+        config: config.clone(),
+    }));
+    // Preserve 63875db's manifest-targeted PATH guarantee independently of
+    // generic PATH enumeration. A zero per-directory budget keeps this pass
+    // limited to exact manifest names, so later high-signal providers retain
+    // capacity while loopback/AppX noise cannot crowd the targets out.
+    if !config.manifest_executable_names.is_empty() {
+        let mut targeted_path_config = config.clone();
+        targeted_path_config.max_candidates_per_path_entry = 0;
+        providers.push(Box::new(WindowsPassiveDiscoveryProvider {
             kind: ManagedProviderWorkerKind::WindowsPath,
             source_kind: ObservationSourceKind::WindowsPath,
-            config: config.clone(),
-        }),
-        Box::new(WindowsPassiveDiscoveryProvider {
-            kind: ManagedProviderWorkerKind::WindowsAppPaths,
-            source_kind: ObservationSourceKind::WindowsAppPath,
-            config: config.clone(),
-        }),
-        Box::new(WindowsPassiveDiscoveryProvider {
-            kind: ManagedProviderWorkerKind::WindowsPackages,
-            source_kind: ObservationSourceKind::WindowsPackage,
-            config: config.clone(),
-        }),
-        Box::new(WindowsPassiveDiscoveryProvider {
-            kind: ManagedProviderWorkerKind::WindowsRunnerInstallations,
-            source_kind: ObservationSourceKind::ExecutableInventory,
-            config: config.clone(),
-        }),
-        Box::new(WindowsPassiveDiscoveryProvider {
-            kind: ManagedProviderWorkerKind::WindowsLoopbackListeners,
-            source_kind: ObservationSourceKind::LoopbackListener,
-            config: config.clone(),
-        }),
-        Box::new(WindowsPassiveDiscoveryProvider {
-            kind: ManagedProviderWorkerKind::ExplicitSources,
-            source_kind: ObservationSourceKind::UserSelected,
-            config: config.clone(),
-        }),
-    ]);
+            config: targeted_path_config,
+        }));
+    }
+    if config.include_known_connectors {
+        let known = LocalConnectorDiscoveryConfig {
+            request_timeout: config.request_timeout,
+            ..LocalConnectorDiscoveryConfig::default()
+        };
+        providers.push(Box::new(CodexDiscoveryProvider {
+            config: known.clone(),
+        }));
+        providers.push(Box::new(KunDiscoveryProvider { config: known }));
+    }
+    // Package-manager evidence is substantially more Agent-specific than an
+    // arbitrary executable found in PATH, so preserve it before generic PATH
+    // enumeration can consume the global candidate budget.
+    providers.push(Box::new(WindowsPassiveDiscoveryProvider {
+        kind: ManagedProviderWorkerKind::WindowsRunnerInstallations,
+        source_kind: ObservationSourceKind::ExecutableInventory,
+        config: config.clone(),
+    }));
+    // Generic PATH remains ahead of broad OS inventories, but only after
+    // explicit, manifest-targeted, first-party and package-manager evidence.
+    // This preserves isolated PATH scans and native CLI discovery without
+    // allowing System32 noise to starve runner/package Agents.
+    let mut generic_path_config = config.clone();
+    generic_path_config.manifest_executable_names.clear();
+    providers.push(Box::new(WindowsPassiveDiscoveryProvider {
+        kind: ManagedProviderWorkerKind::WindowsPath,
+        source_kind: ObservationSourceKind::WindowsPath,
+        config: generic_path_config,
+    }));
+    providers.push(Box::new(WindowsPassiveDiscoveryProvider {
+        kind: ManagedProviderWorkerKind::WindowsLoopbackListeners,
+        source_kind: ObservationSourceKind::LoopbackListener,
+        config: config.clone(),
+    }));
+    providers.push(Box::new(WindowsPassiveDiscoveryProvider {
+        kind: ManagedProviderWorkerKind::WindowsPackages,
+        source_kind: ObservationSourceKind::WindowsPackage,
+        config: config.clone(),
+    }));
+    providers.push(Box::new(WindowsPassiveDiscoveryProvider {
+        kind: ManagedProviderWorkerKind::WindowsAppPaths,
+        source_kind: ObservationSourceKind::WindowsAppPath,
+        config: config.clone(),
+    }));
+    let coordinator = DiscoveryCoordinator::new(providers);
     let policy = DiscoveryPolicy {
         max_results: config.max_results,
         timeout_ms: config.request_timeout.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -1353,6 +1413,13 @@ fn collect_npm_runner_installations(
     let Some(runner) = find_runner_executable(path_env, "npx") else {
         return;
     };
+    let Some(package_manager) = find_runner_executable(path_env, "npm") else {
+        collection.push_diagnostic(
+            ObservationSourceKind::ExecutableInventory,
+            DiscoveryDiagnosticCode::ProviderFailed,
+        );
+        return;
+    };
     let fingerprint = match stable_file_fingerprint_with_deadline(&runner, deadline, cancelled) {
         Ok(fingerprint) => fingerprint,
         Err(code) => {
@@ -1360,8 +1427,23 @@ fn collect_npm_runner_installations(
             return;
         }
     };
+    let install_root =
+        match run_readonly_runner_command(&package_manager, &["root", "-g"], deadline, cancelled)
+            .ok()
+            .and_then(|bytes| parse_runner_install_root(&bytes))
+            .and_then(|modules_root| modules_root.parent().map(Path::to_path_buf))
+        {
+            Some(root) => root,
+            None => {
+                collection.push_diagnostic(
+                    ObservationSourceKind::ExecutableInventory,
+                    DiscoveryDiagnosticCode::InvalidSourceRecord,
+                );
+                return;
+            }
+        };
     let output = match run_readonly_runner_command(
-        "npm",
+        &package_manager,
         &["ls", "-g", "--depth=0", "--json", "--offline"],
         deadline,
         cancelled,
@@ -1372,7 +1454,7 @@ fn collect_npm_runner_installations(
             return;
         }
     };
-    let records = match parse_npm_global_list(&output) {
+    let records = match parse_npm_global_list(&output, Some(&install_root)) {
         Ok(records) => records,
         Err(code) => {
             collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
@@ -1395,7 +1477,15 @@ fn collect_npm_runner_installations(
             cancelled,
         ) {
             Ok(observation) => {
-                let _ = collection.push_observation(observation, max_observations);
+                let native_bins = npm_native_bin_observations(&observation, deadline, cancelled);
+                if !collection.push_observation(observation, max_observations) {
+                    break;
+                }
+                for native in native_bins {
+                    if !collection.push_observation(native, max_observations) {
+                        break;
+                    }
+                }
             }
             Err(code) => {
                 collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code)
@@ -1414,6 +1504,13 @@ fn collect_uvx_runner_installations(
     let Some(runner) = find_runner_executable(path_env, "uvx") else {
         return;
     };
+    let Some(package_manager) = find_runner_executable(path_env, "uv") else {
+        collection.push_diagnostic(
+            ObservationSourceKind::ExecutableInventory,
+            DiscoveryDiagnosticCode::ProviderFailed,
+        );
+        return;
+    };
     let fingerprint = match stable_file_fingerprint_with_deadline(&runner, deadline, cancelled) {
         Ok(fingerprint) => fingerprint,
         Err(code) => {
@@ -1422,7 +1519,7 @@ fn collect_uvx_runner_installations(
         }
     };
     let output = match run_readonly_runner_command(
-        "uv",
+        &package_manager,
         &["--offline", "tool", "list"],
         deadline,
         cancelled,
@@ -1433,24 +1530,27 @@ fn collect_uvx_runner_installations(
             return;
         }
     };
-    let install_root =
-        match run_readonly_runner_command("uv", &["--offline", "tool", "dir"], deadline, cancelled)
-        {
-            Ok(root) => match parse_runner_install_root(&root) {
-                Some(root) => root,
-                None => {
-                    collection.push_diagnostic(
-                        ObservationSourceKind::ExecutableInventory,
-                        DiscoveryDiagnosticCode::InvalidSourceRecord,
-                    );
-                    return;
-                }
-            },
-            Err(code) => {
-                collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+    let install_root = match run_readonly_runner_command(
+        &package_manager,
+        &["--offline", "tool", "dir"],
+        deadline,
+        cancelled,
+    ) {
+        Ok(root) => match parse_runner_install_root(&root) {
+            Some(root) => root,
+            None => {
+                collection.push_diagnostic(
+                    ObservationSourceKind::ExecutableInventory,
+                    DiscoveryDiagnosticCode::InvalidSourceRecord,
+                );
                 return;
             }
-        };
+        },
+        Err(code) => {
+            collection.push_diagnostic(ObservationSourceKind::ExecutableInventory, code);
+            return;
+        }
+    };
     for (name, version) in parse_uv_tool_list(&output)
         .into_iter()
         .take(MAX_RUNNER_INSTALLATIONS)
@@ -1504,6 +1604,12 @@ fn runner_installation_observation(
     let package_id =
         canonical_runner_package_id(runner_kind, &record.package_name, &record.resolved_version)
             .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
+    let mut package_ids = vec![package_id];
+    if record.package_name.starts_with('@') {
+        package_ids.push(record.package_name.to_ascii_lowercase());
+    }
+    package_ids.sort();
+    package_ids.dedup();
     let package_directory =
         runner_package_directory(runner_kind, &record.install_root, &record.package_name)
             .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
@@ -1516,8 +1622,6 @@ fn runner_installation_observation(
         deadline,
         cancelled,
     )?;
-    let runner_identity =
-        windows_executable_identity_fingerprint(&runner_fingerprint.stable_identity);
     let fingerprint = ObservationFingerprint::from_parts(&[
         "runner-installation".into(),
         runner_kind.into(),
@@ -1525,11 +1629,16 @@ fn runner_installation_observation(
         runner_fingerprint.content_sha256.clone(),
         package_tree_digest.clone(),
     ]);
+    let projection = runner_package_projection(runner_kind, &record.package_name);
     Ok(Observation {
         locator: ObservationLocator::Executable(runner.to_path_buf()),
         fingerprint,
-        association_fingerprints: vec![runner_identity],
-        package_ids: vec![package_id],
+        // A runner such as npx is shared by every global package. Treating
+        // its executable identity as an equivalence edge would collapse all
+        // packages into one candidate. The runner identity and bytes are
+        // already covered by this package's primary fingerprint above.
+        association_fingerprints: Vec::new(),
+        package_ids,
         runner_installation: Some(RunnerInstallationMetadata {
             runner_kind: runner_kind.into(),
             package_name: record.package_name.clone(),
@@ -1541,7 +1650,7 @@ fn runner_installation_observation(
             runner_executable_sha256: runner_fingerprint.content_sha256.clone(),
         }),
         source_kind: ObservationSourceKind::ExecutableInventory,
-        category: CandidateCategory::AgentRuntime,
+        category: projection.category,
         trust_level: ObservationTrustLevel::Heuristic,
         verification_authority: VerificationAuthority::Unverified,
         availability_authority: VerificationAuthority::Unverified,
@@ -1549,18 +1658,15 @@ fn runner_installation_observation(
         compatibility_authority: VerificationAuthority::Unverified,
         auth_authority: VerificationAuthority::Unverified,
         health_authority: VerificationAuthority::Unverified,
-        connector_id: LOCAL_DISCOVERY_UNKNOWN_CONNECTOR_ID.into(),
-        runtime_type: LOCAL_DISCOVERY_UNKNOWN_RUNTIME_TYPE.into(),
-        display_name: format!(
-            "{runner_kind} {}@{}",
-            record.package_name, record.resolved_version
-        ),
+        connector_id: projection.connector_id,
+        runtime_type: projection.runtime_type,
+        display_name: projection.display_name,
         availability: CandidateAvailability::Unconfigured,
         models: Vec::new(),
         catalog_revision: None,
         requires_configuration: true,
-        discovery_state: DiscoveryState::Observed,
-        compatibility_state: CompatibilityState::NotVerified,
+        discovery_state: projection.discovery_state,
+        compatibility_state: CompatibilityState::AdapterRequired,
         auth_state: AuthState::Unknown,
         health_state: HealthState::NotChecked,
         evidence_summary: vec![
@@ -1569,6 +1675,165 @@ fn runner_installation_observation(
         ],
         diagnostics: Vec::new(),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NpmBinField {
+    Single(String),
+    Multiple(BTreeMap<String, String>),
+}
+
+fn npm_native_bin_observations(
+    package_observation: &Observation,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Vec<Observation> {
+    let Some(metadata) = package_observation.runner_installation.as_ref() else {
+        return Vec::new();
+    };
+    if metadata.runner_kind != "npx" || cancelled.load(Ordering::Acquire) {
+        return Vec::new();
+    }
+    let Some(package_root) = runner_package_directory(
+        &metadata.runner_kind,
+        &metadata.install_root,
+        &metadata.package_name,
+    ) else {
+        return Vec::new();
+    };
+    let package_json = package_root.join("package.json");
+    let Ok(file) = fs::File::open(&package_json) else {
+        return Vec::new();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_PACKAGE_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_PACKAGE_MANIFEST_BYTES
+    {
+        return Vec::new();
+    }
+    #[derive(Deserialize)]
+    struct PackageBinManifest {
+        bin: Option<NpmBinField>,
+    }
+    let Ok(manifest) = serde_json::from_slice::<PackageBinManifest>(&bytes) else {
+        return Vec::new();
+    };
+    let paths = match manifest.bin {
+        Some(NpmBinField::Single(path)) => vec![path],
+        Some(NpmBinField::Multiple(entries)) => entries.into_values().collect(),
+        None => Vec::new(),
+    };
+    let mut observations = Vec::new();
+    let mut seen = BTreeSet::new();
+    for relative in paths.into_iter().take(16) {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            break;
+        }
+        let relative = Path::new(&relative);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let candidate = package_root.join(relative);
+        if has_reparse_point(&candidate) || !is_windows_executable_file(&candidate) {
+            continue;
+        }
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(&package_root)
+            || has_reparse_point(&canonical)
+            || !is_real_regular_file(&canonical)
+            || !seen.insert(normalized_path_key(&canonical))
+        {
+            continue;
+        }
+        let Ok(mut observation) = unknown_executable_observation(
+            ObservationSourceKind::ExecutableInventory,
+            DiscoveryEvidence::ExecutableInventory,
+            ObservationTrustLevel::Heuristic,
+            &canonical,
+            deadline,
+            cancelled,
+        ) else {
+            continue;
+        };
+        observation
+            .association_fingerprints
+            .push(package_observation.fingerprint.clone());
+        observation.package_ids = package_observation.package_ids.clone();
+        observation.runner_installation = package_observation.runner_installation.clone();
+        observation.category = package_observation.category;
+        observation.connector_id = package_observation.connector_id.clone();
+        observation.runtime_type = package_observation.runtime_type.clone();
+        observation.display_name = package_observation.display_name.clone();
+        observation.availability = package_observation.availability;
+        observation.requires_configuration = package_observation.requires_configuration;
+        observation.discovery_state = package_observation.discovery_state;
+        observation.compatibility_state = package_observation.compatibility_state;
+        observation.evidence_summary = package_observation.evidence_summary.clone();
+        observations.push(observation);
+    }
+    observations
+}
+
+struct RunnerPackageProjection {
+    category: CandidateCategory,
+    connector_id: String,
+    runtime_type: String,
+    display_name: String,
+    discovery_state: DiscoveryState,
+}
+
+fn runner_package_projection(runner_kind: &str, package_name: &str) -> RunnerPackageProjection {
+    let known = match package_name.to_ascii_lowercase().as_str() {
+        "@anthropic-ai/claude-code" => Some((
+            "local.agent.claude-code",
+            "claude_code",
+            "Claude Code (npm)",
+        )),
+        "@deepseek-ai/dsh" => Some(("local.agent.dsh-cli", "dsh_cli", "dsh CLI (npm)")),
+        "@earendil-works/pi-coding-agent" => Some((
+            "local.agent.pi-coding-agent",
+            "pi_coding_agent",
+            "Pi Coding Agent (npm)",
+        )),
+        _ => None,
+    };
+    if let Some((connector_id, runtime_type, display_name)) = known {
+        return RunnerPackageProjection {
+            category: CandidateCategory::AgentRuntime,
+            connector_id: connector_id.into(),
+            runtime_type: runtime_type.into(),
+            display_name: display_name.into(),
+            discovery_state: DiscoveryState::Identified,
+        };
+    }
+    let package = package_name
+        .trim_start_matches('@')
+        .replace('/', " ")
+        .chars()
+        .take(64)
+        .collect::<String>();
+    let source = if runner_kind == "npx" {
+        "npm package"
+    } else {
+        "uv tool"
+    };
+    RunnerPackageProjection {
+        category: CandidateCategory::Unknown,
+        connector_id: LOCAL_DISCOVERY_UNKNOWN_CONNECTOR_ID.into(),
+        runtime_type: LOCAL_DISCOVERY_UNKNOWN_RUNTIME_TYPE.into(),
+        display_name: format!("{package} ({source})"),
+        discovery_state: DiscoveryState::Observed,
+    }
 }
 
 fn find_runner_executable(path_env: Option<&str>, runner: &str) -> Option<PathBuf> {
@@ -1600,6 +1865,7 @@ fn find_runner_executable(path_env: Option<&str>, runner: &str) -> Option<PathBu
 
 fn parse_npm_global_list(
     bytes: &[u8],
+    fallback_install_root: Option<&Path>,
 ) -> Result<Vec<RunnerPackageRecord>, DiscoveryDiagnosticCode> {
     #[derive(Deserialize)]
     struct NpmDependency {
@@ -1617,6 +1883,7 @@ fn parse_npm_global_list(
     let install_root = parsed
         .path
         .and_then(|path| bounded_absolute_path(&path))
+        .or_else(|| fallback_install_root.map(Path::to_path_buf))
         .ok_or(DiscoveryDiagnosticCode::InvalidSourceRecord)?;
     let mut records = Vec::new();
     for (package_name, dependency) in parsed.dependencies.unwrap_or_default() {
@@ -1784,13 +2051,19 @@ fn bounded_package_tree_digest(
         return Err(DiscoveryDiagnosticCode::InvalidSourceRecord);
     }
     let bytes = fs::read(&package_json).map_err(|error| io_diagnostic_code(&error))?;
+    let install_root = Path::new(install_root)
+        .canonicalize()
+        .map_err(|error| io_diagnostic_code(&error))?;
+    if has_reparse_point(&install_root) || !root.starts_with(&install_root) {
+        return Err(DiscoveryDiagnosticCode::InvalidSourceRecord);
+    }
     let mut hasher = Sha256::new();
     hasher.update(b"agenttalk-runner-package-manifest-v1");
     hasher.update(normalized_relative_identity(Path::new(package_name))?.as_bytes());
     hasher.update([0]);
     hasher.update(resolved_version.as_bytes());
     hasher.update([0]);
-    hasher.update(normalized_relative_identity(Path::new(install_root))?.as_bytes());
+    hasher.update(normalized_path_key(&install_root).as_bytes());
     hasher.update([0]);
     hasher.update(bytes.len().to_le_bytes());
     hasher.update(&bytes);
@@ -1893,7 +2166,7 @@ fn full_runner_package_tree_digest(
 }
 
 fn run_readonly_runner_command(
-    executable: &str,
+    executable: &Path,
     args: &[&str],
     deadline: Instant,
     cancelled: &AtomicBool,
@@ -1964,7 +2237,7 @@ mod runner_installation_tests {
     #[test]
     fn npm_global_json_projects_version_integrity_and_root() {
         let bytes = br#"{"path":"C:\\npm","dependencies":{"@scope/agent":{"version":"1.2.3","integrity":"sha512-abc"},"bad":{"version":"not a version"}}}"#;
-        let records = parse_npm_global_list(bytes).expect("npm list parses");
+        let records = parse_npm_global_list(bytes, None).expect("npm list parses");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].package_name, "@scope/agent");
         assert_eq!(records[0].resolved_version, "1.2.3");
@@ -1993,6 +2266,254 @@ mod runner_installation_tests {
             canonical_runner_package_id("uvx", "agent", "1.2.3").as_deref(),
             Some("agent@1.2.3")
         );
+    }
+
+    #[test]
+    fn npm_global_json_without_path_uses_the_separately_resolved_root() {
+        let fallback = if cfg!(windows) {
+            PathBuf::from(r"C:\npm")
+        } else {
+            PathBuf::from("/opt/npm")
+        };
+        let bytes = br#"{"dependencies":{"@scope/agent":{"version":"1.2.3"}}}"#;
+        let records =
+            parse_npm_global_list(bytes, Some(&fallback)).expect("fallback root is accepted");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].install_root, fallback);
+    }
+
+    #[test]
+    fn runner_installation_observation_accepts_a_canonical_package_root() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "agenttalk-runner-package-root-{}-{unique}",
+            std::process::id()
+        ));
+        let package = root.join("node_modules").join("@scope").join("agent");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@scope/agent","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        let runner = root.join(if cfg!(windows) { "npx.cmd" } else { "npx" });
+        std::fs::write(&runner, b"fixture runner").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let fingerprint = stable_file_fingerprint_with_deadline(
+            &runner,
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        )
+        .unwrap();
+        let observation = runner_installation_observation(
+            "npx",
+            &runner,
+            &fingerprint,
+            RunnerPackageRecord {
+                package_name: "@scope/agent".into(),
+                resolved_version: "1.2.3".into(),
+                install_root: root.clone(),
+                package_integrity: None,
+            },
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        )
+        .expect("canonical global package roots are valid discovery evidence");
+        assert_eq!(
+            observation.package_ids,
+            vec!["@scope/agent", "@scope/agent@1.2.3"]
+        );
+        assert!(observation.runner_installation.is_some());
+        assert!(observation.association_fingerprints.is_empty());
+        assert_eq!(observation.category, CandidateCategory::Unknown);
+        assert_eq!(
+            observation.compatibility_state,
+            CompatibilityState::AdapterRequired
+        );
+        assert_eq!(observation.display_name, "scope agent (npm package)");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn known_agent_packages_are_identified_without_claiming_an_adapter() {
+        let claude = runner_package_projection("npx", "@anthropic-ai/claude-code");
+        assert_eq!(claude.category, CandidateCategory::AgentRuntime);
+        assert_eq!(claude.connector_id, "local.agent.claude-code");
+        assert_eq!(claude.runtime_type, "claude_code");
+        assert_eq!(claude.display_name, "Claude Code (npm)");
+        assert_eq!(claude.discovery_state, DiscoveryState::Identified);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn npm_native_bin_keeps_package_identity_and_is_not_user_selected() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "agenttalk-native-package-bin-{}-{unique}",
+            std::process::id()
+        ));
+        let package = root
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            br#"{"name":"@anthropic-ai/claude-code","version":"1.2.3","bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .unwrap();
+        std::fs::write(package.join("bin").join("claude.exe"), b"fixture exe").unwrap();
+        let runner = root.join("npx.cmd");
+        std::fs::write(&runner, b"fixture runner").unwrap();
+        let cancelled = AtomicBool::new(false);
+        let fingerprint = stable_file_fingerprint_with_deadline(
+            &runner,
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        )
+        .unwrap();
+        let package_observation = runner_installation_observation(
+            "npx",
+            &runner,
+            &fingerprint,
+            RunnerPackageRecord {
+                package_name: "@anthropic-ai/claude-code".into(),
+                resolved_version: "1.2.3".into(),
+                install_root: root.clone(),
+                package_integrity: None,
+            },
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        )
+        .unwrap();
+        let bins = npm_native_bin_observations(
+            &package_observation,
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        );
+        assert_eq!(bins.len(), 1);
+        assert_eq!(
+            bins[0].source_kind,
+            ObservationSourceKind::ExecutableInventory
+        );
+        assert!(bins[0]
+            .package_ids
+            .iter()
+            .any(|id| id == "@anthropic-ai/claude-code"));
+        assert!(bins[0].runner_installation.is_some());
+        assert!(bins[0]
+            .association_fingerprints
+            .contains(&package_observation.fingerprint));
+        let manifest_bytes = serde_json::to_vec(&json!({
+            "schemaVersion": "agenttalk.adapter.v1",
+            "id": "org.fixture.package-bound-acp",
+            "displayName": "Package-bound ACP Fixture",
+            "category": "agent_protocol",
+            "protocol": {"kind": "acp", "major": 1},
+            "match": {
+                "executableNames": ["claude.exe"],
+                "packageIds": ["@anthropic-ai/claude-code"]
+            },
+            "launch": {
+                "kind": "direct",
+                "transport": "stdio",
+                "executableRef": "claude.exe",
+                "args": ["--fixture-acp"],
+                "environmentAllowlist": []
+            },
+            "verification": {"kind": "acp_initialize", "timeoutMs": 1000},
+            "capabilityPolicy": {
+                "filesystem": "negotiate",
+                "shell": "negotiate",
+                "streaming": "required",
+                "cancel": "required"
+            },
+            "source": {
+                "kind": "agenttalk_manifest",
+                "id": "org.fixture.package-bound-acp",
+                "version": "1.0.0"
+            }
+        }))
+        .unwrap();
+        let manifest = AdapterManifest::validate_json_bytes(&manifest_bytes).unwrap();
+        let passive = AcpPassiveObservation::from_passive_observation(
+            "candidate-package-claude",
+            &bins[0],
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        )
+        .unwrap();
+        let classification = AcpProtocolAdapterFactory
+            .classify(&manifest, passive)
+            .expect("package-owned native bin matches the package-bound ACP manifest");
+        assert!(classification.has_independent_identity());
+        assert!(classification
+            .projection()
+            .evidence_summary
+            .contains(&DiscoveryEvidence::PackageIdentityMatched));
+
+        let unbound_manifest = AdapterManifest::validate_json_bytes(include_bytes!(
+            "../../../examples/local-agent-manifests/claude-code.agenttalk-agent.json"
+        ))
+        .unwrap();
+        let unbound_passive = AcpPassiveObservation::from_passive_observation(
+            "candidate-unbound-package-claude",
+            &bins[0],
+            Instant::now() + Duration::from_secs(2),
+            &cancelled,
+        )
+        .unwrap();
+        let unbound = AcpProtocolAdapterFactory
+            .classify(&unbound_manifest, unbound_passive)
+            .expect("filename-only package observation remains passively classifiable");
+        assert!(!unbound.has_independent_identity());
+        assert!(!unbound
+            .projection()
+            .evidence_summary
+            .contains(&DiscoveryEvidence::PackageIdentityMatched));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_runner_command_uses_the_resolved_windows_cmd_path() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "agenttalk-runner-command-path-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("npm.cmd");
+        std::fs::write(
+            &script,
+            b"@echo off\r\necho {\"path\":\"C:\\\\npm\",\"dependencies\":{}}\r\n",
+        )
+        .unwrap();
+        let path_env = std::env::join_paths([&root])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let resolved = find_runner_executable(Some(&path_env), "npm")
+            .expect("the absolute npm.cmd path must be resolved before spawn");
+        assert_eq!(resolved, script.canonicalize().unwrap());
+        let output = run_readonly_runner_command(
+            &resolved,
+            &["ls", "-g", "--depth=0", "--json", "--offline"],
+            Instant::now() + Duration::from_secs(2),
+            &AtomicBool::new(false),
+        )
+        .expect("the resolved cmd path must be executable on Windows");
+        assert!(parse_npm_global_list(&output, None).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 
@@ -7574,7 +8095,10 @@ fn is_real_regular_file(path: &Path) -> bool {
 fn find_codex_on_process_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let executable_names: &[&str] = if cfg!(windows) {
-        &["codex.exe", "codex"]
+        // The extensionless npm shim is a POSIX shell script and cannot be a
+        // Windows CreateProcess target. Prefer a real native binary; the
+        // desktop/AppX fallback remains available when PATH has only shims.
+        &["codex.exe"]
     } else {
         &["codex"]
     };
@@ -12063,6 +12587,12 @@ mod tests {
         let transport = CodexAppServerTransport::new(CodexAppServerConfig::default());
         assert_eq!(transport.binary_path().unwrap(), new_version);
 
+        // npm also writes a POSIX shell shim named `codex` on Windows. It is
+        // a regular file but not a valid CreateProcess target and must not
+        // shadow the native desktop/AppX executable.
+        std::fs::write(path_dir.join("codex"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(transport.binary_path().unwrap(), new_version);
+
         let path_binary = path_dir.join("codex.exe");
         std::fs::write(&path_binary, b"fixture-path").unwrap();
         assert_eq!(transport.binary_path().unwrap(), path_binary);
@@ -13220,6 +13750,53 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         let serialized = serde_json::to_string(&report.projections).unwrap();
         assert!(!serialized.contains(&root.display().to_string()));
         assert!(!serialized.contains("nested\\nested-agent"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_targeted_path_precedes_other_provider_capacity_noise() {
+        let root = temporary_runtime_dir("manifest-targeted-provider-priority");
+        let path_dir = root.join("path");
+        let app_dir = root.join("app-paths");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let target = path_dir.join("targeted-agent.exe");
+        let noise_a = app_dir.join("noise-a.exe");
+        let noise_b = app_dir.join("noise-b.exe");
+        std::fs::write(&target, b"targeted manifest executable").unwrap();
+        std::fs::write(&noise_a, b"app path noise a").unwrap();
+        std::fs::write(&noise_b, b"app path noise b").unwrap();
+
+        let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: vec!["targeted-agent.exe".into()],
+            path_env: Some(path_dir.display().to_string()),
+            app_path_records: vec![
+                WindowsAppPathRecord {
+                    key_name: "noise-a.exe".into(),
+                    executable_path: noise_a,
+                    hive: WindowsRegistryHive::CurrentUser,
+                    view: WindowsRegistryView::Native,
+                },
+                WindowsAppPathRecord {
+                    key_name: "noise-b.exe".into(),
+                    executable_path: noise_b,
+                    hive: WindowsRegistryHive::CurrentUser,
+                    view: WindowsRegistryView::Native,
+                },
+            ],
+            use_real_app_paths: false,
+            use_real_packages: false,
+            use_real_loopback: false,
+            max_results: 2,
+            request_timeout: Duration::from_secs(2),
+            ..WindowsPassiveDiscoveryConfig::default()
+        });
+
+        assert_eq!(report.projections.len(), 2);
+        assert!(report
+            .projections
+            .iter()
+            .any(|candidate| candidate.display_name == "targeted-agent.exe"));
         let _ = std::fs::remove_dir_all(root);
     }
 

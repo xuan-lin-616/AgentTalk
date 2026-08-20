@@ -265,6 +265,42 @@ Map<String, dynamic> _agentIdentified() => _candidateProjection(
   lifecycleState: 'identified',
 );
 
+Map<String, dynamic> _packageBoundAgentIdentified() {
+  final projection = _candidateProjection(
+    candidateId: 'candidate-package-agent',
+    category: 'agent_runtime',
+    displayName: 'Package Agent',
+    compatibilityState: 'not_verified',
+    lifecycleState: 'identified',
+  );
+  final candidate = projection['candidate']! as Map<String, dynamic>;
+  candidate['sourceKind'] = 'executable_inventory';
+  candidate['sourceKinds'] = ['executable_inventory'];
+  candidate['evidenceSummary'] = [
+    'adapter_manifest',
+    'install_known',
+    'package_identity_matched',
+  ];
+  return projection;
+}
+
+Map<String, dynamic> _builtInCodexIdentified() {
+  final projection = _candidateProjection(
+    candidateId: 'candidate-codex',
+    category: 'agent_runtime',
+    displayName: 'Codex (local executable)',
+    compatibilityState: 'not_verified',
+    lifecycleState: 'identified',
+  );
+  final candidate = projection['candidate']! as Map<String, dynamic>;
+  candidate['connectorId'] = 'local.codex';
+  candidate['runtimeType'] = 'codex';
+  candidate['sourceKind'] = 'executable_inventory';
+  candidate['sourceKinds'] = ['executable_inventory'];
+  candidate['evidenceSummary'] = ['executable_inventory', 'install_known'];
+  return projection;
+}
+
 Map<String, dynamic> _agentVerified() => _candidateProjection(
   candidateId: 'candidate-agent-verified',
   category: 'agent_runtime',
@@ -520,6 +556,101 @@ void main() {
       expect(pipe.writtenPayloads.last['scanId'], _scanId);
     },
   );
+
+  testWidgets(
+    'package-bound native agent offers verify without claiming user selection',
+    (tester) async {
+      _useDesktopSurface(tester);
+      final pipe = _ScriptedPipe();
+      pipe.responder = (request) {
+        final command = request['command'];
+        final query = request['query'];
+        if (command == 'agent.discovery.start') return _startResponse(request);
+        if (command == 'events.subscribe') return _subscribeResponse(request);
+        if (command == 'events.ack' || command == 'events.unsubscribe') {
+          return _okResponse(request, <String, dynamic>{});
+        }
+        if (query == 'agent.discovery.snapshot') {
+          return _snapshotResponse(
+            request,
+            candidates: [_packageBoundAgentIdentified()],
+          );
+        }
+        return _errorResponse(request, 'INVALID_COMMAND', 'unexpected request');
+      };
+      final client = _clientFor(pipe);
+      addTearDown(() => unawaited(client.close()));
+
+      await tester.pumpWidget(
+        _host(
+          LocalAgentScanDialog(
+            client: client,
+            sessionId: 'session-package-agent',
+            projectId: 'project-w7',
+            onImported: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('local-agent-verify-candidate-package-agent')),
+        findsOneWidget,
+      );
+      expect(
+        (_packageBoundAgentIdentified()['candidate']!
+            as Map<String, dynamic>)['evidenceSummary'],
+        isNot(contains('user_selected')),
+      );
+    },
+  );
+
+  testWidgets('built-in Codex connector offers local verification', (
+    tester,
+  ) async {
+    _useDesktopSurface(tester);
+    final pipe = _ScriptedPipe();
+    pipe.responder = (request) {
+      final command = request['command'];
+      final query = request['query'];
+      if (command == 'agent.discovery.start') return _startResponse(request);
+      if (command == 'events.subscribe') return _subscribeResponse(request);
+      if (command == 'events.ack' || command == 'events.unsubscribe') {
+        return _okResponse(request, <String, dynamic>{});
+      }
+      if (query == 'agent.discovery.snapshot') {
+        return _snapshotResponse(
+          request,
+          candidates: [_builtInCodexIdentified()],
+        );
+      }
+      return _errorResponse(request, 'INVALID_COMMAND', 'unexpected request');
+    };
+    final client = _clientFor(pipe);
+    addTearDown(() => unawaited(client.close()));
+
+    await tester.pumpWidget(
+      _host(
+        LocalAgentScanDialog(
+          client: client,
+          sessionId: 'session-codex',
+          projectId: 'project-w7',
+          onImported: (_) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('local-agent-verify-candidate-codex')),
+      findsOneWidget,
+    );
+    expect(
+      (_builtInCodexIdentified()['candidate']!
+          as Map<String, dynamic>)['evidenceSummary'],
+      isNot(contains('user_selected')),
+    );
+  });
 
   testWidgets(
     'ScanNotFound renders an explicit error instead of no candidates',

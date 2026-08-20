@@ -11,7 +11,8 @@ use agenttalk_runtime_host::{
     load_local_manifest_directory, AcpCompatibilityReport, AcpDiscoverySession,
     AcpImportPlanMetadata, AcpVerificationConsent, AcpVerificationDiagnosticCode,
     AcpVerificationResult, AcpVerificationStatus, CatalogSnapshot, ExplicitDiscoverySource,
-    NetworkCounter, WindowsPassiveDiscoveryConfig,
+    KnownConnectorDiscoverySession, KnownConnectorVerificationResult, NetworkCounter,
+    WindowsPassiveDiscoveryConfig,
 };
 #[cfg(test)]
 use agenttalk_runtime_host::{AdapterManifest, CatalogLoadReport, ManifestLaunch};
@@ -123,15 +124,108 @@ struct DiscoverySession {
     candidates: BTreeMap<String, CandidateState>,
     diagnostics: Vec<DiscoveryDiagnostic>,
     acp_session: Option<AcpDiscoverySession>,
+    known_connector_session: Option<KnownConnectorDiscoverySession>,
 }
 
 #[derive(Clone)]
 struct CandidateState {
     projection: CandidateProjection,
-    has_acp_binding: bool,
-    verification: Option<AcpVerificationResult>,
+    binding_kind: CandidateBindingKind,
+    verification: Option<CandidateVerification>,
     dismissed: bool,
     verifying: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CandidateBindingKind {
+    None,
+    Acp,
+    KnownConnector,
+}
+
+#[derive(Clone)]
+enum CandidateVerification {
+    Acp(AcpVerificationResult),
+    KnownConnector(KnownConnectorVerificationResult),
+}
+
+impl CandidateVerification {
+    fn report(&self) -> &AcpCompatibilityReport {
+        match self {
+            Self::Acp(result) => result.report(),
+            Self::KnownConnector(result) => result.report(),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum VerificationAdapterSession {
+    Acp(AcpDiscoverySession),
+    KnownConnector(KnownConnectorDiscoverySession),
+}
+
+impl VerificationAdapterSession {
+    fn verify(
+        &self,
+        candidate_id: &str,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<CandidateVerification, ()> {
+        match self {
+            Self::Acp(session) => session
+                .verify(
+                    &AcpVerificationConsent::for_candidate(candidate_id),
+                    deadline,
+                    cancelled,
+                )
+                .map(CandidateVerification::Acp)
+                .map_err(|_| ()),
+            Self::KnownConnector(session) => session
+                .verify(candidate_id, deadline, cancelled)
+                .map(CandidateVerification::KnownConnector)
+                .map_err(|_| ()),
+        }
+    }
+}
+
+enum ImportAdapterBinding {
+    Acp {
+        session: AcpDiscoverySession,
+        verification: AcpVerificationResult,
+    },
+    KnownConnector {
+        session: KnownConnectorDiscoverySession,
+        verification: KnownConnectorVerificationResult,
+    },
+}
+
+impl ImportAdapterBinding {
+    fn import_plan_metadata(
+        &self,
+        candidate_id: &str,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<AcpImportPlanMetadata, ()> {
+        match self {
+            Self::Acp {
+                session,
+                verification,
+            } => session
+                .import_plan_metadata(
+                    &AcpVerificationConsent::for_candidate(candidate_id),
+                    verification,
+                    deadline,
+                    cancelled,
+                )
+                .map_err(|_| ()),
+            Self::KnownConnector {
+                session,
+                verification,
+            } => session
+                .import_plan_metadata(candidate_id, verification, deadline, cancelled)
+                .map_err(|_| ()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -249,8 +343,7 @@ pub(crate) struct ImportPlanWork {
     candidate_id: String,
     project_id: String,
     model_selection: Option<String>,
-    acp_session: AcpDiscoverySession,
-    verification: AcpVerificationResult,
+    binding: ImportAdapterBinding,
     cancelled: Arc<AtomicBool>,
     projection: CandidateProjection,
     // RAII in-flight lease; held for the whole lifetime of the work so every
@@ -382,7 +475,7 @@ struct VerificationWork {
     scan_id: String,
     owner: DiscoveryOwnerScope,
     candidate_id: String,
-    acp_session: AcpDiscoverySession,
+    adapter_session: VerificationAdapterSession,
     cancelled: Arc<AtomicBool>,
     deadline: Duration,
     event_sink: EventSink,
@@ -634,6 +727,7 @@ impl LocalDiscoveryService {
                 candidates: BTreeMap::new(),
                 diagnostics: Vec::new(),
                 acp_session: None,
+                known_connector_session: None,
             },
         );
         state.running_scans.insert(scan_id.clone(), owner.clone());
@@ -733,7 +827,7 @@ impl LocalDiscoveryService {
             if candidate.dismissed {
                 return Err(LocalDiscoveryServiceError::CandidateDismissed);
             }
-            if !candidate.has_acp_binding {
+            if candidate.binding_kind == CandidateBindingKind::None {
                 return Err(LocalDiscoveryServiceError::AdapterRequired);
             }
             if candidate.verifying || verification_is_running {
@@ -767,10 +861,23 @@ impl LocalDiscoveryService {
         #[cfg(test)]
         self.verify_private_state_attempts
             .fetch_add(1, Ordering::AcqRel);
-        let acp_session = session
-            .acp_session
-            .clone()
-            .ok_or(LocalDiscoveryServiceError::AdapterRequired)?;
+        let binding_kind = session
+            .candidates
+            .get(request.candidate_id)
+            .ok_or(LocalDiscoveryServiceError::CandidateNotFound)?
+            .binding_kind;
+        let adapter_session = match binding_kind {
+            CandidateBindingKind::Acp => session
+                .acp_session
+                .clone()
+                .map(VerificationAdapterSession::Acp),
+            CandidateBindingKind::KnownConnector => session
+                .known_connector_session
+                .clone()
+                .map(VerificationAdapterSession::KnownConnector),
+            CandidateBindingKind::None => None,
+        }
+        .ok_or(LocalDiscoveryServiceError::AdapterRequired)?;
         let cancellation = Arc::new(AtomicBool::new(false));
         let candidate = session
             .candidates
@@ -805,7 +912,7 @@ impl LocalDiscoveryService {
                 scan_id: request.scan_id.to_owned(),
                 owner: request.owner.clone(),
                 candidate_id: request.candidate_id.to_owned(),
-                acp_session,
+                adapter_session,
                 cancelled: cancellation,
                 deadline: request.deadline,
                 event_sink: request.event_sink,
@@ -1500,7 +1607,7 @@ impl LocalDiscoveryService {
                     candidate_id.to_owned(),
                     CandidateState {
                         projection,
-                        has_acp_binding: true,
+                        binding_kind: CandidateBindingKind::Acp,
                         verification: None,
                         dismissed: false,
                         verifying: false,
@@ -1508,6 +1615,7 @@ impl LocalDiscoveryService {
                 )]),
                 diagnostics: Vec::new(),
                 acp_session: None,
+                known_connector_session: None,
             },
         );
     }
@@ -1715,7 +1823,7 @@ impl LocalDiscoveryService {
                 key: key.clone(),
             }
         };
-        let (acp_session, verification, cancelled, projection) = {
+        let (binding, cancelled, projection) = {
             let state = lock_state(&self.state);
             #[cfg(test)]
             self.import_plan_preflight_attempts
@@ -1747,12 +1855,30 @@ impl LocalDiscoveryService {
             ) {
                 return Err(LocalDiscoveryServiceError::CandidateNotVerified);
             }
+            let binding = match (candidate.binding_kind, verification) {
+                (CandidateBindingKind::Acp, CandidateVerification::Acp(verification)) => {
+                    ImportAdapterBinding::Acp {
+                        session: session
+                            .acp_session
+                            .clone()
+                            .ok_or(LocalDiscoveryServiceError::AdapterRequired)?,
+                        verification,
+                    }
+                }
+                (
+                    CandidateBindingKind::KnownConnector,
+                    CandidateVerification::KnownConnector(verification),
+                ) => ImportAdapterBinding::KnownConnector {
+                    session: session
+                        .known_connector_session
+                        .clone()
+                        .ok_or(LocalDiscoveryServiceError::AdapterRequired)?,
+                    verification,
+                },
+                _ => return Err(LocalDiscoveryServiceError::CandidateNotVerified),
+            };
             (
-                session
-                    .acp_session
-                    .clone()
-                    .ok_or(LocalDiscoveryServiceError::AdapterRequired)?,
-                verification,
+                binding,
                 Arc::clone(&session.scan_cancelled),
                 candidate.projection.clone(),
             )
@@ -1762,8 +1888,7 @@ impl LocalDiscoveryService {
             candidate_id: candidate_id.to_owned(),
             project_id: project_id.to_owned(),
             model_selection: model_selection.map(str::to_owned),
-            acp_session,
-            verification,
+            binding,
             cancelled,
             projection,
             _lease: lease,
@@ -1781,10 +1906,8 @@ impl LocalDiscoveryService {
         if !self.configuration.import_plan_hold.is_zero() {
             thread::sleep(self.configuration.import_plan_hold);
         }
-        let consent = AcpVerificationConsent::for_candidate(&work.candidate_id);
-        let metadata = work.acp_session.import_plan_metadata(
-            &consent,
-            &work.verification,
+        let metadata = work.binding.import_plan_metadata(
+            &work.candidate_id,
             Instant::now() + DEFAULT_VERIFY_TIMEOUT,
             &work.cancelled,
         );
@@ -1804,12 +1927,10 @@ impl LocalDiscoveryService {
         &self,
         work: ImportPlanWork,
     ) -> Result<LocalImportWork, LocalDiscoveryServiceError> {
-        let consent = AcpVerificationConsent::for_candidate(&work.candidate_id);
         let metadata = work
-            .acp_session
+            .binding
             .import_plan_metadata(
-                &consent,
-                &work.verification,
+                &work.candidate_id,
                 Instant::now() + DEFAULT_VERIFY_TIMEOUT,
                 &work.cancelled,
             )
@@ -1969,6 +2090,7 @@ impl LocalDiscoveryService {
                 candidates: BTreeMap::new(),
                 diagnostics: Vec::new(),
                 acp_session: None,
+                known_connector_session: None,
             },
         );
     }
@@ -2031,6 +2153,7 @@ impl LocalDiscoveryService {
                 config.use_real_app_paths = false;
                 config.use_real_packages = false;
                 config.use_real_loopback = false;
+                config.include_known_connectors = false;
                 config.explicit_sources = explicit_sources;
                 config
             },
@@ -2050,6 +2173,8 @@ impl LocalDiscoveryService {
             Instant::now() + DEFAULT_SCAN_TIMEOUT,
             &cancelled,
         );
+        let known_connector_session =
+            report.classify_known_connectors(Instant::now() + DEFAULT_SCAN_TIMEOUT, &cancelled);
         if cancelled.load(Ordering::Acquire) {
             self.finish_scan_cancelled(&scan_id, &owner, &event_sink);
             return;
@@ -2077,7 +2202,13 @@ impl LocalDiscoveryService {
                 candidate_id.clone(),
                 CandidateState {
                     projection,
-                    has_acp_binding: acp_candidate_ids.contains(&candidate_id),
+                    binding_kind: if acp_candidate_ids.contains(&candidate_id) {
+                        CandidateBindingKind::Acp
+                    } else if known_connector_session.contains(&candidate_id) {
+                        CandidateBindingKind::KnownConnector
+                    } else {
+                        CandidateBindingKind::None
+                    },
                     verification: None,
                     dismissed: false,
                     verifying: false,
@@ -2104,6 +2235,7 @@ impl LocalDiscoveryService {
             session.candidates = candidate_states;
             session.diagnostics = diagnostics;
             session.acp_session = Some(acp_session);
+            session.known_connector_session = Some(known_connector_session);
         };
         let snapshot = match self.snapshot(&owner, &scan_id) {
             Ok(snapshot) => snapshot,
@@ -2128,7 +2260,12 @@ impl LocalDiscoveryService {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|candidate| candidate["candidate"]["runtimeType"] == "acp")
+            .filter(|candidate| {
+                matches!(
+                    candidate["candidate"]["runtimeType"].as_str(),
+                    Some("acp" | "codex")
+                )
+            })
         {
             self.emit(
                 &event_sink,
@@ -2160,23 +2297,22 @@ impl LocalDiscoveryService {
             self.finish_verify_cancelled(&work);
             return;
         }
-        let consent = AcpVerificationConsent::for_candidate(&work.candidate_id);
-        let verification =
-            match work
-                .acp_session
-                .verify(&consent, Instant::now() + work.deadline, &work.cancelled)
-            {
-                Ok(verification) => verification,
-                Err(_) => {
-                    self.finish_verify_binding_failure(
-                        &work.scan_id,
-                        &work.owner,
-                        &work.candidate_id,
-                        &work.event_sink,
-                    );
-                    return;
-                }
-            };
+        let verification = match work.adapter_session.verify(
+            &work.candidate_id,
+            Instant::now() + work.deadline,
+            &work.cancelled,
+        ) {
+            Ok(verification) => verification,
+            Err(_) => {
+                self.finish_verify_binding_failure(
+                    &work.scan_id,
+                    &work.owner,
+                    &work.candidate_id,
+                    &work.event_sink,
+                );
+                return;
+            }
+        };
         let report = verification.report().clone();
         let (lifecycle_state, diagnostic) = {
             let mut state = lock_state(&self.state);
@@ -3297,8 +3433,12 @@ impl LocalDiscoveryConfiguration {
             }
             Err(_) => (CatalogConfiguration::Unavailable, Vec::new()),
         };
+        let scan = WindowsPassiveDiscoveryConfig {
+            include_known_connectors: true,
+            ..WindowsPassiveDiscoveryConfig::default()
+        };
         Self {
-            scan: WindowsPassiveDiscoveryConfig::default(),
+            scan,
             // W8.3: the production Core ships a bundled, offline ACP catalog
             // compiled into the binary. It loads through the existing cache
             // parser and schema validator and fails closed (Unavailable) on
@@ -3862,7 +4002,7 @@ fn candidate_lifecycle_state(candidate: &CandidateState) -> &'static str {
     if candidate.projection.health_state == HealthState::IdentityMismatch {
         return "identity_changed";
     }
-    if !candidate.has_acp_binding
+    if candidate.binding_kind == CandidateBindingKind::None
         || candidate.projection.compatibility_state == CompatibilityState::AdapterRequired
     {
         return "adapter_required";

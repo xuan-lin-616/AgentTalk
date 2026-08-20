@@ -675,7 +675,13 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
                     busy: _busyCandidateId == entry.candidate.candidateId,
                     onVerify:
                         entry.candidate.isAgent &&
-                            entry.candidate.hasUserSelectedEvidence &&
+                            (entry.candidate.hasUserSelectedEvidence ||
+                                entry
+                                    .candidate
+                                    .hasPackageBoundAdapterEvidence ||
+                                entry
+                                    .candidate
+                                    .hasBuiltInConnectorAdapterEvidence) &&
                             entry.lifecycleState == 'identified'
                         ? () => unawaited(_verifyCandidate(entry.candidate))
                         : null,
@@ -838,6 +844,16 @@ class _DiscoveryCandidateCard extends StatelessWidget {
               ),
             ],
             if (candidate.isUnknown) ...[
+              const SizedBox(height: 10),
+              Text(
+                l10n.localAgentUnknownNeedsAdapter,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+            if (!candidate.isUnknown &&
+                candidate.compatibilityState == 'adapter_required') ...[
               const SizedBox(height: 10),
               Text(
                 l10n.localAgentUnknownNeedsAdapter,
@@ -1091,6 +1107,10 @@ String _evidenceText(AppLocalizations l10n, String evidence) {
       return l10n.localAgentEvidenceUnconfigured;
     case 'identity_mismatch':
       return l10n.localAgentEvidenceIdentityMismatch;
+    case 'adapter_manifest':
+      return l10n.localAgentEvidenceInstallKnown;
+    case 'package_identity_matched':
+      return l10n.localAgentEvidenceInstallKnown;
     case 'catalog_unavailable':
       return l10n.localAgentEvidenceCatalogUnavailable;
     default:

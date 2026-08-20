@@ -84,6 +84,8 @@ const Set<String> discoveryEvidenceValues = {
   'authentication_required',
   'unconfigured',
   'identity_mismatch',
+  'adapter_manifest',
+  'package_identity_matched',
   'catalog_unavailable',
 };
 
@@ -524,6 +526,16 @@ class DiscoveryCandidate {
   bool get isUnknown => category == 'unknown';
 
   bool get hasUserSelectedEvidence => evidenceSummary.contains('user_selected');
+
+  bool get hasPackageBoundAdapterEvidence =>
+      evidenceSummary.contains('adapter_manifest') &&
+      evidenceSummary.contains('package_identity_matched');
+
+  bool get hasBuiltInConnectorAdapterEvidence =>
+      runtimeTypeName == 'codex' &&
+      connectorId == 'local.codex' &&
+      evidenceSummary.contains('executable_inventory') &&
+      evidenceSummary.contains('install_known');
 
   bool get isVerified =>
       verification?.status == 'verified' ||

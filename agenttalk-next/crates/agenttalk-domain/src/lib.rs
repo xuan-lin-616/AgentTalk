@@ -304,6 +304,8 @@ pub enum DiscoveryEvidence {
     AuthenticationRequired,
     Unconfigured,
     IdentityMismatch,
+    AdapterManifest,
+    PackageIdentityMatched,
     CatalogUnavailable,
 }
 
