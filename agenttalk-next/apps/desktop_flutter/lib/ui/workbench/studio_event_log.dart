@@ -48,6 +48,93 @@ class StudioStreamingDelta {
   final String? conversationId;
 }
 
+/// A renderer-facing assistant reply assembled from one or more incremental
+/// `output.delta` events that belong to the same execution.
+class StudioStreamingReply {
+  const StudioStreamingReply({
+    required this.id,
+    required this.occurredAt,
+    required this.text,
+    required this.isComplete,
+    required this.chunkCount,
+    this.executionRunId,
+    this.conversationId,
+  });
+
+  final String id;
+  final DateTime occurredAt;
+  final String text;
+  final bool isComplete;
+  final int chunkCount;
+  final String? executionRunId;
+  final String? conversationId;
+}
+
+/// Coalesces incremental Runtime chunks into one stable assistant reply per
+/// execution. Chunk text is concatenated verbatim because providers own token
+/// boundaries and may include leading whitespace or punctuation themselves.
+List<StudioStreamingReply> studioStreamingRepliesFromDeltas(
+  Iterable<StudioStreamingDelta> deltas,
+) {
+  final builders = <String, _StudioStreamingReplyBuilder>{};
+  for (final delta in deltas) {
+    final executionRunId = delta.executionRunId;
+    final conversationId = delta.conversationId;
+    final groupKey = executionRunId?.isNotEmpty == true
+        ? 'run:$executionRunId'
+        : conversationId?.isNotEmpty == true
+        ? 'conversation:$conversationId'
+        : 'unscoped';
+    builders
+        .putIfAbsent(
+          groupKey,
+          () => _StudioStreamingReplyBuilder(
+            id: delta.id,
+            occurredAt: delta.occurredAt,
+            executionRunId: executionRunId,
+            conversationId: conversationId,
+          ),
+        )
+        .add(delta);
+  }
+  return builders.values
+      .map((builder) => builder.build())
+      .toList(growable: false);
+}
+
+class _StudioStreamingReplyBuilder {
+  _StudioStreamingReplyBuilder({
+    required this.id,
+    required this.occurredAt,
+    required this.executionRunId,
+    required this.conversationId,
+  });
+
+  final String id;
+  final DateTime occurredAt;
+  final String? executionRunId;
+  final String? conversationId;
+  final StringBuffer _text = StringBuffer();
+  bool _isComplete = false;
+  int _chunkCount = 0;
+
+  void add(StudioStreamingDelta delta) {
+    _text.write(delta.delta);
+    _isComplete = _isComplete || delta.isComplete;
+    _chunkCount += 1;
+  }
+
+  StudioStreamingReply build() => StudioStreamingReply(
+    id: id,
+    occurredAt: occurredAt,
+    text: _text.toString(),
+    isComplete: _isComplete,
+    chunkCount: _chunkCount,
+    executionRunId: executionRunId,
+    conversationId: conversationId,
+  );
+}
+
 const int _maxSafeStringLength = 600;
 const int _maxDetails = 6;
 

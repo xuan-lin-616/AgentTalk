@@ -4262,7 +4262,8 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
           return true;
         })
         .toList(growable: false);
-    final hasContent = messages.isNotEmpty || visibleDeltas.isNotEmpty;
+    final visibleReplies = studioStreamingRepliesFromDeltas(visibleDeltas);
+    final hasContent = messages.isNotEmpty || visibleReplies.isNotEmpty;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 22),
       child: Column(
@@ -4304,7 +4305,7 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.symmetric(vertical: 12),
-                    itemCount: messages.length + visibleDeltas.length,
+                    itemCount: messages.length + visibleReplies.length,
                     itemBuilder: (context, index) {
                       if (index < messages.length) {
                         final message = messages[index];
@@ -4326,18 +4327,25 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                           ),
                         );
                       }
-                      final delta = visibleDeltas[index - messages.length];
+                      final reply = visibleReplies[index - messages.length];
                       return Align(
                         alignment: Alignment.centerLeft,
                         child: ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 720),
-                          child: Card(
-                            color: Theme.of(
-                              context,
-                            ).colorScheme.surfaceContainerLow,
-                            child: Padding(
-                              padding: const EdgeInsets.all(12),
-                              child: SimpleMarkdownText(text: delta.delta),
+                          child: Semantics(
+                            container: true,
+                            label: reply.isComplete ? '助手回复' : '助手正在回复',
+                            child: Card(
+                              key: ValueKey(
+                                'assistant-streaming-reply-${reply.id}',
+                              ),
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerLow,
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: SimpleMarkdownText(text: reply.text),
+                              ),
                             ),
                           ),
                         ),
@@ -4346,7 +4354,7 @@ class _ConversationProjectionState extends State<_ConversationProjection> {
                   ),
           ),
           Text(
-            '当前对话 ${messages.length} 条消息 · 流式输出 ${visibleDeltas.length} 条 · 工作区 ${_list(widget.snapshot, 'conversations').length} 个对话',
+            '当前对话 ${messages.length} 条消息 · 助手回复 ${visibleReplies.length} 条 · 工作区 ${_list(widget.snapshot, 'conversations').length} 个对话',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           if (_pendingAttachments.isNotEmpty || _pickingAttachment) ...[

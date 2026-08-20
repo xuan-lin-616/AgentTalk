@@ -65,6 +65,40 @@ void main() {
     );
   });
 
+  test('streaming deltas coalesce verbatim per execution run', () {
+    final now = DateTime.parse('2026-08-19T10:00:01Z');
+    final replies = studioStreamingRepliesFromDeltas([
+      StudioStreamingDelta(
+        id: 'delta-1',
+        occurredAt: now,
+        delta: '已',
+        isComplete: false,
+        executionRunId: 'run-1',
+      ),
+      StudioStreamingDelta(
+        id: 'delta-2',
+        occurredAt: now,
+        delta: '收到。',
+        isComplete: true,
+        executionRunId: 'run-1',
+      ),
+      StudioStreamingDelta(
+        id: 'delta-3',
+        occurredAt: now,
+        delta: '下一次回复',
+        isComplete: false,
+        executionRunId: 'run-2',
+      ),
+    ]);
+
+    expect(replies, hasLength(2));
+    expect(replies.first.id, 'delta-1');
+    expect(replies.first.text, '已收到。');
+    expect(replies.first.chunkCount, 2);
+    expect(replies.first.isComplete, isTrue);
+    expect(replies.last.text, '下一次回复');
+  });
+
   test('studioLogEntryFromEnvelope uses the typed event envelope', () {
     final entry = studioLogEntryFromEnvelope(
       EventEnvelope(

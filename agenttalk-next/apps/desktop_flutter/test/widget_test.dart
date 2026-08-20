@@ -65,6 +65,28 @@ void main() {
     expect(find.text('@ 接力看板'), findsOneWidget);
   });
 
+  testWidgets('one streamed assistant reply renders as one conversation card', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const AgentTalkDesktopApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('demo-data-toggle')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(
+      find.byKey(const Key('assistant-streaming-reply-demo-delta-1')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('助手回复 1 条'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('no selected project still shows both add entries', (
     tester,
   ) async {
