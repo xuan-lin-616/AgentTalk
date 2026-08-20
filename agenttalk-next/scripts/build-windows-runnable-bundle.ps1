@@ -39,6 +39,22 @@ function Invoke-GitText {
   return ($value -join "`n").Trim()
 }
 
+function Test-GitWorktreeClean {
+  & git -C $repo diff --quiet --no-ext-diff --
+  $unstagedExit = $LASTEXITCODE
+  if ($unstagedExit -gt 1) { throw "git unstaged diff check failed: $unstagedExit" }
+  if ($unstagedExit -eq 1) { return $false }
+
+  & git -C $repo diff --cached --quiet --no-ext-diff --
+  $stagedExit = $LASTEXITCODE
+  if ($stagedExit -gt 1) { throw "git staged diff check failed: $stagedExit" }
+  if ($stagedExit -eq 1) { return $false }
+
+  $untracked = & git -C $repo ls-files --others --exclude-standard
+  if ($LASTEXITCODE -ne 0) { throw 'git untracked file check failed' }
+  return [string]::IsNullOrWhiteSpace(($untracked -join "`n"))
+}
+
 function Get-TextSha256 {
   param([Parameter(Mandatory = $true)][string[]]$Lines)
   $payload = [System.Text.Encoding]::UTF8.GetBytes((($Lines -join "`n") + "`n"))
@@ -100,8 +116,7 @@ $branch = Invoke-GitText @('branch', '--show-current')
 if (-not [string]::IsNullOrWhiteSpace($ExpectedBranch) -and $branch -ne $ExpectedBranch) {
   throw "Runnable bundle branch constraint failed: expected $ExpectedBranch, current branch is $branch"
 }
-$status = Invoke-GitText @('status', '--porcelain', '--untracked-files=all')
-if (-not [string]::IsNullOrWhiteSpace($status)) { throw 'Git worktree must be clean before building the runnable bundle' }
+if (-not (Test-GitWorktreeClean)) { throw 'Git worktree must be clean before building the runnable bundle' }
 $sourceSha = Invoke-GitText @('rev-parse', 'HEAD')
 if (-not [string]::IsNullOrWhiteSpace($ExpectedGitSha) -and $sourceSha -ne $ExpectedGitSha) {
   throw "Runnable bundle Git SHA constraint failed: expected $ExpectedGitSha, current SHA is $sourceSha"
@@ -161,11 +176,11 @@ try {
 
   $sourceAfter = Get-SourceSnapshot -Root $nextRoot
   $headAfter = Invoke-GitText @('rev-parse', 'HEAD')
-  $statusAfter = Invoke-GitText @('status', '--porcelain', '--untracked-files=all')
+  $cleanAfter = Test-GitWorktreeClean
   if ($sourceBefore.digest -ne $sourceAfter.digest -or $sourceBefore.fileCount -ne $sourceAfter.fileCount) {
     throw 'Source inputs changed during build; bundle creation is blocked.'
   }
-  if ($headAfter -ne $sourceSha -or -not [string]::IsNullOrWhiteSpace($statusAfter)) {
+  if ($headAfter -ne $sourceSha -or -not $cleanAfter) {
     throw 'Git source identity or clean state changed during build; bundle creation is blocked.'
   }
 

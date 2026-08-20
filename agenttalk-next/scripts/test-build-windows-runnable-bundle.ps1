@@ -21,6 +21,12 @@ if ($scriptText -notmatch 'branch constraint failed') {
 if ($scriptText -notmatch 'Git SHA constraint failed') {
   throw 'Runnable bundle script does not validate an explicitly requested Git SHA constraint.'
 }
+if ($scriptText -notmatch 'diff --quiet --no-ext-diff') {
+  throw 'Runnable bundle script does not use content-aware tracked-file checks.'
+}
+if ($scriptText -notmatch 'ls-files --others --exclude-standard') {
+  throw 'Runnable bundle script does not reject untracked files.'
+}
 if ($scriptText -notmatch "dataDirectory = '%LOCALAPPDATA%\\AgentTalk\\data'") {
   throw 'Runnable bundle manifest dataDirectory is not represented with single path separators.'
 }
