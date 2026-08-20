@@ -33,8 +33,9 @@ use agenttalk_protocols::{
 };
 #[cfg(windows)]
 use agenttalk_runtime_host::{
-    connector_runtime_failure, CodexAppServerConfig, CodexAppServerRuntime, HttpCustomRuntime,
-    KunSharedRuntime, OpenAiCompatibleRuntime, RuntimeAdapter, RuntimeError, UnconfiguredRuntime,
+    connector_runtime_failure, ClaudeCodeConfig, ClaudeCodeRuntime, CodexAppServerConfig,
+    CodexAppServerRuntime, HttpCustomRuntime, KunSharedRuntime, OpenAiCompatibleRuntime,
+    RuntimeAdapter, RuntimeError, UnconfiguredRuntime,
 };
 #[cfg(windows)]
 use agenttalk_storage::{
@@ -1592,11 +1593,11 @@ fn runtime_registry_from_configuration(
     codex_isolated_cwd: Option<std::path::PathBuf>,
 ) -> Result<RuntimeRegistry, Box<dyn Error>> {
     let requested = if configured.trim().is_empty() {
-        // Preserve the legacy default Runtime projection while making the two
-        // built-in desktop Connector types recognizable without an
+        // Preserve the legacy default Runtime projection while making the
+        // deterministic first-party Connector types recognizable without an
         // environment-variable activation path. The registry reads only
-        // adapter ids here; Codex/Kun discovery remains lazy.
-        vec!["unconfigured", "codex", "kun"]
+        // adapter ids here; every adapter remains lazy.
+        vec!["unconfigured", "codex", "kun", "claude-code"]
     } else {
         configured
             .split(',')
@@ -1648,6 +1649,10 @@ fn runtime_registry_from_configuration(
             "codex" => Box::new(CodexAppServerRuntime::with_config(CodexAppServerConfig {
                 isolated_cwd: codex_isolated_cwd.clone(),
                 ..CodexAppServerConfig::default()
+            })),
+            "claude-code" => Box::new(ClaudeCodeRuntime::with_config(ClaudeCodeConfig {
+                isolated_cwd: codex_isolated_cwd.clone(),
+                ..ClaudeCodeConfig::default()
             })),
             "kun" => Box::new(KunSharedRuntime::with_config(Default::default())),
             "openai-compatible" => Box::new(OpenAiCompatibleRuntime::new("default")),
@@ -5543,7 +5548,7 @@ fn handle_query(
                 )?;
                 return Ok(());
             }
-            core.discover_local_connectors()
+            core.discover_agent_integrations()
         }
         "agent.scan_local" => {
             if let Err(message) = local_discovery_query_payload(&query.payload) {
@@ -7803,6 +7808,7 @@ mod tests {
         assert!(registry.has_runtime_type("unconfigured"));
         assert!(registry.has_runtime_type("codex"));
         assert!(registry.has_runtime_type("kun"));
+        assert!(registry.has_runtime_type("claude-code"));
 
         // Opening Core and reading the old unscoped projection must not probe
         // either transport or silently choose one of the connector adapters.
@@ -7900,6 +7906,7 @@ mod tests {
         assert!(registry.has_runtime_type("unconfigured"));
         assert!(!registry.has_runtime_type("codex"));
         assert!(!registry.has_runtime_type("kun"));
+        assert!(!registry.has_runtime_type("claude-code"));
 
         let fixture_error = runtime_registry_from_configuration("fixture-dual", false, None)
             .err()

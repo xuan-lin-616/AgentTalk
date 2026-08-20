@@ -16,8 +16,8 @@ use agenttalk_events::{EventStore, EventStoreError, InMemoryEventStore, RuntimeE
 use agenttalk_orchestration_contracts::registry::SchemaRegistry;
 use agenttalk_permissions::FileReadGrant;
 use agenttalk_runtime_host::{
-    connector_runtime_failure, LocalConnectorCandidate, RuntimeAdapter, RuntimeCapabilities,
-    RuntimeError, RuntimeEventStream, RuntimeRequest,
+    connector_runtime_failure, discover_agent_integrations, LocalConnectorCandidate,
+    RuntimeAdapter, RuntimeCapabilities, RuntimeError, RuntimeEventStream, RuntimeRequest,
 };
 use agenttalk_storage::{
     AgentModelBinding, AgentModelBindingPatch, ArtifactBindingInput, ArtifactBodyChunk,
@@ -3329,11 +3329,19 @@ impl PersistentCore {
         local_connector_discovery_payload(agenttalk_runtime_host::discover_local_connectors())
     }
 
+    /// The default local-agent center projection: deterministic first-party
+    /// integrations (Codex, Claude Code, Antigravity) with stable connector
+    /// ids. Generic scanning remains available through `agent.discovery.*`
+    /// and `agent.scan_local`; this method never scans arbitrary executables.
+    pub fn discover_agent_integrations(&self) -> serde_json::Value {
+        local_connector_discovery_payload(discover_agent_integrations())
+    }
+
     /// `agent.scan_local` is a presentation alias for the same safe candidate
     /// snapshot. The UI decides whether to create an Agent later through its
     /// existing explicit mutation workflow.
     pub fn scan_local_agents(&self) -> serde_json::Value {
-        self.discover_local_connectors()
+        self.discover_agent_integrations()
     }
 
     /// Returns the health projection for one persisted Connector profile.

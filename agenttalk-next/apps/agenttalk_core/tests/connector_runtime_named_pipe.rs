@@ -1960,7 +1960,7 @@ fn real_named_pipe_local_discovery_is_safe_idempotent_and_non_persistent() {
     let discoveries = connectors.payload["discoveries"]
         .as_array()
         .expect("discovery payload must be an array");
-    assert_eq!(discoveries.len(), 2);
+    assert_eq!(discoveries.len(), 3);
     let expected_fields = BTreeSet::from([
         "availability",
         "catalogRevision",
@@ -1986,23 +1986,32 @@ fn real_named_pipe_local_discovery_is_safe_idempotent_and_non_persistent() {
     let codex = discoveries
         .iter()
         .find(|entry| entry["connectorId"] == "local.codex")
-        .expect("Codex fixture discovery");
+        .expect("Codex integration discovery");
     assert_eq!(codex["runtimeType"], "codex");
-    assert_eq!(codex["availability"], "unconfigured");
+    assert_eq!(codex["availability"], "unavailable");
     assert_eq!(codex["models"], json!([]));
     assert_eq!(codex["requiresConfiguration"], true);
     assert_eq!(codex["source"], "executable_inventory");
+    assert_eq!(codex["catalogRevision"], serde_json::Value::Null);
 
-    let kun = discoveries
+    let claude = discoveries
         .iter()
-        .find(|entry| entry["connectorId"] == "local.kun.shared-runtime")
-        .expect("Kun fixture discovery");
-    assert_eq!(kun["runtimeType"], "kun");
-    assert_eq!(kun["availability"], "unconfigured");
-    assert_eq!(kun["models"], json!([]));
-    assert_eq!(kun["catalogRevision"], serde_json::Value::Null);
-    assert_eq!(kun["requiresConfiguration"], true);
-    assert_eq!(kun["source"], "runtime_record");
+        .find(|entry| entry["connectorId"] == "local.claude-code")
+        .expect("Claude Code integration discovery");
+    assert_eq!(claude["runtimeType"], "claude-code");
+    assert_eq!(claude["availability"], "unavailable");
+    assert_eq!(claude["models"], json!([]));
+
+    let antigravity = discoveries
+        .iter()
+        .find(|entry| entry["connectorId"] == "local.antigravity")
+        .expect("Antigravity integration discovery");
+    assert_eq!(antigravity["runtimeType"], "antigravity");
+    assert_eq!(antigravity["availability"], "unavailable");
+    assert_eq!(antigravity["models"], json!([]));
+    assert!(discoveries
+        .iter()
+        .all(|entry| entry["connectorId"] != "local.kun.shared-runtime"));
 
     let serialized = serde_json::to_string(&connectors.payload)
         .expect("serialize local discovery response")
