@@ -1,7 +1,16 @@
 mod adapters;
+mod agent_integrations;
 mod discovery;
 
 pub use adapters::acp::{AcpDiscoverySession, AcpFactoryError, AcpProtocolAdapterFactory};
+pub use agent_integrations::{
+    connect_by_id, detect_by_id, discover_agent_integrations, install_by_id, integration,
+    list_integrations, verify_by_id, AntigravityIntegration, ClaudeCodeConfig,
+    ClaudeCodeIntegration, ClaudeCodeRuntime, CodexIntegration, Integration,
+    IntegrationConnectError, IntegrationDescriptor, IntegrationDetectOutcome, IntegrationInstall,
+    IntegrationInstalled, IntegrationLoginState, IntegrationVerification,
+    IntegrationVerificationStatus,
+};
 pub use discovery::verifiers::acp::{
     AcpAgentInfo, AcpCapabilitySummary, AcpClassification, AcpClassificationError,
     AcpCompatibilityReport, AcpImportPlanMetadata, AcpPassiveObservation, AcpVerificationConsent,

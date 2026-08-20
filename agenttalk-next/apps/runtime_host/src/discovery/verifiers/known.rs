@@ -195,6 +195,33 @@ fn classify_codex(
     })
 }
 
+/// Shared first-party Codex CLI probe used by both the Discovery verifier and
+/// the deterministic `CodexIntegration::detect`. It runs `codex --version`
+/// followed by `codex app-server --help` and returns the parsed CLI version.
+pub(crate) fn probe_codex_cli_surface(
+    executable: &Path,
+    current_dir: &Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<String, AcpVerificationDiagnosticCode> {
+    run_probe(executable, &["--version"], current_dir, deadline, cancelled)
+        .and_then(|output| parse_codex_version(&output))
+        .and_then(|version| {
+            run_probe(
+                executable,
+                &["app-server", "--help"],
+                current_dir,
+                deadline,
+                cancelled,
+            )
+            .and_then(|output| {
+                output_contains_ascii(&output, "app-server")
+                    .then_some(version)
+                    .ok_or(AcpVerificationDiagnosticCode::ProtocolMismatch)
+            })
+        })
+}
+
 fn verify_codex(
     classification: &KnownConnectorClassification,
     deadline: Instant,
@@ -231,28 +258,7 @@ fn verify_codex(
         Ok(cwd) => cwd,
         Err(()) => return rejected(AcpVerificationDiagnosticCode::LaunchFailed),
     };
-    let version = run_probe(
-        &classification.executable,
-        &["--version"],
-        cwd.path(),
-        deadline,
-        cancelled,
-    )
-    .and_then(|output| parse_codex_version(&output));
-    let help = version.and_then(|version| {
-        run_probe(
-            &classification.executable,
-            &["app-server", "--help"],
-            cwd.path(),
-            deadline,
-            cancelled,
-        )
-        .and_then(|output| {
-            output_contains_ascii(&output, "app-server")
-                .then_some(version)
-                .ok_or(AcpVerificationDiagnosticCode::ProtocolMismatch)
-        })
-    });
+    let help = probe_codex_cli_surface(&classification.executable, cwd.path(), deadline, cancelled);
     drop(guard);
     if cwd.cleanup().is_err() {
         return rejected(AcpVerificationDiagnosticCode::CleanupFailed);
