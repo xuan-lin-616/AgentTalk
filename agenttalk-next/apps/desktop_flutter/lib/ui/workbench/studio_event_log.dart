@@ -126,7 +126,22 @@ StudioLogLevel _levelForEvent(String eventType) {
   return StudioLogLevel.info;
 }
 
-String _summaryForEvent(String eventType, Map<String, dynamic> payload) {
+String _executionRunId(
+  Map<String, dynamic> payload,
+  String? envelopeExecutionRunId,
+) {
+  final envelopeValue = _safeString(envelopeExecutionRunId);
+  return envelopeValue.isNotEmpty
+      ? envelopeValue
+      : _safeString(payload['executionRunId']);
+}
+
+String _summaryForEvent(
+  String eventType,
+  Map<String, dynamic> payload, {
+  String? executionRunId,
+}) {
+  final runId = _executionRunId(payload, executionRunId);
   switch (eventType) {
     case 'output.delta':
       final delta = _safeString(payload['delta']);
@@ -150,15 +165,19 @@ String _summaryForEvent(String eventType, Map<String, dynamic> payload) {
     case 'handoff.completed':
       return '交接已完成：${_safeString(payload['handoffId'])}';
     case 'execution.status_changed':
-      return '运行状态变更：${_safeString(payload['status'])}（${_safeString(payload['executionRunId'])}）';
+      return '运行状态变更：${_safeString(payload['status'])}（$runId）';
     case 'execution.completed':
-      return '运行已完成：${_safeString(payload['executionRunId'])}';
+      return runId.isEmpty ? '运行已完成' : '运行已完成：$runId';
     case 'execution.failed':
-      return '运行失败：${_safeString(payload['executionRunId'])} ${_safeString(payload['message'])}';
+      final reason = _safeString(payload['reason']);
+      final legacyMessage = _safeString(payload['message']);
+      final detail = reason.isNotEmpty ? reason : legacyMessage;
+      final parts = [runId, detail].where((value) => value.isNotEmpty).toList();
+      return parts.isEmpty ? '运行失败' : '运行失败：${parts.join(' ')}';
     case 'execution.cancelled':
-      return '运行已取消：${_safeString(payload['executionRunId'])}';
+      return runId.isEmpty ? '运行已取消' : '运行已取消：$runId';
     case 'execution.interrupted':
-      return '运行已中断：${_safeString(payload['executionRunId'])}';
+      return runId.isEmpty ? '运行已中断' : '运行已中断：$runId';
     case 'context.assembled':
       return '上下文已组装';
     case 'context.sealed':
@@ -216,7 +235,11 @@ StudioLogEntry? studioLogEntryFromEventMap(Map<String, dynamic> event) {
         ? DateTime.tryParse(occurredAt) ?? DateTime.now()
         : DateTime.now(),
     eventType: eventType,
-    message: _summaryForEvent(eventType, payload),
+    message: _summaryForEvent(
+      eventType,
+      payload,
+      executionRunId: event['executionRunId']?.toString(),
+    ),
     level: _levelForEvent(eventType),
     safeDetails: _safeDetails(payload),
   );
@@ -228,7 +251,11 @@ StudioLogEntry studioLogEntryFromEnvelope(EventEnvelope event) {
     id: event.eventId,
     occurredAt: event.occurredAt,
     eventType: event.event,
-    message: _summaryForEvent(event.event, event.payload),
+    message: _summaryForEvent(
+      event.event,
+      event.payload,
+      executionRunId: event.executionRunId,
+    ),
     level: _levelForEvent(event.event),
     safeDetails: _safeDetails(event.payload),
   );

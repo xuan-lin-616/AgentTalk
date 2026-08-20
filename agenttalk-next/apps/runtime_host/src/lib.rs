@@ -7029,6 +7029,10 @@ pub struct CodexAppServerConfig {
     /// JSON-RPC contract without making fixture transport a production path.
     pub command_args: Vec<String>,
     pub default_model: Option<String>,
+    /// Core-owned empty workspace used only when the frozen execution scope is
+    /// `WorkspaceAccess::None`. The path is never projected into Runtime
+    /// events or substituted into the caller's frozen scope.
+    pub isolated_cwd: Option<PathBuf>,
     pub request_timeout: Duration,
 }
 
@@ -7038,6 +7042,7 @@ impl Default for CodexAppServerConfig {
             binary_path: None,
             command_args: Vec::new(),
             default_model: None,
+            isolated_cwd: None,
             request_timeout: Duration::from_millis(DEFAULT_RUNTIME_TIMEOUT_MS),
         }
     }
@@ -7228,6 +7233,43 @@ impl CodexAppServerTransport {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    fn execution_cwd(&self, request: &RuntimeRequest) -> Result<String, RuntimeError> {
+        if !matches!(request.workspace_access, WorkspaceAccess::None) {
+            return request
+                .canonical_cwd
+                .as_deref()
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(str::to_owned)
+                .ok_or(RuntimeError::InvalidWorkspace);
+        }
+        if request.canonical_cwd.is_some() {
+            return Err(RuntimeError::InvalidWorkspace);
+        }
+        let configured = self
+            .config
+            .isolated_cwd
+            .as_deref()
+            .filter(|path| path.is_absolute())
+            .ok_or(RuntimeError::InvalidWorkspace)?;
+        if has_reparse_point(configured) {
+            return Err(RuntimeError::InvalidWorkspace);
+        }
+        fs::create_dir_all(configured).map_err(|_| RuntimeError::InvalidWorkspace)?;
+        if has_reparse_point(configured) {
+            return Err(RuntimeError::InvalidWorkspace);
+        }
+        let canonical = configured
+            .canonicalize()
+            .map_err(|_| RuntimeError::InvalidWorkspace)?;
+        if !canonical.is_dir() || has_reparse_point(&canonical) {
+            return Err(RuntimeError::InvalidWorkspace);
+        }
+        canonical
+            .to_str()
+            .map(str::to_owned)
+            .ok_or(RuntimeError::InvalidWorkspace)
     }
 
     fn binary_path(&self) -> Result<PathBuf, RuntimeError> {
@@ -7579,11 +7621,7 @@ impl ConnectorRuntimeTransport for CodexAppServerTransport {
         if cancellation.load(Ordering::Acquire) {
             return Err(RuntimeError::Cancelled);
         }
-        let cwd = request
-            .canonical_cwd
-            .as_deref()
-            .filter(|cwd| !cwd.trim().is_empty())
-            .ok_or(RuntimeError::InvalidWorkspace)?;
+        let cwd = self.execution_cwd(request)?;
         let model = request
             .model_id
             .as_deref()
@@ -10753,6 +10791,27 @@ mod tests {
     }
 
     #[test]
+    fn codex_none_workspace_fails_closed_without_a_configured_isolated_cwd() {
+        let runtime = CodexAppServerRuntime::with_config(CodexAppServerConfig::default());
+        assert_eq!(
+            runtime.execute(&request_with_model(
+                WorkspaceAccess::None,
+                None,
+                "codex-model-a"
+            )),
+            Err(RuntimeError::InvalidWorkspace)
+        );
+        assert_eq!(
+            runtime.execute(&request_with_model(
+                WorkspaceAccess::None,
+                Some("C:\\forbidden"),
+                "codex-model-a"
+            )),
+            Err(RuntimeError::InvalidWorkspace)
+        );
+    }
+
+    #[test]
     fn codex_app_server_fixture_supports_ndjson_stream_and_safe_provider_failure() {
         let fixture = r#"
 {"method":"thread.started"}
@@ -12760,6 +12819,7 @@ mod tests {
                 script.to_string_lossy().into_owned(),
             ],
             default_model: None,
+            isolated_cwd: None,
             request_timeout: Duration::from_secs(2),
         });
         assert!(matches!(
@@ -12782,7 +12842,7 @@ mod tests {
         std::fs::write(
             &script,
             r#"
- param([string]$InterruptMarker, [string]$ReverseMarker)
+ param([string]$InterruptMarker, [string]$ReverseMarker, [string]$CwdMarker)
  function Send-Json([object]$Value) {
    [Console]::Out.WriteLine(($Value | ConvertTo-Json -Compress -Depth 10))
    [Console]::Out.Flush()
@@ -12822,6 +12882,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
       }
     }
     'thread/start' {
+      if ($CwdMarker) { [System.IO.File]::WriteAllText($CwdMarker, $message.params.cwd) }
       if ($message.params.model -notin @('codex-model-a', 'codex-model-block', 'codex-model-timeout', 'codex-model-final-error', 'codex-model-close')) {
         Send-Json @{ jsonrpc = '2.0'; id = $message.id; error = @{ code = -32602; message = 'model mismatch' } }
       } else {
@@ -12870,6 +12931,8 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .unwrap();
         let interrupt_marker = data_dir.join("codex-interrupt.marker");
         let reverse_marker = data_dir.join("codex-reverse.marker");
+        let cwd_marker = data_dir.join("codex-cwd.marker");
+        let isolated_cwd = data_dir.join("runtime-workspaces").join("codex-none");
         let binary = std::env::var_os("SystemRoot")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("C:\\Windows"))
@@ -12893,8 +12956,11 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
                 interrupt_marker.to_string_lossy().into_owned(),
                 "-ReverseMarker".into(),
                 reverse_marker.to_string_lossy().into_owned(),
+                "-CwdMarker".into(),
+                cwd_marker.to_string_lossy().into_owned(),
             ],
             default_model: None,
+            isolated_cwd: Some(isolated_cwd.clone()),
             request_timeout: Duration::from_secs(3),
         });
         assert_eq!(
@@ -12916,11 +12982,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             runtime.inner.catalog_default_model_id().as_deref(),
             Some("codex-model-a")
         );
-        let mut request = request_with_model(
-            WorkspaceAccess::ReadOnly,
-            Some(data_dir.to_string_lossy().as_ref()),
-            "codex-model-a",
-        );
+        let mut request = request_with_model(WorkspaceAccess::None, None, "codex-model-a");
         request.connector_id = "desktop-codex-profile".into();
         let mut missing_frozen_model = request.clone();
         missing_frozen_model.model_id = None;
@@ -12936,6 +12998,23 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         assert!(!events
             .iter()
             .any(|event| event.event_type == "execution.failed"));
+        assert_eq!(
+            PathBuf::from(
+                std::fs::read_to_string(&cwd_marker)
+                    .expect("Codex fixture must receive the isolated cwd")
+            )
+            .canonicalize()
+            .expect("fixture cwd must exist"),
+            isolated_cwd
+                .canonicalize()
+                .expect("configured isolated cwd must exist")
+        );
+        assert!(
+            !serde_json::to_string(&events)
+                .expect("serialize Codex fixture events")
+                .contains("codex-none"),
+            "the Core-owned isolated cwd must not leak into Runtime events"
+        );
         assert_eq!(
             std::fs::read_to_string(&reverse_marker)
                 .expect("strict reverse-RPC fixture marker must exist"),

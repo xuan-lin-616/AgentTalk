@@ -33,8 +33,8 @@ use agenttalk_protocols::{
 };
 #[cfg(windows)]
 use agenttalk_runtime_host::{
-    connector_runtime_failure, CodexAppServerRuntime, HttpCustomRuntime, KunSharedRuntime,
-    OpenAiCompatibleRuntime, RuntimeAdapter, RuntimeError, UnconfiguredRuntime,
+    connector_runtime_failure, CodexAppServerConfig, CodexAppServerRuntime, HttpCustomRuntime,
+    KunSharedRuntime, OpenAiCompatibleRuntime, RuntimeAdapter, RuntimeError, UnconfiguredRuntime,
 };
 #[cfg(windows)]
 use agenttalk_storage::{
@@ -1384,13 +1384,14 @@ fn run_core() -> Result<(), CoreStartupError> {
         .get(3)
         .cloned()
         .or_else(|| std::env::var("AGENTTALK_CORE_ARTIFACT_ROOT").ok());
-    let runtimes = runtime_registry_from_environment().map_err(|error| {
-        CoreStartupError::new(
-            CoreStartupCategory::RuntimeConfigurationUnavailable,
-            "runtime_initialization",
-            error.to_string(),
-        )
-    })?;
+    let runtimes = runtime_registry_from_environment(codex_isolated_cwd_for_database(db_path_ref))
+        .map_err(|error| {
+            CoreStartupError::new(
+                CoreStartupCategory::RuntimeConfigurationUnavailable,
+                "runtime_initialization",
+                error.to_string(),
+            )
+        })?;
     let core = match artifact_root {
         Some(root) => PersistentCore::open_with_runtime_registry_and_artifact_root(
             &db_path,
@@ -1558,13 +1559,26 @@ fn test_fixture_wait_forever() -> ! {
 }
 
 #[cfg(windows)]
-fn runtime_registry_from_environment() -> Result<RuntimeRegistry, Box<dyn Error>> {
+fn codex_isolated_cwd_for_database(database_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !database_path.is_absolute() {
+        return None;
+    }
+    let data_root = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())?;
+    Some(data_root.join("runtime-workspaces").join("codex-none"))
+}
+
+#[cfg(windows)]
+fn runtime_registry_from_environment(
+    codex_isolated_cwd: Option<std::path::PathBuf>,
+) -> Result<RuntimeRegistry, Box<dyn Error>> {
     let configured = std::env::var("AGENTTALK_CORE_RUNTIMES")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| std::env::var("AGENTTALK_CORE_RUNTIME").unwrap_or_default());
     let development_mode = std::env::var("AGENTTALK_CORE_DEV_MODE").as_deref() == Ok("1");
-    runtime_registry_from_configuration(&configured, development_mode)
+    runtime_registry_from_configuration(&configured, development_mode, codex_isolated_cwd)
 }
 
 /// Builds the Core Runtime registry without reading process environment. This
@@ -1575,6 +1589,7 @@ fn runtime_registry_from_environment() -> Result<RuntimeRegistry, Box<dyn Error>
 fn runtime_registry_from_configuration(
     configured: &str,
     development_mode: bool,
+    codex_isolated_cwd: Option<std::path::PathBuf>,
 ) -> Result<RuntimeRegistry, Box<dyn Error>> {
     let requested = if configured.trim().is_empty() {
         // Preserve the legacy default Runtime projection while making the two
@@ -1630,7 +1645,10 @@ fn runtime_registry_from_configuration(
             // These are production transports. Construction records no model
             // fixture and performs no CLI discovery, HTTP call, or credential
             // read; profile-bound operations trigger their bounded lazy use.
-            "codex" => Box::new(CodexAppServerRuntime::with_config(Default::default())),
+            "codex" => Box::new(CodexAppServerRuntime::with_config(CodexAppServerConfig {
+                isolated_cwd: codex_isolated_cwd.clone(),
+                ..CodexAppServerConfig::default()
+            })),
             "kun" => Box::new(KunSharedRuntime::with_config(Default::default())),
             "openai-compatible" => Box::new(OpenAiCompatibleRuntime::new("default")),
             "http-custom" => Box::new(HttpCustomRuntime::new("default")),
@@ -7779,7 +7797,7 @@ mod tests {
 
     #[test]
     fn default_production_registry_keeps_legacy_runtime_fail_closed_and_registers_builtins() {
-        let registry = runtime_registry_from_configuration("", false)
+        let registry = runtime_registry_from_configuration("", false, None)
             .expect("empty production configuration should register inert built-ins");
         assert_eq!(registry.default_runtime_id(), "unconfigured");
         assert!(registry.has_runtime_type("unconfigured"));
@@ -7794,6 +7812,20 @@ mod tests {
         assert_eq!(models["runtimeId"], "unconfigured");
         assert_eq!(models["availability"], "unavailable");
         assert_eq!(models["models"], json!([]));
+    }
+
+    #[test]
+    fn codex_none_workspace_is_derived_only_from_an_absolute_core_database_path() {
+        let data_root = std::env::temp_dir().join("agenttalk-core-state-fixture");
+        let database_path = data_root.join("agenttalk-core.sqlite3");
+        assert_eq!(
+            codex_isolated_cwd_for_database(&database_path),
+            Some(data_root.join("runtime-workspaces").join("codex-none"))
+        );
+        assert_eq!(
+            codex_isolated_cwd_for_database(std::path::Path::new("agenttalk-core.sqlite3")),
+            None
+        );
     }
 
     #[test]
@@ -7862,14 +7894,14 @@ mod tests {
 
     #[test]
     fn explicit_runtime_configuration_remains_an_exact_override() {
-        let registry = runtime_registry_from_configuration("unconfigured", false)
+        let registry = runtime_registry_from_configuration("unconfigured", false, None)
             .expect("explicit legacy override should be accepted");
         assert_eq!(registry.default_runtime_id(), "unconfigured");
         assert!(registry.has_runtime_type("unconfigured"));
         assert!(!registry.has_runtime_type("codex"));
         assert!(!registry.has_runtime_type("kun"));
 
-        let fixture_error = runtime_registry_from_configuration("fixture-dual", false)
+        let fixture_error = runtime_registry_from_configuration("fixture-dual", false, None)
             .err()
             .expect("fixture-dual must remain development-only");
         assert!(fixture_error

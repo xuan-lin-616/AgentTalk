@@ -24,6 +24,24 @@ void main() {
     expect(entry.safeDetails['executionRunId'], 'run-1');
   });
 
+  test('execution failure uses the Core reason and envelope run id', () {
+    final entry = studioLogEntryFromEventMap({
+      'eventId': 'evt-reason',
+      'event': 'execution.failed',
+      'executionRunId': 'run-from-envelope',
+      'occurredAt': '2026-08-19T10:00:00Z',
+      'cursor': {'streamId': 'core-events', 'sequence': 2},
+      'payload': {
+        'reason': 'invalid_workspace',
+        'message': 'legacy message must not win',
+      },
+    });
+    expect(entry, isNotNull);
+    expect(entry!.message, contains('run-from-envelope'));
+    expect(entry.message, contains('invalid_workspace'));
+    expect(entry.message, isNot(contains('legacy message')));
+  });
+
   test('studioStreamingDeltaFromEventMap only accepts output.delta', () {
     final delta = studioStreamingDeltaFromEventMap({
       'eventId': 'evt-delta',
