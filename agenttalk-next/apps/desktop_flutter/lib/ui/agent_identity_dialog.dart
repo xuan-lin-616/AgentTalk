@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../gen/l10n.dart';
@@ -22,6 +24,10 @@ class AgentIdentityInput {
 }
 
 typedef AgentIdentitySubmit = Future<void> Function(AgentIdentityInput input);
+typedef ConnectorModelsLoader =
+    Future<ConnectorModelCatalog> Function(String connectorId);
+typedef IdentityModelOptionsLoader =
+    Future<List<IdentityModelOptionMetadata>> Function(String connectorId);
 
 class AgentIdentityDialog extends StatefulWidget {
   const AgentIdentityDialog({
@@ -39,6 +45,8 @@ class AgentIdentityDialog extends StatefulWidget {
     this.client,
     this.sessionId,
     this.target,
+    this.connectorModelsLoader,
+    this.identityModelOptionsLoader,
   });
 
   final String title;
@@ -54,6 +62,8 @@ class AgentIdentityDialog extends StatefulWidget {
   final CoreIpcClient? client;
   final String? sessionId;
   final IdentityModelTarget? target;
+  final ConnectorModelsLoader? connectorModelsLoader;
+  final IdentityModelOptionsLoader? identityModelOptionsLoader;
 
   @override
   State<AgentIdentityDialog> createState() => _AgentIdentityDialogState();
@@ -70,8 +80,13 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
   String? _error;
 
   List<IdentityModelOptionMetadata>? _options;
+  ConnectorModelCatalog? _catalog;
   bool _loadingOptions = false;
-  String? _optionsError;
+  bool _catalogLoaded = false;
+  Object? _catalogFailure;
+  Object? _optionsFailure;
+  Timer? _connectorLoadDebounce;
+  int _loadGeneration = 0;
 
   @override
   void initState() {
@@ -90,8 +105,24 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
   }
 
   void _onConnectorChanged() {
-    _loadOptions();
-    setState(() {});
+    _connectorLoadDebounce?.cancel();
+    _loadGeneration += 1;
+    if (mounted) {
+      setState(() {
+        _catalog = null;
+        _options = null;
+        _catalogLoaded = false;
+        _catalogFailure = null;
+        _optionsFailure = null;
+        _loadingOptions = false;
+      });
+    }
+    if (_connectorId.text.trim().isNotEmpty) {
+      _connectorLoadDebounce = Timer(
+        const Duration(milliseconds: 250),
+        _loadOptions,
+      );
+    }
   }
 
   void _onModelChanged() {
@@ -100,43 +131,81 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
 
   Future<void> _loadOptions() async {
     final connectorId = _connectorId.text.trim();
+    final client = widget.client;
+    final sessionId = widget.sessionId;
+    final catalogLoader =
+        widget.connectorModelsLoader ??
+        (client != null && sessionId != null
+            ? (String id) => client.queryConnectorModels(
+                sessionId: sessionId,
+                connectorId: id,
+              )
+            : null);
+    final optionsLoader =
+        widget.identityModelOptionsLoader ??
+        (client != null && sessionId != null && widget.target != null
+            ? (String id) => client.queryIdentityModelOptions(
+                sessionId: sessionId,
+                target: widget.target!,
+                connectorId: id,
+              )
+            : null);
     if (connectorId.isEmpty ||
-        widget.client == null ||
-        widget.sessionId == null ||
-        widget.target == null) {
+        (catalogLoader == null && optionsLoader == null)) {
       if (mounted) {
         setState(() {
+          _catalog = null;
           _options = null;
-          _optionsError = null;
+          _catalogLoaded = false;
+          _catalogFailure = null;
+          _optionsFailure = null;
           _loadingOptions = false;
         });
       }
       return;
     }
+    final generation = ++_loadGeneration;
     setState(() {
       _loadingOptions = true;
-      _optionsError = null;
+      _catalogFailure = null;
+      _optionsFailure = null;
     });
-    try {
-      final options = await widget.client!.queryIdentityModelOptions(
-        sessionId: widget.sessionId!,
-        target: widget.target!,
-        connectorId: connectorId,
-      );
-      if (mounted && _connectorId.text.trim() == connectorId) {
-        setState(() {
-          _options = options;
-          _loadingOptions = false;
-        });
-      }
-    } catch (error) {
-      if (mounted && _connectorId.text.trim() == connectorId) {
-        setState(() {
-          _optionsError = error.toString();
-          _loadingOptions = false;
-        });
+
+    ConnectorModelCatalog? catalog;
+    List<IdentityModelOptionMetadata>? options;
+    Object? catalogFailure;
+    Object? optionsFailure;
+    if (catalogLoader != null) {
+      try {
+        catalog = await catalogLoader(connectorId);
+      } catch (error) {
+        catalogFailure = error;
       }
     }
+    if (optionsLoader != null) {
+      try {
+        options = await optionsLoader(connectorId);
+      } catch (error) {
+        optionsFailure = error;
+      }
+    }
+    if (!mounted ||
+        generation != _loadGeneration ||
+        _connectorId.text.trim() != connectorId) {
+      return;
+    }
+    setState(() {
+      if (catalogFailure == null && catalogLoader != null) {
+        _catalog = catalog;
+      }
+      if (optionsFailure == null && optionsLoader != null) {
+        _options = options;
+      }
+      _catalogLoaded = catalogLoader != null && catalogFailure == null;
+      _catalogFailure = catalogFailure;
+      _optionsFailure = optionsFailure;
+      _loadingOptions = false;
+    });
   }
 
   Future<void> _setDefaultOption(IdentityModelOptionMetadata option) async {
@@ -177,6 +246,8 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
 
   @override
   void dispose() {
+    _connectorLoadDebounce?.cancel();
+    _loadGeneration += 1;
     _name.dispose();
     _role.dispose();
     _specialty.dispose();
@@ -189,27 +260,83 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
   }
 
   List<String> _getAvailableModelIds() {
-    if (_options != null && _options!.isNotEmpty) {
-      return _options!.map((e) => e.modelId).toList(growable: false);
+    final modelIds = <String>{};
+    void addAll(Iterable<String> values) {
+      for (final value in values) {
+        if (value.trim().isNotEmpty) modelIds.add(value);
+      }
     }
+
+    addAll(_catalog?.models ?? const <String>[]);
+    addAll(_options?.map((option) => option.modelId) ?? const <String>[]);
     final connectorId = _connectorId.text.trim();
     if (connectorId.isNotEmpty &&
         widget.knownCatalogModels.containsKey(connectorId)) {
-      return widget.knownCatalogModels[connectorId]!;
+      addAll(widget.knownCatalogModels[connectorId]!);
     }
-    return const <String>[];
+    return modelIds.toList(growable: false);
   }
 
   bool get _isUnverifiedModel {
     final connectorId = _connectorId.text.trim();
     final modelId = _modelId.text.trim();
     if (modelId.isEmpty) return false;
-    final knownForConnector = widget.knownCatalogModels[connectorId];
-    if (knownForConnector == null || knownForConnector.isEmpty) {
+    if (_catalog?.models.contains(modelId) == true ||
+        widget.knownCatalogModels[connectorId]?.contains(modelId) == true) {
       return false;
     }
-    return !knownForConnector.contains(modelId);
+    final savedOptions = _options
+        ?.where((option) => option.modelId == modelId)
+        .toList(growable: false);
+    return savedOptions == null ||
+        savedOptions.isEmpty ||
+        savedOptions.first.availability == 'unverified';
   }
+
+  String _copy({required String zh, required String en}) =>
+      Localizations.localeOf(context).languageCode == 'zh' ? zh : en;
+
+  String _catalogFailureText(Object failure) {
+    final code = failure is CoreIpcException ? failure.code : null;
+    return switch (code) {
+      'CONNECTOR_RUNTIME_AUTHENTICATION_FAILED' => _copy(
+        zh: 'Connector 需要先完成认证。认证后点击“刷新”重新获取模型；也可以手动输入模型 ID（未验证）。',
+        en: 'This connector needs authentication. Authenticate, then refresh the models, or enter a model ID manually (unverified).',
+      ),
+      'CONNECTOR_CATALOG_UNAVAILABLE' => _copy(
+        zh: 'Connector 没有返回可验证的模型目录。可以刷新重试，或手动输入模型 ID（未验证）。',
+        en: 'The connector did not return a verifiable model catalog. Retry, or enter a model ID manually (unverified).',
+      ),
+      'CONNECTOR_RUNTIME_UNAVAILABLE' ||
+      'CONNECTOR_SHARED_RUNTIME_UNAVAILABLE' ||
+      'CONNECTOR_RUNTIME_IDENTITY_MISMATCH' => _copy(
+        zh: 'Connector 运行时当前不可用。请确认本地运行时可访问后刷新；也可以手动输入模型 ID（未验证）。',
+        en: 'The connector runtime is unavailable. Check the local runtime and refresh, or enter a model ID manually (unverified).',
+      ),
+      'CONNECTOR_DISABLED' => _copy(
+        zh: '这个 Connector 已停用。请先在 Connector 中心启用它，再刷新模型。',
+        en: 'This connector is disabled. Enable it in Connector Center, then refresh the models.',
+      ),
+      'CONNECTOR_NOT_FOUND' => _copy(
+        zh: '没有找到这个 Connector。请检查 Connector ID，或前往 Connector 中心重新配置。',
+        en: 'This connector was not found. Check its ID or configure it again in Connector Center.',
+      ),
+      _ => _copy(
+        zh: '无法从 Connector 获取模型目录。可以刷新重试，或手动输入模型 ID（未验证）。',
+        en: 'The model catalog could not be loaded. Retry, or enter a model ID manually (unverified).',
+      ),
+    };
+  }
+
+  String get _emptyCatalogText => _copy(
+    zh: 'Connector 当前没有提供可验证的模型目录。可以手动输入模型 ID；该值会标记为未验证。',
+    en: 'The connector did not provide a verifiable model catalog. You can enter a model ID manually; it will be marked unverified.',
+  );
+
+  String get _optionsFailureText => _copy(
+    zh: '已保存的身份模型候选暂时无法读取；实时目录和手动输入仍可使用。',
+    en: 'Saved identity model options could not be loaded. The live catalog and manual entry remain available.',
+  );
 
   Future<void> _submit() async {
     final name = _name.text.trim();
@@ -300,18 +427,42 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        DropdownMenu<String>(
+                        TextField(
+                          key: const ValueKey('agent-identity-model-field'),
                           controller: _modelId,
-                          label: const Text('模型 ID'),
-                          expandedInsets: EdgeInsets.zero,
-                          dropdownMenuEntries: _getAvailableModelIds()
-                              .map(
-                                (modelId) => DropdownMenuEntry(
-                                  value: modelId,
-                                  label: modelId,
-                                ),
-                              )
-                              .toList(growable: false),
+                          enabled: !_saving,
+                          decoration: InputDecoration(
+                            labelText: '模型 ID',
+                            suffixIcon: _getAvailableModelIds().isEmpty
+                                ? null
+                                : PopupMenuButton<String>(
+                                    key: const ValueKey(
+                                      'agent-identity-model-menu',
+                                    ),
+                                    tooltip: _copy(
+                                      zh: '选择已发现的模型',
+                                      en: 'Choose a discovered model',
+                                    ),
+                                    icon: const Icon(Icons.arrow_drop_down),
+                                    onSelected: (modelId) {
+                                      _modelId.text = modelId;
+                                      _modelId.selection =
+                                          TextSelection.collapsed(
+                                            offset: modelId.length,
+                                          );
+                                    },
+                                    itemBuilder: (context) =>
+                                        _getAvailableModelIds()
+                                            .map(
+                                              (modelId) =>
+                                                  PopupMenuItem<String>(
+                                                    value: modelId,
+                                                    child: Text(modelId),
+                                                  ),
+                                            )
+                                            .toList(growable: false),
+                                  ),
+                          ),
                         ),
                         if (_isUnverifiedModel)
                           Padding(
@@ -340,13 +491,35 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
                   padding: EdgeInsets.symmetric(vertical: 8),
                   child: LinearProgressIndicator(),
                 ),
-              if (_optionsError != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Text(
-                    '${l10n.catalogUnavailableOrLoadFailed}$_optionsError',
-                    style: TextStyle(color: theme.colorScheme.error),
+              if (_catalogFailure != null)
+                _catalogNotice(
+                  theme: theme,
+                  icon: Icons.cloud_off_outlined,
+                  message: _catalogFailureText(_catalogFailure!),
+                  isError: true,
+                  showRetry: true,
+                )
+              else if (_catalogLoaded && (_catalog?.models.isEmpty ?? true))
+                _catalogNotice(
+                  theme: theme,
+                  icon: Icons.info_outline,
+                  message: _emptyCatalogText,
+                  showRetry: true,
+                )
+              else if (_catalogLoaded && _catalog != null)
+                _catalogNotice(
+                  theme: theme,
+                  icon: Icons.check_circle_outline,
+                  message: _copy(
+                    zh: '已从 Connector 获取 ${_catalog!.models.length} 个模型。',
+                    en: 'Loaded ${_catalog!.models.length} models from the connector.',
                   ),
+                ),
+              if (_optionsFailure != null)
+                _catalogNotice(
+                  theme: theme,
+                  icon: Icons.info_outline,
+                  message: _optionsFailureText,
                 ),
               if (_options != null && _options!.isNotEmpty) ...[
                 const SizedBox(height: 10),
@@ -360,42 +533,45 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Container(
+                ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 190),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: theme.colorScheme.outlineVariant),
-                    borderRadius: BorderRadius.circular(8),
+                  child: Material(
                     color: theme.colorScheme.surfaceContainerLowest,
-                  ),
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    itemCount: _options!.length,
-                    separatorBuilder: (context, index) => Divider(
-                      height: 1,
-                      color: theme.colorScheme.outlineVariant,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      side: BorderSide(color: theme.colorScheme.outlineVariant),
                     ),
-                    itemBuilder: (context, index) {
-                      final option = _options![index];
-                      return ListTile(
-                        dense: true,
-                        title: Text(option.modelId),
-                        subtitle: Text(
-                          '${l10n.sourceLabel}${option.source} | ${l10n.availabilityLabel}${option.availability}',
-                        ),
-                        trailing: option.isDefault
-                            ? Icon(
-                                Icons.check_circle,
-                                color: theme.colorScheme.primary,
-                              )
-                            : TextButton(
-                                onPressed: () => _setDefaultOption(option),
-                                child: Text(l10n.setAsDefault),
-                              ),
-                        onTap: () {
-                          _modelId.text = option.modelId;
-                        },
-                      );
-                    },
+                    clipBehavior: Clip.antiAlias,
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: _options!.length,
+                      separatorBuilder: (context, index) => Divider(
+                        height: 1,
+                        color: theme.colorScheme.outlineVariant,
+                      ),
+                      itemBuilder: (context, index) {
+                        final option = _options![index];
+                        return ListTile(
+                          dense: true,
+                          title: Text(option.modelId),
+                          subtitle: Text(
+                            '${l10n.sourceLabel}${option.source} | ${l10n.availabilityLabel}${option.availability}',
+                          ),
+                          trailing: option.isDefault
+                              ? Icon(
+                                  Icons.check_circle,
+                                  color: theme.colorScheme.primary,
+                                )
+                              : TextButton(
+                                  onPressed: () => _setDefaultOption(option),
+                                  child: Text(l10n.setAsDefault),
+                                ),
+                          onTap: () {
+                            _modelId.text = option.modelId;
+                          },
+                        );
+                      },
+                    ),
                   ),
                 ),
               ],
@@ -443,6 +619,54 @@ class _AgentIdentityDialogState extends State<AgentIdentityDialog> {
       enabled: !_saving,
       maxLines: maxLines,
       decoration: InputDecoration(labelText: label, hintText: hint),
+    );
+  }
+
+  Widget _catalogNotice({
+    required ThemeData theme,
+    required IconData icon,
+    required String message,
+    bool isError = false,
+    bool showRetry = false,
+  }) {
+    final colors = theme.colorScheme;
+    final background = isError
+        ? colors.errorContainer
+        : colors.secondaryContainer;
+    final foreground = isError
+        ? colors.onErrorContainer
+        : colors.onSecondaryContainer;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: foreground),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message,
+                style: theme.textTheme.bodySmall?.copyWith(color: foreground),
+              ),
+            ),
+            if (showRetry) ...[
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _loadingOptions ? null : _loadOptions,
+                style: TextButton.styleFrom(foregroundColor: foreground),
+                child: Text(_copy(zh: '重试', en: 'Retry')),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }

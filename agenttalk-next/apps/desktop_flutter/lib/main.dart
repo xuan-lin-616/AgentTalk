@@ -2203,6 +2203,8 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         initialConnectorId: connectorId,
         initialModelId: initialModelId,
         knownCatalogModels: knownCatalogModels,
+        client: client,
+        sessionId: sessionId,
         onSubmit: (input) async {
           createdAgentId ??= await _createAgentIdentity(
             client: client,

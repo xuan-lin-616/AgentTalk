@@ -614,6 +614,198 @@ class ConnectorHealthCapabilities {
   }
 }
 
+class ConnectorModelCapabilities {
+  const ConnectorModelCapabilities({
+    required this.streaming,
+    required this.cancel,
+    required this.filesystem,
+    required this.shell,
+  });
+
+  final bool streaming;
+  final bool cancel;
+  final bool filesystem;
+  final bool shell;
+
+  factory ConnectorModelCapabilities.fromJson(Map<String, dynamic> json) {
+    _requireExactFields(json, const {
+      'streaming',
+      'cancel',
+      'filesystem',
+      'shell',
+    }, 'connector.models capabilities payload is invalid');
+    final streaming = json['streaming'];
+    final cancel = json['cancel'];
+    final filesystem = json['filesystem'];
+    final shell = json['shell'];
+    if (streaming is! bool ||
+        cancel is! bool ||
+        filesystem is! bool ||
+        shell is! bool) {
+      throw const CoreIpcException(
+        'connector.models capabilities payload is invalid',
+      );
+    }
+    return ConnectorModelCapabilities(
+      streaming: streaming,
+      cancel: cancel,
+      filesystem: filesystem,
+      shell: shell,
+    );
+  }
+}
+
+class ConnectorModelMetadata {
+  const ConnectorModelMetadata({
+    required this.modelId,
+    required this.availability,
+    required this.capabilities,
+  });
+
+  final String modelId;
+  final String availability;
+  final ConnectorModelCapabilities capabilities;
+
+  factory ConnectorModelMetadata.fromJson(Map<String, dynamic> json) {
+    _requireExactFields(json, const {
+      'modelId',
+      'availability',
+      'capabilities',
+    }, 'connector.models model metadata payload is invalid');
+    final modelId = json['modelId'];
+    final availability = json['availability'];
+    final capabilities = json['capabilities'];
+    if (modelId is! String ||
+        modelId.trim().isEmpty ||
+        availability is! String ||
+        availability.trim().isEmpty ||
+        capabilities is! Map<String, dynamic>) {
+      throw const CoreIpcException(
+        'connector.models model metadata payload is invalid',
+      );
+    }
+    return ConnectorModelMetadata(
+      modelId: modelId,
+      availability: availability,
+      capabilities: ConnectorModelCapabilities.fromJson(capabilities),
+    );
+  }
+}
+
+class ConnectorModelCatalog {
+  const ConnectorModelCatalog({
+    required this.schemaVersion,
+    required this.scopeId,
+    required this.connectorId,
+    required this.runtimeTypeName,
+    required this.catalogRevision,
+    required this.defaultModelId,
+    required this.models,
+    required this.modelMetadata,
+    required this.availability,
+  });
+
+  final String schemaVersion;
+  final String scopeId;
+  final String connectorId;
+  final String runtimeTypeName;
+  final int catalogRevision;
+  final String? defaultModelId;
+  final List<String> models;
+  final List<ConnectorModelMetadata> modelMetadata;
+  final String availability;
+
+  factory ConnectorModelCatalog.fromResponse(
+    Map<String, dynamic> response, {
+    required String expectedScopeId,
+    required String expectedConnectorId,
+  }) {
+    final payload = response['payload'];
+    if (payload is! Map<String, dynamic>) {
+      throw const CoreIpcException(
+        'connector.models response payload is invalid',
+      );
+    }
+    _requireExactFields(payload, const {
+      'schemaVersion',
+      'scopeId',
+      'connectorId',
+      'runtimeType',
+      'catalogRevision',
+      'defaultModelId',
+      'models',
+      'modelMetadata',
+      'availability',
+    }, 'connector.models response payload is invalid');
+    final schemaVersion = payload['schemaVersion'];
+    final scopeId = payload['scopeId'];
+    final connectorId = payload['connectorId'];
+    final runtimeType = payload['runtimeType'];
+    final catalogRevision = payload['catalogRevision'];
+    final defaultModelId = payload['defaultModelId'];
+    final modelsValue = payload['models'];
+    final metadataValue = payload['modelMetadata'];
+    final availability = payload['availability'];
+    if (schemaVersion != 'connector.models.v1' ||
+        scopeId != expectedScopeId ||
+        connectorId != expectedConnectorId ||
+        runtimeType is! String ||
+        runtimeType.trim().isEmpty ||
+        catalogRevision is! int ||
+        catalogRevision < 0 ||
+        (defaultModelId != null &&
+            (defaultModelId is! String || defaultModelId.trim().isEmpty)) ||
+        modelsValue is! List ||
+        metadataValue is! List ||
+        availability is! String ||
+        availability.trim().isEmpty) {
+      throw const CoreIpcException(
+        'connector.models response payload is invalid',
+      );
+    }
+    if (modelsValue.any((value) => value is! String || value.trim().isEmpty)) {
+      throw const CoreIpcException(
+        'connector.models response payload is invalid',
+      );
+    }
+    final models = modelsValue.cast<String>().toList(growable: false);
+    if (models.toSet().length != models.length ||
+        (defaultModelId != null && !models.contains(defaultModelId)) ||
+        metadataValue.length != models.length) {
+      throw const CoreIpcException(
+        'connector.models response payload is invalid',
+      );
+    }
+    final modelMetadata = <ConnectorModelMetadata>[];
+    for (var index = 0; index < metadataValue.length; index += 1) {
+      final value = metadataValue[index];
+      if (value is! Map<String, dynamic>) {
+        throw const CoreIpcException(
+          'connector.models response payload is invalid',
+        );
+      }
+      final metadata = ConnectorModelMetadata.fromJson(value);
+      if (metadata.modelId != models[index]) {
+        throw const CoreIpcException(
+          'connector.models response payload is invalid',
+        );
+      }
+      modelMetadata.add(metadata);
+    }
+    return ConnectorModelCatalog(
+      schemaVersion: schemaVersion as String,
+      scopeId: scopeId as String,
+      connectorId: connectorId as String,
+      runtimeTypeName: runtimeType,
+      catalogRevision: catalogRevision,
+      defaultModelId: defaultModelId as String?,
+      models: models,
+      modelMetadata: List<ConnectorModelMetadata>.unmodifiable(modelMetadata),
+      availability: availability,
+    );
+  }
+}
+
 class ConnectorHealth {
   const ConnectorHealth({
     required this.connectorId,
@@ -2927,6 +3119,28 @@ class CoreIpcClient {
     return ConnectorHealthResult.fromResponse(
       response,
       expectedScopeId: scopeId,
+    );
+  }
+
+  Future<ConnectorModelCatalog> queryConnectorModels({
+    required String sessionId,
+    required String connectorId,
+    String scopeId = 'desktop',
+  }) async {
+    _requireNonEmpty('scopeId', scopeId);
+    _requireNonEmpty('connectorId', connectorId);
+    final response = await request({
+      'kind': 'query',
+      'protocol': {'major': protocolMajor, 'minor': 0},
+      'requestId': _requestId('connector-models'),
+      'sessionId': sessionId,
+      'query': 'connector.models',
+      'payload': {'scopeId': scopeId, 'connectorId': connectorId},
+    });
+    return ConnectorModelCatalog.fromResponse(
+      response,
+      expectedScopeId: scopeId,
+      expectedConnectorId: connectorId,
     );
   }
 

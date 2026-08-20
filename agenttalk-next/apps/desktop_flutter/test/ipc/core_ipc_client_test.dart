@@ -1096,6 +1096,124 @@ void main() {
     },
   );
 
+  test(
+    'queryConnectorModels maps the strict credential-free catalog',
+    () async {
+      final pipe = _FakePipe(
+        responsePayload: const {
+          'schemaVersion': 'connector.models.v1',
+          'scopeId': 'desktop',
+          'connectorId': 'local.codex',
+          'runtimeType': 'codex',
+          'catalogRevision': 7,
+          'defaultModelId': 'codex-model-b',
+          'models': ['codex-model-a', 'codex-model-b'],
+          'modelMetadata': [
+            {
+              'modelId': 'codex-model-a',
+              'availability': 'available',
+              'capabilities': {
+                'streaming': true,
+                'cancel': true,
+                'filesystem': true,
+                'shell': true,
+              },
+            },
+            {
+              'modelId': 'codex-model-b',
+              'availability': 'available',
+              'capabilities': {
+                'streaming': true,
+                'cancel': true,
+                'filesystem': true,
+                'shell': true,
+              },
+            },
+          ],
+          'availability': 'available',
+        },
+      );
+      final client = _clientFor(pipe);
+      addTearDown(client.close);
+
+      final catalog = await client.queryConnectorModels(
+        sessionId: 'session-test-123456',
+        connectorId: 'local.codex',
+      );
+
+      expect(catalog.schemaVersion, 'connector.models.v1');
+      expect(catalog.connectorId, 'local.codex');
+      expect(catalog.runtimeTypeName, 'codex');
+      expect(catalog.models, ['codex-model-a', 'codex-model-b']);
+      expect(catalog.defaultModelId, 'codex-model-b');
+      expect(catalog.modelMetadata.first.capabilities.filesystem, isTrue);
+      expect(pipe.writtenQueries, ['connector.models']);
+      expect(pipe.writtenPayloads.single, {
+        'scopeId': 'desktop',
+        'connectorId': 'local.codex',
+      });
+      expect(pipe.writtenPayloads.single.containsKey('token'), isFalse);
+      expect(pipe.writtenPayloads.single.containsKey('credential'), isFalse);
+    },
+  );
+
+  test(
+    'ConnectorModelCatalog rejects extra fields and misaligned metadata',
+    () {
+      const validPayload = <String, dynamic>{
+        'schemaVersion': 'connector.models.v1',
+        'scopeId': 'desktop',
+        'connectorId': 'local.codex',
+        'runtimeType': 'codex',
+        'catalogRevision': 7,
+        'defaultModelId': 'codex-model-a',
+        'models': ['codex-model-a'],
+        'modelMetadata': [
+          {
+            'modelId': 'codex-model-a',
+            'availability': 'available',
+            'capabilities': {
+              'streaming': true,
+              'cancel': true,
+              'filesystem': true,
+              'shell': true,
+            },
+          },
+        ],
+        'availability': 'available',
+      };
+      final invalidPayloads = <Map<String, dynamic>>[
+        <String, dynamic>{...validPayload, 'token': 'must-not-cross-ipc'},
+        <String, dynamic>{
+          ...validPayload,
+          'modelMetadata': const [
+            {
+              'modelId': 'different-model',
+              'availability': 'available',
+              'capabilities': {
+                'streaming': true,
+                'cancel': true,
+                'filesystem': true,
+                'shell': true,
+              },
+            },
+          ],
+        },
+      ];
+
+      for (final payload in invalidPayloads) {
+        expect(
+          () => ConnectorModelCatalog.fromResponse(
+            {'payload': payload},
+            expectedScopeId: 'desktop',
+            expectedConnectorId: 'local.codex',
+          ),
+          throwsA(isA<CoreIpcException>()),
+        );
+      }
+    },
+  );
+
   test('queryConnectorHealth maps the typed credential-free payload', () async {
     final pipe = _FakePipe(
       responsePayload: const {
