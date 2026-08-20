@@ -146,6 +146,27 @@ fn probe_agy_version(executable: &Path) -> Option<String> {
     None
 }
 
+fn spawn_agy_reader(
+    mut stream: impl std::io::Read + Send + 'static,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if output.len().saturating_add(read) > 64 * 1024 {
+                        break;
+                    }
+                    output.extend_from_slice(&buffer[..read]);
+                }
+            }
+        }
+        output
+    })
+}
+
 fn run_agy_probe(executable: &Path, args: &[&str]) -> Option<String> {
     let mut child = Command::new(executable)
         .args(args)
@@ -156,27 +177,8 @@ fn run_agy_probe(executable: &Path, args: &[&str]) -> Option<String> {
         .ok()?;
     let stdout = child.stdout.take()?;
     let stderr = child.stderr.take()?;
-    let reader = |mut stream: std::process::ChildStdout| {
-        thread::spawn(move || {
-            use std::io::Read;
-            let mut output = Vec::new();
-            let mut buffer = [0u8; 4096];
-            loop {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        if output.len().saturating_add(read) > 64 * 1024 {
-                            break;
-                        }
-                        output.extend_from_slice(&buffer[..read]);
-                    }
-                }
-            }
-            output
-        })
-    };
-    let _ = stderr;
-    let stdout_reader = reader(stdout);
+    let stdout_reader = spawn_agy_reader(stdout);
+    let stderr_reader = spawn_agy_reader(stderr);
     let deadline = Instant::now() + INTEGRATION_PROBE_TIMEOUT;
     let status = loop {
         if Instant::now() >= deadline {
@@ -193,17 +195,25 @@ fn run_agy_probe(executable: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
     let stdout = stdout_reader.join().ok()?;
-    Some(String::from_utf8_lossy(&stdout).into_owned())
+    let stderr = stderr_reader.join().ok()?;
+    let mut output = String::from_utf8_lossy(&stdout).into_owned();
+    if output.trim().is_empty() {
+        output = String::from_utf8_lossy(&stderr).into_owned();
+    }
+    Some(output)
 }
 
 fn parse_agy_version(output: &str) -> Option<String> {
-    let line = output.lines().find(|line| !line.trim().is_empty())?;
-    line.split_whitespace()
-        .find(|part| {
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if let Some(part) = line.split_whitespace().find(|part| {
             part.len() <= 64
+                && part.bytes().any(|byte| byte.is_ascii_digit())
                 && part
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b".-+_".contains(&byte))
-        })
-        .map(str::to_owned)
+        }) {
+            return Some(part.to_owned());
+        }
+    }
+    None
 }
