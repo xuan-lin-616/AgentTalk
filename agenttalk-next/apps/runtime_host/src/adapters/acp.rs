@@ -157,14 +157,38 @@ impl AcpProtocolAdapterFactory {
         let mut projections = Vec::new();
         let mut diagnostics = Vec::new();
 
-        for (candidate_id, observations) in observations {
+        let manifest_executable_names = manifests
+            .iter()
+            .flat_map(|manifest| manifest.match_rules.executable_names.iter())
+            .map(|name| name.to_lowercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut ordered_candidate_ids = observations.keys().cloned().collect::<Vec<_>>();
+        ordered_candidate_ids.sort_by_key(|candidate_id| {
+            let hits_manifest_name = observations
+                .get(candidate_id)
+                .into_iter()
+                .flatten()
+                .filter_map(|observation| {
+                    observation.executable_locator().and_then(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| name.to_lowercase())
+                    })
+                })
+                .any(|name| manifest_executable_names.contains(&name));
+            (u8::from(!hits_manifest_name), candidate_id.clone())
+        });
+        for candidate_id in ordered_candidate_ids {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) || Instant::now() >= deadline {
                 break;
             }
+            let Some(observations) = observations.get(&candidate_id) else {
+                continue;
+            };
             let mut candidate_classifications = Vec::new();
             for observation in observations {
                 let passive = match AcpPassiveObservation::from_passive_observation(
-                    candidate_id,
+                    &candidate_id,
                     observation,
                     deadline,
                     cancelled,

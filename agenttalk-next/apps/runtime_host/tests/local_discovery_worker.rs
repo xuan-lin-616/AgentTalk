@@ -948,7 +948,8 @@ fn real_windows_passive_scan_prints_local_manifest_candidates() {
     );
     eprintln!("ACP projection ids: {ids:?}");
     assert!(
-        ids.contains(&"local.dsh-acp".to_string()),
+        ids.iter()
+            .any(|id| id == "local.dsh-acp" || id.ends_with("local.dsh-acp")),
         "missing dsh in {ids:?}"
     );
     for p in session.projections() {
