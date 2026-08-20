@@ -254,7 +254,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Project assignment sheet refreshes after Core mutation', (
+  testWidgets('Project assignment dialog refreshes after Core mutation', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1400, 900);
@@ -295,6 +295,17 @@ void main() {
     await tester.tap(find.text('管理分配').first);
     await tester.pumpAndSettle();
     expect(
+      find.byKey(const ValueKey('project-agent-assignment-dialog')),
+      findsOneWidget,
+    );
+    expect(find.byType(BottomSheet), findsNothing);
+    final dialogSurface = tester.getRect(
+      find.byKey(const ValueKey('project-agent-assignment-dialog-surface')),
+    );
+    expect(dialogSurface.center.dy, closeTo(450, 1));
+    expect(dialogSurface.top, greaterThan(24));
+    expect(dialogSurface.bottom, lessThan(876));
+    expect(
       find.byKey(const ValueKey('project-agent-assignment-no-assignments')),
       findsOneWidget,
     );
@@ -313,6 +324,14 @@ void main() {
     );
     expect(
       find.byKey(const ValueKey('project-agent-assignment-no-assignments')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('close-project-agent-assignment')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('project-agent-assignment-dialog')),
       findsNothing,
     );
     expect(tester.takeException(), isNull);

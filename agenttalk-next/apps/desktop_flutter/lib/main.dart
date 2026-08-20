@@ -2439,20 +2439,20 @@ class WorkspaceShellState extends State<WorkspaceShell> {
           projectId: _activeProjectId,
           onAdd: () => unawaited(_showCreateAgent()),
           onEdit: (agent) => unawaited(_showEditAgent(agent)),
-          onManageAssignments: _showProjectAssignmentSheet,
+          onManageAssignments: _showProjectAssignmentDialog,
           onScanLocal: _showScanLocalAgents,
         ),
       ),
     );
   }
 
-  Future<void> _showProjectAssignmentSheet() async {
+  Future<void> _showProjectAssignmentDialog() async {
     if (!mounted) return;
-    // `showModalBottomSheet` owns a separate route. A builder that captures
+    // `showDialog` owns a separate route. A builder that captures
     // `_snapshot` directly would keep rendering the pre-mutation projection
     // after the parent shell receives the `project_agent.set` response.
-    final sheetSnapshot = ValueNotifier<Map<String, dynamic>>(_snapshot);
-    var sheetOpen = true;
+    final dialogSnapshot = ValueNotifier<Map<String, dynamic>>(_snapshot);
+    var dialogOpen = true;
     Future<void> setAssignment({
       required String projectId,
       required String agentId,
@@ -2465,7 +2465,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         enabled: enabled,
         workspaceAccess: workspaceAccess,
       );
-      if (mounted && sheetOpen) sheetSnapshot.value = _snapshot;
+      if (mounted && dialogOpen) dialogSnapshot.value = _snapshot;
     }
 
     Future<void> removeAssignment({
@@ -2476,32 +2476,50 @@ class WorkspaceShellState extends State<WorkspaceShell> {
         projectId: projectId,
         agentId: agentId,
       );
-      if (mounted && sheetOpen) sheetSnapshot.value = _snapshot;
+      if (mounted && dialogOpen) dialogSnapshot.value = _snapshot;
     }
 
     try {
-      await showModalBottomSheet<void>(
+      await showDialog<void>(
         context: context,
-        isScrollControlled: true,
-        builder: (context) => SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: ValueListenableBuilder<Map<String, dynamic>>(
-              valueListenable: sheetSnapshot,
-              builder: (context, snapshot, child) =>
-                  ProjectAgentAssignmentPanel.fromSnapshot(
-                    snapshot: snapshot,
-                    currentProjectId: _activeProjectId,
-                    onSet: setAssignment,
-                    onRemove: removeAssignment,
+        barrierColor: Theme.of(
+          context,
+        ).colorScheme.scrim.withValues(alpha: 0.4),
+        builder: (dialogContext) {
+          final viewport = MediaQuery.sizeOf(dialogContext);
+          final dialogWidth = min(760.0, max(0.0, viewport.width - 48.0));
+          final dialogHeight = min(720.0, max(0.0, viewport.height - 48.0));
+          return Dialog(
+            key: const ValueKey('project-agent-assignment-dialog'),
+            insetPadding: const EdgeInsets.all(24),
+            elevation: 0,
+            backgroundColor: Colors.transparent,
+            child: SizedBox(
+              key: const ValueKey('project-agent-assignment-dialog-surface'),
+              width: dialogWidth,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: dialogHeight),
+                child: SingleChildScrollView(
+                  child: ValueListenableBuilder<Map<String, dynamic>>(
+                    valueListenable: dialogSnapshot,
+                    builder: (context, snapshot, child) =>
+                        ProjectAgentAssignmentPanel.fromSnapshot(
+                          snapshot: snapshot,
+                          currentProjectId: _activeProjectId,
+                          onSet: setAssignment,
+                          onRemove: removeAssignment,
+                          onClose: () => Navigator.of(dialogContext).pop(),
+                        ),
                   ),
+                ),
+              ),
             ),
-          ),
-        ),
+          );
+        },
       );
     } finally {
-      sheetOpen = false;
-      sheetSnapshot.dispose();
+      dialogOpen = false;
+      dialogSnapshot.dispose();
     }
   }
 
@@ -3376,7 +3394,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
               ? null
               : (agent) => unawaited(_showEditAgent(agent)),
           onScanLocal: _demoMode ? null : _showScanLocalAgents,
-          onManageAssignments: _demoMode ? null : _showProjectAssignmentSheet,
+          onManageAssignments: _demoMode ? null : _showProjectAssignmentDialog,
           onCreateProject: _demoMode
               ? null
               : () => unawaited(_showCreateProject()),
@@ -3567,7 +3585,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
                             : (agent) => unawaited(_showEditAgent(agent)),
                         onManageAssignments: _demoMode
                             ? null
-                            : _showProjectAssignmentSheet,
+                            : _showProjectAssignmentDialog,
                         onScanLocal: _demoMode ? null : _showScanLocalAgents,
                       ),
                     ),

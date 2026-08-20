@@ -27,6 +27,7 @@ class ProjectAgentAssignmentPanel extends StatefulWidget {
     this.currentProjectId,
     this.onSet,
     this.onRemove,
+    this.onClose,
     this.loading = false,
     this.disabled = false,
     this.error,
@@ -50,6 +51,7 @@ class ProjectAgentAssignmentPanel extends StatefulWidget {
   /// Requests are forwarded without local permission validation.
   final ProjectAgentAssignmentSetRequest? onSet;
   final ProjectAgentAssignmentRemoveRequest? onRemove;
+  final VoidCallback? onClose;
 
   /// `loading` and `disabled` are host-owned state. Both disable mutations.
   final bool loading;
@@ -63,6 +65,7 @@ class ProjectAgentAssignmentPanel extends StatefulWidget {
     String? currentProjectId,
     ProjectAgentAssignmentSetRequest? onSet,
     ProjectAgentAssignmentRemoveRequest? onRemove,
+    VoidCallback? onClose,
     bool loading = false,
     bool disabled = false,
     String? error,
@@ -74,6 +77,7 @@ class ProjectAgentAssignmentPanel extends StatefulWidget {
       currentProjectId: currentProjectId,
       onSet: onSet,
       onRemove: onRemove,
+      onClose: onClose,
       loading: loading,
       disabled: disabled,
       error: error,
@@ -258,36 +262,57 @@ class _ProjectAgentAssignmentPanelState
               ),
             ],
           ),
-          PopupMenuButton<String>(
-            key: const ValueKey('project-agent-assignment-add'),
-            enabled: canAdd,
-            tooltip: '添加现有智能体',
-            onSelected: (agentId) => _requestSet(
-              projectId: projectId!,
-              agentId: agentId,
-              enabled: true,
-              workspaceAccess: 'none',
-              actionKey: 'set:$agentId',
-            ),
-            itemBuilder: (context) => availableAgents
-                .map(
-                  (agent) => PopupMenuItem<String>(
-                    value: _stringValue(agent, ['id', 'agentId', 'agent_id']),
-                    child: Text(_displayName(agent, fallback: '智能体')),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PopupMenuButton<String>(
+                key: const ValueKey('project-agent-assignment-add'),
+                enabled: canAdd,
+                tooltip: '添加现有智能体',
+                onSelected: (agentId) => _requestSet(
+                  projectId: projectId!,
+                  agentId: agentId,
+                  enabled: true,
+                  workspaceAccess: 'none',
+                  actionKey: 'set:$agentId',
+                ),
+                itemBuilder: (context) => availableAgents
+                    .map(
+                      (agent) => PopupMenuItem<String>(
+                        value: _stringValue(agent, [
+                          'id',
+                          'agentId',
+                          'agent_id',
+                        ]),
+                        child: Text(_displayName(agent, fallback: '智能体')),
+                      ),
+                    )
+                    .toList(growable: false),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 40),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.person_add_alt_1_outlined, size: 18),
+                        SizedBox(width: 6),
+                        Text('添加智能体'),
+                      ],
+                    ),
                   ),
-                )
-                .toList(growable: false),
-            child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.person_add_alt_1_outlined, size: 18),
-                  SizedBox(width: 6),
-                  Text('添加智能体'),
-                ],
+                ),
               ),
-            ),
+              if (widget.onClose != null) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  key: const ValueKey('close-project-agent-assignment'),
+                  tooltip: '关闭',
+                  onPressed: widget.onClose,
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ],
           ),
         ],
       ),
@@ -555,27 +580,31 @@ class _WorkspaceAccessSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final values = <String>{'none', 'read_only', 'workspace_write', value};
-    return InputDecorator(
-      decoration: const InputDecoration(
-        labelText: '工作区权限',
-        isDense: true,
-        border: OutlineInputBorder(),
-        contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          key: ValueKey('workspace-access-dropdown-$value'),
-          value: value,
+    return SizedBox(
+      width: 240,
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: '工作区权限',
           isDense: true,
-          onChanged: enabled ? (next) => onChanged(next!) : null,
-          items: values
-              .map(
-                (access) => DropdownMenuItem<String>(
-                  value: access,
-                  child: Text(_workspaceAccessLabel(access)),
-                ),
-              )
-              .toList(growable: false),
+          border: OutlineInputBorder(),
+          contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+        ),
+        child: DropdownButtonHideUnderline(
+          child: DropdownButton<String>(
+            key: ValueKey('workspace-access-dropdown-$value'),
+            value: value,
+            isDense: true,
+            isExpanded: true,
+            onChanged: enabled ? (next) => onChanged(next!) : null,
+            items: values
+                .map(
+                  (access) => DropdownMenuItem<String>(
+                    value: access,
+                    child: Text(_workspaceAccessLabel(access)),
+                  ),
+                )
+                .toList(growable: false),
+          ),
         ),
       ),
     );
