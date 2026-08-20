@@ -182,6 +182,10 @@ pub struct WindowsPassiveDiscoveryConfig {
     pub max_path_entries: usize,
     pub max_candidates_per_path_entry: usize,
     pub request_timeout: Duration,
+    /// Executable file names declared by catalog manifests. These are looked
+    /// up directly in PATH before the generic PATH enumeration so manifest
+    /// matches are never crowded out by large system directories.
+    pub manifest_executable_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -250,6 +254,7 @@ impl Default for WindowsPassiveDiscoveryConfig {
             max_path_entries: 256,
             max_candidates_per_path_entry: 64,
             request_timeout: LOCAL_DISCOVERY_REQUEST_TIMEOUT,
+            manifest_executable_names: Vec::new(),
         }
     }
 }
@@ -546,6 +551,7 @@ struct WindowsPassiveWorkerConfig {
     use_real_loopback: bool,
     max_path_entries: usize,
     max_candidates_per_path_entry: usize,
+    manifest_executable_names: Vec<String>,
 }
 
 impl From<&WindowsPassiveDiscoveryConfig> for WindowsPassiveWorkerConfig {
@@ -562,6 +568,7 @@ impl From<&WindowsPassiveDiscoveryConfig> for WindowsPassiveWorkerConfig {
             use_real_loopback: config.use_real_loopback,
             max_path_entries: config.max_path_entries,
             max_candidates_per_path_entry: config.max_candidates_per_path_entry,
+            manifest_executable_names: config.manifest_executable_names.clone(),
         }
     }
 }
@@ -1087,6 +1094,40 @@ fn collect_windows_path_observations(
         return collection;
     };
     let mut seen_dirs = BTreeSet::new();
+    let mut targeted_paths = BTreeSet::new();
+    for executable_name in config.manifest_executable_names.iter().take(32) {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            break;
+        }
+        let runner = Path::new(executable_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(executable_name);
+        let Some(executable) = find_runner_executable(Some(path_env), runner) else {
+            continue;
+        };
+        let path_key = normalized_path_key(&executable);
+        if !targeted_paths.insert(path_key) {
+            continue;
+        }
+        match unknown_executable_observation(
+            ObservationSourceKind::WindowsPath,
+            DiscoveryEvidence::WindowsPathEntry,
+            ObservationTrustLevel::Heuristic,
+            &executable,
+            deadline,
+            cancelled,
+        ) {
+            Ok(observation) => {
+                if !collection.push_observation(observation, max_observations) {
+                    return collection;
+                }
+            }
+            Err(code) => {
+                collection.push_diagnostic(ObservationSourceKind::WindowsPath, code);
+            }
+        }
+    }
     for directory in std::env::split_paths(path_env).take(config.max_path_entries) {
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             break;
@@ -1116,6 +1157,9 @@ fn collect_windows_path_observations(
             }
         };
         if !seen_dirs.insert(normalized_path_key(&canonical)) {
+            continue;
+        }
+        if targeted_paths.contains(&normalized_path_key(&canonical)) {
             continue;
         }
         let entries = match fs::read_dir(&canonical) {
@@ -10107,6 +10151,7 @@ mod tests {
     #[test]
     fn windows_worker_config_round_trips_explicit_sources() {
         let config = WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some("C:\\fixture".into()),
             explicit_sources: vec![ExplicitDiscoverySource::Executable(
                 std::path::PathBuf::from("\\\\?\\C:\\fixture\\fixture-agent.exe"),
@@ -13137,6 +13182,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             .into_owned();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(path_env),
             use_real_app_paths: false,
             use_real_packages: false,
@@ -13187,6 +13233,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"same executable content").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(path_dir.display().to_string()),
             app_path_records: vec![WindowsAppPathRecord {
                 key_name: "merged-agent.exe".into(),
@@ -13248,6 +13295,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&second, b"identical executable bytes").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(
                 std::env::join_paths([&first_dir, &second_dir])
                     .unwrap()
@@ -13287,6 +13335,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"one physical executable").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(path_dir.display().to_string()),
             app_path_records: vec![WindowsAppPathRecord {
                 key_name: "shared.exe".into(),
@@ -13345,6 +13394,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"same physical package executable").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(bin_dir.display().to_string()),
             package_records: vec![WindowsPackageRecord {
                 package_family_name: "Shared.Package_fixture".into(),
@@ -13391,6 +13441,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"all passive windows sources").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(bin_dir.display().to_string()),
             app_path_records: vec![WindowsAppPathRecord {
                 key_name: "all-source-agent.exe".into(),
@@ -13464,6 +13515,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 
         let report_v1 =
             discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+                manifest_executable_names: Vec::new(),
                 path_env: None,
                 package_records: vec![WindowsPackageRecord {
                     package_family_name: "Upgrade.Package_fixture".into(),
@@ -13481,6 +13533,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             });
         let report_v2 =
             discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+                manifest_executable_names: Vec::new(),
                 path_env: None,
                 package_records: vec![WindowsPackageRecord {
                     package_family_name: "Upgrade.Package_fixture".into(),
@@ -13517,6 +13570,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(package_b.join("bin").join("agent.exe"), b"same bytes").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             package_records: vec![
                 WindowsPackageRecord {
@@ -13563,6 +13617,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(second_dir.join("same.exe"), b"identical bytes").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(
                 std::env::join_paths([&first_dir, &second_dir])
                     .unwrap()
@@ -13615,6 +13670,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         let projection_for = |records: Vec<WindowsPackageRecord>| {
             let report =
                 discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+                    manifest_executable_names: Vec::new(),
                     path_env: None,
                     package_records: records,
                     use_real_app_paths: false,
@@ -13685,6 +13741,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         let executable = bin_dir.join("ordered.exe");
         std::fs::write(&executable, b"provider order independent").unwrap();
         let config = WindowsPassiveWorkerConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(bin_dir.display().to_string()),
             app_path_records: Vec::new(),
             package_records: vec![WindowsPackageRecord {
@@ -13778,6 +13835,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             package_records: vec![
                 WindowsPackageRecord {
@@ -13829,6 +13887,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             package_records: vec![WindowsPackageRecord {
                 package_family_name: "Private.Package_fixture".into(),
@@ -13872,6 +13931,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&outside, b"outside").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             app_path_records: vec![WindowsAppPathRecord {
                 key_name: "relative.exe".into(),
@@ -13942,6 +14002,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             .into_owned();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(path_env),
             use_real_app_paths: false,
             use_real_packages: false,
@@ -13975,6 +14036,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(child_dir.join("nested.exe"), b"nested").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(path_dir.display().to_string()),
             use_real_app_paths: false,
             use_real_packages: false,
@@ -14029,6 +14091,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .collect::<Vec<_>>();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             app_path_records: records,
             use_real_app_paths: false,
@@ -14078,6 +14141,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         assert_eq!(executables, vec![PathBuf::from("bin\\package-agent.exe")]);
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             package_records: vec![WindowsPackageRecord {
                 package_family_name: "Package.Family_fixture".into(),
@@ -14223,6 +14287,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         ];
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: records,
             use_real_app_paths: false,
@@ -14261,6 +14326,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"listener").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: vec![WindowsLoopbackListenerRecord {
                 address: "127.0.0.1".into(),
@@ -14293,6 +14359,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"listener").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: vec![WindowsLoopbackListenerRecord {
                 address: "127.0.0.1".into(),
@@ -14333,6 +14400,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&second, b"second").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: vec![WindowsLoopbackListenerRecord {
                 address: "::1".into(),
@@ -14371,6 +14439,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"listener v4").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: vec![WindowsLoopbackListenerRecord {
                 address: "127.0.0.2".into(),
@@ -14409,6 +14478,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"listener v6").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: vec![WindowsLoopbackListenerRecord {
                 address: "::1".into(),
@@ -14447,6 +14517,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"private listener").unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             loopback_records: vec![WindowsLoopbackListenerRecord {
                 address: "127.0.0.1".into(),
@@ -14569,6 +14640,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&executable, b"listener").unwrap();
         let fixture_report =
             discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+                manifest_executable_names: Vec::new(),
                 path_env: None,
                 loopback_records: vec![WindowsLoopbackListenerRecord {
                     address: "127.0.0.1".into(),
@@ -14608,6 +14680,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         std::fs::write(&second, b"second").unwrap();
 
         let config = WindowsPassiveWorkerConfig {
+            manifest_executable_names: Vec::new(),
             path_env: None,
             app_path_records: Vec::new(),
             package_records: Vec::new(),
@@ -14666,6 +14739,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
     fn windows_passive_explicit_endpoint_is_loopback_only_and_not_verified() {
         let loopback =
             discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+                manifest_executable_names: Vec::new(),
                 path_env: None,
                 explicit_sources: vec![ExplicitDiscoverySource::Endpoint(
                     "http://127.0.0.1:47777".into(),
@@ -14689,6 +14763,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
 
         let non_loopback =
             discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+                manifest_executable_names: Vec::new(),
                 path_env: None,
                 explicit_sources: vec![ExplicitDiscoverySource::Endpoint(
                     "http://192.168.1.25:47777".into(),
@@ -14756,6 +14831,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
         .unwrap();
 
         let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+            manifest_executable_names: Vec::new(),
             path_env: Some(path_dir.display().to_string()),
             use_real_app_paths: false,
             use_real_packages: false,

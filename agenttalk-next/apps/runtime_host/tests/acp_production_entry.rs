@@ -132,6 +132,7 @@ fn public_acp_session_verifies_a_managed_passive_worker_candidate_after_consent(
     ))
     .expect("install fixture discovery worker");
     let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+        manifest_executable_names: Vec::new(),
         path_env: Some(fixture.root.path().display().to_string()),
         // The test-only fixture is also an explicit UserSelected source, the
         // legitimate authority that lets a test exercise the ACP protocol

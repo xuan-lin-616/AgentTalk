@@ -2015,7 +2015,11 @@ impl LocalDiscoveryService {
             );
             return;
         }
-        let scan_config = explicit_sources.map_or_else(
+        let manifests = match &self.configuration.catalog {
+            CatalogConfiguration::Available(snapshot) => snapshot.manifests.clone(),
+            CatalogConfiguration::Unavailable => Vec::new(),
+        };
+        let mut scan_config = explicit_sources.map_or_else(
             || self.configuration.scan.clone(),
             |explicit_sources| {
                 let mut config = self.configuration.scan.clone();
@@ -2031,16 +2035,16 @@ impl LocalDiscoveryService {
                 config
             },
         );
+        scan_config.manifest_executable_names = manifests
+            .iter()
+            .flat_map(|manifest| manifest.match_rules.executable_names.iter().cloned())
+            .collect();
         let report =
             discover_windows_passive_report_with_config_and_cancelled(&scan_config, &cancelled);
         if cancelled.load(Ordering::Acquire) {
             self.finish_scan_cancelled(&scan_id, &owner, &event_sink);
             return;
         }
-        let manifests = match &self.configuration.catalog {
-            CatalogConfiguration::Available(snapshot) => snapshot.manifests.clone(),
-            CatalogConfiguration::Unavailable => Vec::new(),
-        };
         let acp_session = report.classify_acp(
             &manifests,
             Instant::now() + DEFAULT_SCAN_TIMEOUT,
@@ -3252,6 +3256,7 @@ impl LocalDiscoveryConfiguration {
                     let catalog = load_fixture_catalog(&catalog);
                     return Self {
                         scan: WindowsPassiveDiscoveryConfig {
+                            manifest_executable_names: Vec::new(),
                             path_env: Some(root.display().to_string()),
                             use_real_app_paths: false,
                             use_real_packages: false,
@@ -3332,6 +3337,7 @@ fn merge_local_manifest_report(
 
 fn inert_scan_configuration() -> WindowsPassiveDiscoveryConfig {
     WindowsPassiveDiscoveryConfig {
+        manifest_executable_names: Vec::new(),
         path_env: None,
         use_real_app_paths: false,
         use_real_packages: false,

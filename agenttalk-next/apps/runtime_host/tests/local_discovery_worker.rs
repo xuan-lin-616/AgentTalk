@@ -612,6 +612,7 @@ fn public_windows_passive_discovery_runs_sources_inside_real_worker() {
     std::fs::copy(&executable, &package_executable).unwrap();
 
     let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+        manifest_executable_names: Vec::new(),
         path_env: Some(path_dir.display().to_string()),
         app_path_records: vec![WindowsAppPathRecord {
             key_name: "worker-passive-agent.exe".into(),
@@ -902,17 +903,6 @@ fn paths_containing(root: &std::path::Path, needle: &str) -> Vec<std::path::Path
 fn real_windows_passive_scan_prints_local_manifest_candidates() {
     let _guard = env_guard();
     let _worker_guard = install_fixture_worker();
-    let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
-        path_env: std::env::var("PATH").ok(),
-        use_real_app_paths: false,
-        use_real_packages: false,
-        use_real_loopback: false,
-        request_timeout: Duration::from_secs(10),
-        max_path_entries: 25,
-        max_candidates_per_path_entry: 8,
-        max_results: 128,
-        ..WindowsPassiveDiscoveryConfig::default()
-    });
     let manifests = agenttalk_runtime_host::load_local_manifest_directory(
         agenttalk_runtime_host::default_local_manifest_directory()
             .as_deref()
@@ -920,6 +910,23 @@ fn real_windows_passive_scan_prints_local_manifest_candidates() {
     )
     .snapshot
     .manifests;
+    let manifest_executable_names = manifests
+        .iter()
+        .flat_map(|manifest| manifest.match_rules.executable_names.iter().cloned())
+        .collect::<Vec<_>>();
+    eprintln!("manifest_executable_names={manifest_executable_names:?}");
+    let report = discover_windows_passive_report_with_config(&WindowsPassiveDiscoveryConfig {
+        path_env: std::env::var("PATH").ok(),
+        use_real_app_paths: false,
+        use_real_packages: false,
+        use_real_loopback: false,
+        request_timeout: Duration::from_secs(10),
+        max_path_entries: 5,
+        max_candidates_per_path_entry: 8,
+        max_results: 32,
+        manifest_executable_names,
+        ..WindowsPassiveDiscoveryConfig::default()
+    });
     let session = report.classify_acp(
         &manifests,
         Instant::now() + Duration::from_secs(5),
