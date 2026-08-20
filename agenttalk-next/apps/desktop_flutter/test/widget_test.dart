@@ -105,7 +105,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('scan local agents requires a selected project', (tester) async {
+  testWidgets('scan local agents works before a project is selected', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(1400, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -132,10 +134,12 @@ void main() {
     await tester.tap(find.text('扫描本地智能体'));
     await tester.pumpAndSettle();
 
-    // Importing an agent requires a project; the W7 dialog is not opened and
-    // no discovery session is started.
-    expect(pipe.writtenCommandsAll, isNot(contains('agent.discovery.start')));
-    expect(find.text('请先选择项目'), findsWidgets);
+    expect(pipe.writtenCommandsAll, contains('agent.discovery.start'));
+    expect(find.text('请先选择项目，再导入智能体。'), findsOneWidget);
+    expect(
+      find.byKey(const Key('local-agent-project-required')),
+      findsOneWidget,
+    );
     expect(tester.takeException(), isNull);
   });
 

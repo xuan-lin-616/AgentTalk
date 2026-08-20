@@ -480,12 +480,23 @@ void main() {
       expect(find.text('协议兼容'), findsWidgets);
       expect(find.text('认证'), findsWidgets);
       expect(find.text('健康'), findsWidgets);
-      // Unknown candidates only offer an adapter note, never a direct use.
+      // Unknown evidence stays available for diagnostics without flooding the
+      // default candidate view.
+      expect(find.text('未知 (1)'), findsOneWidget);
+      expect(find.text('Unknown Executable'), findsNothing);
       expect(find.text('此候选需要选择适配器或清单后才能使用。'), findsWidgets);
       expect(
         find.byKey(const Key('local-agent-import-candidate-unknown')),
         findsNothing,
       );
+      final unknownExpansion = find.byKey(
+        const Key('local-agent-unknown-expansion'),
+      );
+      await tester.ensureVisible(unknownExpansion);
+      await tester.pumpAndSettle();
+      await tester.tap(unknownExpansion);
+      await tester.pumpAndSettle();
+      expect(find.text('Unknown Executable'), findsOneWidget);
       // A verified agent offers import; an identified agent offers verify.
       expect(
         find.byKey(const Key('local-agent-import-candidate-agent-verified')),
@@ -496,6 +507,53 @@ void main() {
         findsOneWidget,
       );
       expect(imported, 0);
+    },
+  );
+
+  testWidgets(
+    'scan and verify stay available without a project while import is explicit',
+    (tester) async {
+      _useDesktopSurface(tester);
+      final pipe = _ScriptedPipe();
+      pipe.responder = (request) {
+        final command = request['command'];
+        final query = request['query'];
+        if (command == 'agent.discovery.start') return _startResponse(request);
+        if (command == 'events.subscribe') return _subscribeResponse(request);
+        if (command == 'events.ack' || command == 'events.unsubscribe') {
+          return _okResponse(request, <String, dynamic>{});
+        }
+        if (query == 'agent.discovery.snapshot') {
+          return _snapshotResponse(request, candidates: [_agentVerified()]);
+        }
+        return _errorResponse(request, 'INVALID_COMMAND', 'unexpected request');
+      };
+      final client = _clientFor(pipe);
+      addTearDown(() => unawaited(client.close()));
+
+      await tester.pumpWidget(
+        _host(
+          LocalAgentScanDialog(
+            client: client,
+            sessionId: 'session-no-project',
+            projectId: null,
+            onImported: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(pipe.writtenCommands, contains('agent.discovery.start'));
+      expect(
+        find.byKey(const Key('local-agent-project-required')),
+        findsOneWidget,
+      );
+      expect(find.text('请先选择项目，再导入智能体。'), findsOneWidget);
+      final importButton = tester.widget<FilledButton>(
+        find.byKey(const Key('local-agent-import-candidate-agent-verified')),
+      );
+      expect(importButton.onPressed, isNull);
+      expect(pipe.writtenQueries, isNot(contains('agent.import.plan')));
     },
   );
 

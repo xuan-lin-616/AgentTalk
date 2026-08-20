@@ -2159,14 +2159,6 @@ class WorkspaceShellState extends State<WorkspaceShell> {
       return;
     }
     final projectId = _activeProjectId;
-    if (projectId == null || projectId.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('请先选择项目')));
-      }
-      return;
-    }
     await showDialog<void>(
       context: context,
       builder: (context) => LocalAgentScanDialog(

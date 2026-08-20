@@ -8,7 +8,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$expectedSchemaSha = '362D8D8DAFCCB26062F9A4BA9D37062C395E9FEDE322CD6CCA79B36482F6BFDE'
+$expectedSchemaSha = 'AE01785B00E3B6C6E14CE7170990773B04802EE0060E04FE692B9E11D66DEF82'
 $stateRoot = if ($env:AGENTTALK_STATE_ROOT) {
   [System.IO.Path]::GetFullPath($env:AGENTTALK_STATE_ROOT)
 } else {

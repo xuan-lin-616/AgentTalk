@@ -1577,7 +1577,7 @@ class CoreIpcClient {
         }
       }
       if (connected == null) {
-        throw lastError ?? const CoreIpcException('Core IPC did not start');
+        throw _coreNamedPipeBindException(lastError);
       }
       return CoreIpcClient._(
         connected._transport,
@@ -4278,10 +4278,35 @@ String _redactProcessDiagnostic(String value) {
   return result;
 }
 
-bool _isTransientPipeError(int errorCode) =>
+/// Returns whether a Named Pipe error can represent a bounded startup race.
+bool isRetryableNamedPipeStartupError(int errorCode) =>
+    errorCode == 0 || // WaitNamedPipeW failed without a preserved last-error
     errorCode == 2 || // ERROR_FILE_NOT_FOUND
     errorCode == 121 || // ERROR_SEM_TIMEOUT
     errorCode == 231; // ERROR_PIPE_BUSY
+
+bool _isTransientPipeError(int errorCode) =>
+    isRetryableNamedPipeStartupError(errorCode);
+
+CoreIpcException _coreNamedPipeBindException(Object? lastError) {
+  final win32Error = lastError is _Win32PipeException
+      ? lastError.errorCode
+      : null;
+  final technical = lastError == null
+      ? 'Core did not expose its Named Pipe before the startup deadline.'
+      : _redactProcessDiagnostic(lastError.toString());
+  return CoreIpcException(
+    _coreStartupUserMessages['named_pipe_bind_failed']!,
+    code: 'named_pipe_bind_failed',
+    retryable: true,
+    details: <String, dynamic>{
+      'category': 'named_pipe_bind_failed',
+      'stage': 'named_pipe_wait',
+      'win32Error': ?win32Error,
+      'technical': technical,
+    },
+  );
+}
 
 abstract final class _NativePipeOperation {
   static const open = 0;

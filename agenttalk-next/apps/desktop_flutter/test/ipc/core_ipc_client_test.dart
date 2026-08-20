@@ -6,6 +6,17 @@ import 'package:agenttalk_desktop/ipc/protocol_v1.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'owned startup retries WaitNamedPipeW error zero only as a startup race',
+    () {
+      expect(isRetryableNamedPipeStartupError(0), isTrue);
+      expect(isRetryableNamedPipeStartupError(2), isTrue);
+      expect(isRetryableNamedPipeStartupError(121), isTrue);
+      expect(isRetryableNamedPipeStartupError(231), isTrue);
+      expect(isRetryableNamedPipeStartupError(5), isFalse);
+    },
+  );
+
   test('request rejects a response with a different requestId', () async {
     final pipe = _FakePipe(responseRequestId: 'unexpected-request');
     final client = _clientFor(pipe);

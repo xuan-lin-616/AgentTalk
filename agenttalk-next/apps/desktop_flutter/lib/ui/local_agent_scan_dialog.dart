@@ -489,6 +489,7 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
     final l10n = AppLocalizations.of(context)!;
     final theme = Theme.of(context);
     final busy = _busyCandidateId != null || _starting;
+    final hasProject = widget.projectId?.isNotEmpty == true;
     return AlertDialog(
       title: Row(
         children: [
@@ -507,6 +508,38 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
               l10n.localAgentScanDialogDescription,
               style: theme.textTheme.bodySmall,
             ),
+            if (!hasProject) ...[
+              const SizedBox(height: 8),
+              Container(
+                key: const Key('local-agent-project-required'),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 18,
+                      color: theme.colorScheme.onSecondaryContainer,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        l10n.localAgentProjectRequired,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSecondaryContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             Row(
               children: [
@@ -643,63 +676,95 @@ class _LocalAgentScanDialogState extends State<LocalAgentScanDialog> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          for (final group in _orderedGroups) ...[
-            Padding(
-              padding: const EdgeInsets.only(top: 10, bottom: 6),
-              child: Text(
-                _groupTitle(context, group),
-                key: Key('discovery-group-$group'),
-                style: Theme.of(
-                  context,
-                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
-              ),
-            ),
-            if (groups[group]?.isEmpty ?? true)
+          for (final group in _orderedGroups)
+            if (group == 'unknown' && groups[group]!.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Text(
-                  l10n.localAgentGroupEmpty,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                padding: const EdgeInsets.only(top: 10, bottom: 12),
+                child: Card(
+                  margin: EdgeInsets.zero,
+                  clipBehavior: Clip.antiAlias,
+                  child: ExpansionTile(
+                    key: const Key('local-agent-unknown-expansion'),
+                    initiallyExpanded: false,
+                    title: Text(
+                      '${_groupTitle(context, group)} (${groups[group]!.length})',
+                      key: Key('discovery-group-$group'),
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    subtitle: Text(l10n.localAgentUnknownNeedsAdapter),
+                    childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                    children: [
+                      for (final entry in groups[group]!)
+                        _buildCandidateEntry(context, entry),
+                    ],
                   ),
                 ),
               )
-            else
-              for (final entry in groups[group]!)
+            else ...[
+              Padding(
+                padding: const EdgeInsets.only(top: 10, bottom: 6),
+                child: Text(
+                  _groupTitle(context, group),
+                  key: Key('discovery-group-$group'),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+              if (groups[group]?.isEmpty ?? true)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
-                  child: _DiscoveryCandidateCard(
-                    candidate: entry.candidate,
-                    lifecycleState: entry.lifecycleState,
-                    verification: entry.verification,
-                    busy: _busyCandidateId == entry.candidate.candidateId,
-                    onVerify:
-                        entry.candidate.isAgent &&
-                            (entry.candidate.hasUserSelectedEvidence ||
-                                entry
-                                    .candidate
-                                    .hasPackageBoundAdapterEvidence ||
-                                entry
-                                    .candidate
-                                    .hasBuiltInConnectorAdapterEvidence) &&
-                            entry.lifecycleState == 'identified'
-                        ? () => unawaited(_verifyCandidate(entry.candidate))
-                        : null,
-                    onImport:
-                        entry.candidate.isAgent &&
-                            (entry.verification?.status == 'verified' ||
-                                entry.verification?.status == 'auth_required')
-                        ? () => unawaited(_openImport(entry.candidate))
-                        : null,
-                    onDismiss:
-                        entry.candidate.isAgent &&
-                            entry.lifecycleState != 'identity_changed'
-                        ? () => unawaited(_dismissCandidate(entry.candidate))
-                        : null,
+                  child: Text(
+                    l10n.localAgentGroupEmpty,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
-                ),
-          ],
+                )
+              else
+                for (final entry in groups[group]!)
+                  _buildCandidateEntry(context, entry),
+            ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildCandidateEntry(BuildContext context, SnapshotCandidate entry) {
+    final candidate = entry.candidate;
+    final hasProject = widget.projectId?.isNotEmpty == true;
+    final offersImport =
+        candidate.isAgent &&
+        (entry.verification?.status == 'verified' ||
+            entry.verification?.status == 'auth_required');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: _DiscoveryCandidateCard(
+        candidate: candidate,
+        lifecycleState: entry.lifecycleState,
+        verification: entry.verification,
+        busy: _busyCandidateId == candidate.candidateId,
+        onVerify:
+            candidate.isAgent &&
+                (candidate.hasUserSelectedEvidence ||
+                    candidate.hasPackageBoundAdapterEvidence ||
+                    candidate.hasBuiltInConnectorAdapterEvidence) &&
+                entry.lifecycleState == 'identified'
+            ? () => unawaited(_verifyCandidate(candidate))
+            : null,
+        showImport: offersImport,
+        importBlockedReason: offersImport && !hasProject
+            ? AppLocalizations.of(context)!.localAgentProjectRequired
+            : null,
+        onImport: offersImport && hasProject
+            ? () => unawaited(_openImport(candidate))
+            : null,
+        onDismiss:
+            candidate.isAgent && entry.lifecycleState != 'identity_changed'
+            ? () => unawaited(_dismissCandidate(candidate))
+            : null,
       ),
     );
   }
@@ -748,6 +813,8 @@ class _DiscoveryCandidateCard extends StatelessWidget {
     required this.lifecycleState,
     required this.verification,
     required this.busy,
+    required this.showImport,
+    required this.importBlockedReason,
     this.onVerify,
     this.onImport,
     this.onDismiss,
@@ -757,6 +824,8 @@ class _DiscoveryCandidateCard extends StatelessWidget {
   final String lifecycleState;
   final CandidateVerification? verification;
   final bool busy;
+  final bool showImport;
+  final String? importBlockedReason;
   final VoidCallback? onVerify;
   final VoidCallback? onImport;
   final VoidCallback? onDismiss;
@@ -765,6 +834,12 @@ class _DiscoveryCandidateCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context)!;
+    final importButton = FilledButton.icon(
+      key: Key('local-agent-import-${candidate.candidateId}'),
+      onPressed: busy ? null : onImport,
+      icon: const Icon(Icons.add_task_outlined, size: 18),
+      label: Text(l10n.localAgentImport),
+    );
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -897,14 +972,12 @@ class _DiscoveryCandidateCard extends StatelessWidget {
                         : const Icon(Icons.verified_outlined, size: 18),
                     label: Text(l10n.localAgentVerify),
                   ),
-                if (onImport != null) ...[
+                if (showImport) ...[
                   const SizedBox(width: 8),
-                  FilledButton.icon(
-                    key: Key('local-agent-import-${candidate.candidateId}'),
-                    onPressed: busy ? null : onImport,
-                    icon: const Icon(Icons.add_task_outlined, size: 18),
-                    label: Text(l10n.localAgentImport),
-                  ),
+                  if (importBlockedReason != null)
+                    Tooltip(message: importBlockedReason!, child: importButton)
+                  else
+                    importButton,
                 ],
                 if (onDismiss != null) ...[
                   const SizedBox(width: 8),
