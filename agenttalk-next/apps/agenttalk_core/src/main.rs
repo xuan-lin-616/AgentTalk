@@ -95,7 +95,7 @@ const EVENT_RETENTION_MAX_EVENTS: usize = 256;
 #[cfg(windows)]
 const EVENT_RETENTION_MAX_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(windows)]
-const DISCOVERY_STREAM_MAX_OWNERS: usize = 128;
+const DISCOVERY_STREAM_MAX_OWNERS: usize = local_discovery::DISCOVERY_MAX_SESSIONS_GLOBAL;
 #[cfg(windows)]
 const DISCOVERY_STREAM_RETENTION: Duration = Duration::from_secs(10 * 60);
 #[cfg(windows)]
@@ -699,8 +699,8 @@ impl CoreHost {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         prune_discovery_streams(&mut streams, &recoverable_owners);
-        if !streams.streams.contains_key(owner) && streams.streams.len() >= streams.max_owners {
-            return Err(DiscoveryStreamError::CapacityExhausted);
+        if !streams.streams.contains_key(owner) {
+            ensure_discovery_stream_capacity(&mut streams, &recoverable_owners)?;
         }
         let now = streams.now();
         let newly_created = !streams.streams.contains_key(owner);
@@ -1180,6 +1180,48 @@ fn prune_discovery_streams(
             || recoverable_owners.contains(owner)
             || now.duration_since(stream.last_activity) <= retention
     });
+}
+
+#[cfg(windows)]
+fn ensure_discovery_stream_capacity(
+    streams: &mut DiscoveryEventStreams,
+    recoverable_owners: &std::collections::BTreeSet<DiscoveryOwnerScope>,
+) -> Result<(), DiscoveryStreamError> {
+    let protected_owners = streams
+        .streams
+        .iter()
+        .filter(|(owner, stream)| {
+            stream.active_subscriptions > 0 || recoverable_owners.contains(*owner)
+        })
+        .count();
+    if protected_owners >= streams.max_owners {
+        return Err(DiscoveryStreamError::CapacityExhausted);
+    }
+
+    // Session capacity is authoritative. Once 4bf729a evicts an oldest
+    // terminal session, its owner is no longer recoverable and its retained
+    // event stream must not occupy the slot needed by the new session. Keep
+    // reconnect retention while capacity is available, but under pressure
+    // reclaim only owners with neither a recoverable session nor a live
+    // subscription. Running/referenced sessions and subscriptions are never
+    // evicted here.
+    while streams.streams.len() >= streams.max_owners {
+        let reclaimable_owner = streams
+            .streams
+            .iter()
+            .filter(|(owner, stream)| {
+                stream.active_subscriptions == 0 && !recoverable_owners.contains(*owner)
+            })
+            .min_by(|(left_owner, left), (right_owner, right)| {
+                left.last_activity
+                    .cmp(&right.last_activity)
+                    .then_with(|| left_owner.cmp(right_owner))
+            })
+            .map(|(owner, _)| owner.clone())
+            .ok_or(DiscoveryStreamError::CapacityExhausted)?;
+        streams.streams.remove(&reclaimable_owner);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -7894,7 +7936,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_stream_owner_map_is_bounded_and_prunes_idle_expired_streams() {
+    fn discovery_stream_owner_map_reclaims_oldest_nonrecoverable_owner_at_capacity() {
         let host = test_core_host_with_discovery_stream_limits(2, Duration::from_millis(10));
         let owner_a = DiscoveryOwnerScope::from_authenticated_session(
             "w52-owner-a",
@@ -7912,23 +7954,18 @@ mod tests {
         let _ = host
             .create_discovery_event_stream_for_owner(&owner_a)
             .unwrap();
+        host.advance_discovery_stream_clock_for_tests(Duration::from_millis(1));
         let _ = host
             .create_discovery_event_stream_for_owner(&owner_b)
             .unwrap();
         assert_eq!(host.discovery_stream_count_for_tests(), 2);
-        assert!(matches!(
-            host.create_discovery_event_stream_for_owner(&owner_c),
-            Err(DiscoveryStreamError::CapacityExhausted)
-        ));
-        assert_eq!(host.discovery_stream_count_for_tests(), 2);
-
-        host.advance_discovery_stream_clock_for_tests(Duration::from_millis(11));
         let (_, epoch_c) = host
             .create_discovery_event_stream_for_owner(&owner_c)
-            .expect("expired idle owner should be pruned for a new owner");
-        assert_eq!(host.discovery_stream_count_for_tests(), 1);
+            .expect("the oldest nonrecoverable owner should be reclaimed under pressure");
+        assert_eq!(host.discovery_stream_count_for_tests(), 2);
         assert!(host.discovery_stream_epoch_for_tests(&owner_c).is_some());
         assert!(host.discovery_stream_epoch_for_tests(&owner_a).is_none());
+        assert!(host.discovery_stream_epoch_for_tests(&owner_b).is_some());
         assert!(!epoch_c.is_empty());
     }
 
@@ -7976,6 +8013,87 @@ mod tests {
             .create_discovery_event_stream_for_owner(&flood_owner)
             .expect("idle expired owners can be pruned once work and subscriptions are gone");
         assert_eq!(host.discovery_stream_count_for_tests(), 1);
+    }
+
+    #[test]
+    fn discovery_stream_capacity_matches_sessions_and_reclaims_evicted_terminal_owner() {
+        assert_eq!(
+            DISCOVERY_STREAM_MAX_OWNERS,
+            local_discovery::DISCOVERY_MAX_SESSIONS_GLOBAL,
+            "event streams must not exhaust before globally retained discovery sessions"
+        );
+        let host = test_core_host_with_discovery_stream_limits(
+            DISCOVERY_STREAM_MAX_OWNERS,
+            Duration::from_secs(60),
+        );
+        let mut retained_owners = Vec::with_capacity(DISCOVERY_STREAM_MAX_OWNERS);
+        for index in 0..DISCOVERY_STREAM_MAX_OWNERS {
+            let owner = DiscoveryOwnerScope::from_authenticated_session(
+                &format!("capacity-owner-{index:03}"),
+                &format!("capacity-session-{index:03}"),
+            );
+            host.discovery.seed_completed_candidate_for_shutdown_tests(
+                &owner,
+                &format!("capacity-scan-{index:03}"),
+                &format!("capacity-candidate-{index:03}"),
+            );
+            host.create_discovery_event_stream_for_owner(&owner)
+                .expect("each globally retained session owner fits the aligned stream capacity");
+            retained_owners.push(owner);
+        }
+        assert_eq!(
+            host.discovery_stream_count_for_tests(),
+            DISCOVERY_STREAM_MAX_OWNERS
+        );
+
+        let new_owner = DiscoveryOwnerScope::from_authenticated_session(
+            "capacity-owner-new",
+            "capacity-session-new",
+        );
+        let start_reservation = match host
+            .discovery
+            .begin_start(&new_owner, "capacity-request-new", &json!({}))
+            .expect("session capacity evicts the oldest unreferenced terminal session")
+        {
+            StartScanOutcome::Reserved(reservation) => reservation,
+            StartScanOutcome::Replayed(_) => panic!("new request must reserve a new scan"),
+        };
+        let recoverable_owners = host.discovery.recoverable_owners();
+        let evicted_owners = retained_owners
+            .iter()
+            .filter(|owner| !recoverable_owners.contains(*owner))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            evicted_owners.len(),
+            1,
+            "the global session boundary must evict exactly one terminal owner"
+        );
+
+        let stream_reservation = host
+            .reserve_discovery_event_stream_for_owner(&new_owner)
+            .expect("the evicted terminal owner's stream slot must be reclaimed");
+        assert_eq!(
+            host.discovery_stream_count_for_tests(),
+            DISCOVERY_STREAM_MAX_OWNERS
+        );
+        assert!(host
+            .discovery_stream_epoch_for_tests(evicted_owners[0])
+            .is_none());
+        assert_eq!(
+            host.discovery_stream_epoch_for_tests(&new_owner).as_deref(),
+            Some(stream_reservation.epoch()),
+            "reserve and immediate subscribe must observe the same owner-bound epoch"
+        );
+        let subscription = host
+            .begin_discovery_subscription(&new_owner)
+            .expect("a successful reserve must not become DISCOVERY_STREAM_NOT_FOUND");
+        let (_, subscribed_epoch) = host
+            .event_stream(EventStreamKind::Discovery, &new_owner)
+            .expect("the reserved stream remains reachable while subscribed");
+        assert_eq!(subscribed_epoch, stream_reservation.epoch());
+        drop(subscription);
+        drop(stream_reservation);
+        drop(start_reservation);
     }
 
     #[test]
@@ -8203,9 +8321,24 @@ mod tests {
             .as_str()
             .expect("scan id in response")
             .to_owned();
-        assert!(response["payload"]["eventStream"]["epoch"]
+        let response_epoch = response["payload"]["eventStream"]["epoch"]
             .as_str()
-            .is_some_and(|epoch| !epoch.is_empty()));
+            .filter(|epoch| !epoch.is_empty())
+            .expect("start response carries a non-empty discovery epoch");
+        let running_snapshot = host
+            .discovery
+            .snapshot(&owner, &scan_id)
+            .expect("start response scanId addresses its running session");
+        assert_eq!(running_snapshot["scanId"], scan_id);
+        assert_eq!(running_snapshot["state"], "running");
+        let (_, live_epoch) = host
+            .event_stream(EventStreamKind::Discovery, &owner)
+            .expect("start response stream remains available for immediate subscribe");
+        assert_eq!(live_epoch, response_epoch);
+        let subscription = host
+            .begin_discovery_subscription(&owner)
+            .expect("immediate discovery subscribe uses the reserved owner stream");
+        drop(subscription);
         assert!(
             host.discovery_stream_event_count_for_tests(&owner)
                 .is_some_and(|count| count >= 1),
@@ -8617,6 +8750,7 @@ mod tests {
         let _ = host
             .create_discovery_event_stream_for_owner(&existing_owner)
             .expect("fill stream owner capacity");
+        host.discovery.mark_owner_active_for_tests(&existing_owner);
         let outcome = host
             .discovery
             .begin_start(&flood_owner, "request", &json!({}))

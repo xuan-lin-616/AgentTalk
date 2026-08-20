@@ -33,7 +33,7 @@ const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const DISCOVERY_MAX_SESSIONS_PER_OWNER: usize = 16;
-const DISCOVERY_MAX_SESSIONS_GLOBAL: usize = 256;
+pub(crate) const DISCOVERY_MAX_SESSIONS_GLOBAL: usize = 256;
 const DISCOVERY_MAX_RUNNING_SCANS_PER_OWNER: usize = 2;
 const DISCOVERY_MAX_RUNNING_SCANS_GLOBAL: usize = 32;
 // W5.8 in-memory receipt bounds. A session holds at most 32 candidates, so
