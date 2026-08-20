@@ -625,10 +625,18 @@ class ConnectorProfileEditorDialog extends StatefulWidget {
     super.key,
     required this.scopeId,
     this.existing,
+    this.initialConnectorId = '',
+    this.initialDisplayName = '',
+    this.initialProviderType = '',
+    this.initialRuntimeType = '',
   });
 
   final String scopeId;
   final ConnectorProfileMetadata? existing;
+  final String initialConnectorId;
+  final String initialDisplayName;
+  final String initialProviderType;
+  final String initialRuntimeType;
 
   @override
   State<ConnectorProfileEditorDialog> createState() =>
@@ -651,10 +659,18 @@ class _ConnectorProfileEditorDialogState
   void initState() {
     super.initState();
     final existing = widget.existing;
-    _connectorId = TextEditingController(text: existing?.connectorId ?? '');
-    _displayName = TextEditingController(text: existing?.displayName ?? '');
-    _providerType = TextEditingController(text: existing?.providerType ?? '');
-    _runtimeType = TextEditingController(text: existing?.runtimeTypeName ?? '');
+    _connectorId = TextEditingController(
+      text: existing?.connectorId ?? widget.initialConnectorId,
+    );
+    _displayName = TextEditingController(
+      text: existing?.displayName ?? widget.initialDisplayName,
+    );
+    _providerType = TextEditingController(
+      text: existing?.providerType ?? widget.initialProviderType,
+    );
+    _runtimeType = TextEditingController(
+      text: existing?.runtimeTypeName ?? widget.initialRuntimeType,
+    );
     _authEnvKey = TextEditingController(text: existing?.authEnvKey ?? '');
     _enabled = existing?.enabled ?? true;
   }

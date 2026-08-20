@@ -516,8 +516,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(pipe.writtenQueries, contains('connector.discover'));
     expect(find.text('Codex'), findsWidgets);
-    expect(find.text('需要认证'), findsWidgets);
-    expect(find.textContaining('<redacted>'), findsWidgets);
+    expect(find.text('已安装 · 需要登录'), findsWidgets);
     expect(find.textContaining('secret'), findsNothing);
     expect(tester.takeException(), isNull);
   });

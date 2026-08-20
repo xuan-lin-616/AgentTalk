@@ -18,7 +18,7 @@ import 'ui/agent_identity_dialog.dart';
 import 'ui/conversation_agent_assignment_panel.dart';
 import 'ui/context_inspector_drawer.dart';
 import 'ui/config_transfer_dialog.dart';
-import 'ui/connector_center_dialog.dart';
+import 'ui/local_agent_center_dialog.dart';
 import 'ui/diagnostics_metadata_panel.dart';
 import 'ui/event_recovery_banner.dart';
 import 'ui/message_search_dialog.dart';
@@ -1705,7 +1705,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
     }
     await showDialog<void>(
       context: context,
-      builder: (context) => ConnectorCenterDialog(
+      builder: (context) => LocalAgentCenterDialog(
         client: client,
         sessionId: sessionId,
         onProjectionChanged: (projection) {
@@ -1714,6 +1714,14 @@ class WorkspaceShellState extends State<WorkspaceShell> {
             _snapshot = projection;
             _projectionStatus = 'Connector 元数据已更新';
           });
+        },
+        onScanLocalAgents: () {
+          Navigator.of(context).pop();
+          unawaited(_showScanLocalAgents());
+        },
+        onManualAdd: () {
+          Navigator.of(context).pop();
+          unawaited(_showCreateAgent());
         },
       ),
     );

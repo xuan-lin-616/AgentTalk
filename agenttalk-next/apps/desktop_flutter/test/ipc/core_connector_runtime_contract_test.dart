@@ -221,8 +221,29 @@ void main() {
       final agents = await harness.client.scanLocalAgents(
         sessionId: harness.sessionId,
       );
-      expect(connectors.discoveries, isEmpty);
-      expect(agents.discoveries, isEmpty);
+      // The deterministic integration catalog always returns the three
+      // first-party rows over the frozen connector.discover DTO. Under
+      // isolation every row must be fail-closed  and no Kun
+      // runtime record may leak into this projection.
+      final expectedIds = <String>{
+        'local.codex',
+        'local.claude-code',
+        'local.antigravity',
+      };
+      expect(
+        connectors.discoveries.map((entry) => entry.connectorId).toSet(),
+        expectedIds,
+      );
+      expect(
+        connectors.discoveries.every(
+          (entry) => entry.availability == 'unavailable',
+        ),
+        isTrue,
+      );
+      expect(
+        agents.discoveries.map((entry) => entry.connectorId).toList(),
+        connectors.discoveries.map((entry) => entry.connectorId).toList(),
+      );
       final after = _payload(
         await harness.query('projection.snapshot', <String, dynamic>{}),
       );
