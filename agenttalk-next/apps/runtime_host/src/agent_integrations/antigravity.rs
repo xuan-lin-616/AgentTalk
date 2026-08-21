@@ -29,6 +29,7 @@ const ANTIGRAVITY_RUNTIME_UNAVAILABLE: &str = "antigravity_runtime_unavailable";
 const ANTIGRAVITY_PROTOCOL_ERROR: &str = "antigravity_protocol_error";
 const MAX_ANTIGRAVITY_LINE_BYTES: usize = 128 * 1024;
 const ANTIGRAVITY_SETUP_TIMEOUT: Duration = Duration::from_secs(8);
+const ANTIGRAVITY_MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 const ANTIGRAVITY_CLEANUP_GRACE: Duration = Duration::from_millis(1_500);
 
 pub struct AntigravityIntegration;
@@ -548,6 +549,117 @@ impl AntigravityRuntime {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AntigravityModelEntry {
+    id: String,
+    display_name: String,
+}
+
+impl AntigravityRuntime {
+    fn run_agy_models(&self) -> Result<Vec<AntigravityModelEntry>, RuntimeError> {
+        self.run_agy_models_with_cancelled(&AtomicBool::new(false))
+    }
+
+    fn run_agy_models_with_cancelled(
+        &self,
+        cancelled: &AtomicBool,
+    ) -> Result<Vec<AntigravityModelEntry>, RuntimeError> {
+        let executable = self.binary_path()?;
+        let mut child = Command::new(executable)
+            .arg("models")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into()))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            terminate_spawned_child(&mut child);
+            RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into())
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            terminate_spawned_child(&mut child);
+            RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into())
+        })?;
+        let stdout_reader = spawn_agy_reader(stdout);
+        let stderr_reader = spawn_agy_reader(stderr);
+        let timeout = self
+            .config
+            .effective_request_timeout()
+            .min(ANTIGRAVITY_MODELS_TIMEOUT);
+        let deadline = crate::TransportDeadline::after(timeout);
+        let status = loop {
+            if cancelled.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RuntimeError::Cancelled);
+            }
+            if deadline.remaining().is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RuntimeError::Timeout);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => thread::sleep(Duration::from_millis(5)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(RuntimeError::Transport(
+                        ANTIGRAVITY_RUNTIME_UNAVAILABLE.into(),
+                    ));
+                }
+            }
+        };
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into()))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into()))?;
+        if !status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            return Err(antigravity_exit_error(&stderr));
+        }
+        let stdout = String::from_utf8_lossy(&stdout);
+        let models = parse_agy_models_output(&stdout);
+        if models.is_empty() {
+            return Err(RuntimeError::Transport(
+                ANTIGRAVITY_RUNTIME_UNAVAILABLE.into(),
+            ));
+        }
+        Ok(models)
+    }
+}
+
+fn parse_agy_models_output(output: &str) -> Vec<AntigravityModelEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("Fetching") {
+                return None;
+            }
+            let (id, display_name) = line
+                .split_once('\t')
+                .or_else(|| line.split_once(' '))
+                .or_else(|| line.split_once("  "))?;
+            let id = id.trim();
+            let display_name = display_name.trim();
+            if id.is_empty()
+                || id.len() > 256
+                || id.chars().any(char::is_control)
+                || display_name.is_empty()
+            {
+                return None;
+            }
+            Some(AntigravityModelEntry {
+                id: id.to_owned(),
+                display_name: display_name.to_owned(),
+            })
+        })
+        .collect()
+}
+
 impl Default for AntigravityRuntime {
     fn default() -> Self {
         Self::new()
@@ -615,7 +727,18 @@ impl RuntimeAdapter for AntigravityRuntime {
     }
 
     fn list_models(&self) -> Vec<String> {
-        Vec::new()
+        self.list_models_checked().unwrap_or_default()
+    }
+
+    fn list_models_checked(&self) -> Result<Vec<String>, RuntimeError> {
+        match self.run_agy_models() {
+            Ok(models) => Ok(models.into_iter().map(|entry| entry.id).collect::<Vec<_>>()),
+            // `agy models` returns auth/eligibility errors before the
+            // catalog. Treat that as an empty catalog rather than hanging
+            // the connector.models query on a login wait.
+            Err(RuntimeError::Authentication) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
     }
 
     fn execute(&self, request: &RuntimeRequest) -> Result<Vec<RuntimeEvent>, RuntimeError> {
@@ -1171,6 +1294,28 @@ mod tests {
         ));
         request.timeout_ms = 1000;
         assert!(validate_antigravity_request(&request).is_ok());
+    }
+
+    #[test]
+    fn parses_agy_models_tsv_output() {
+        let sample = concat!(
+            "Fetching available models...
+",
+            "gemini-3.7-flash-high	Gemini 3.7 Flash (High)
+",
+            "gemini-3.7-flash-medium	Gemini 3.7 Flash (Medium)
+",
+            "claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+",
+            "gpt-oss-120b-medium	GPT-OSS 120B (Medium)
+",
+        );
+        let models = parse_agy_models_output(sample);
+        assert_eq!(models.len(), 4);
+        assert_eq!(models[0].id, "gemini-3.7-flash-high");
+        assert_eq!(models[0].display_name, "Gemini 3.7 Flash (High)");
+        assert_eq!(models[2].id, "claude-sonnet-4-6");
+        assert_eq!(models[3].id, "gpt-oss-120b-medium");
     }
 
     #[test]
