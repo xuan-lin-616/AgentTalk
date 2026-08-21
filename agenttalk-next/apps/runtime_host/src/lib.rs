@@ -7813,6 +7813,16 @@ impl ConnectorRuntimeTransport for CodexAppServerTransport {
                         return Ok(());
                     }
                     "error" => {
+                        if codex_error_is_auth(&params) {
+                            // A local app-server auth failure should not be
+                            // hidden behind the generic retry loop until the
+                            // execution deadline expires. Surface it
+                            // immediately so Core/UI can report `codex login`
+                            // / app-server API-key instead of a timeout.
+                            return Err(RuntimeError::Provider(
+                                CODEX_APP_SERVER_AUTH_REQUIRED.into(),
+                            ));
+                        }
                         if codex_error_will_retry(&params) {
                             // `willRetry=true` is advisory, not a terminal
                             // execution failure. Keep the session alive for
@@ -7884,6 +7894,35 @@ fn codex_error_will_retry(params: &Value) -> bool {
         .or_else(|| params.get("will_retry").and_then(Value::as_bool))
         .or_else(|| params.pointer("/error/willRetry").and_then(Value::as_bool))
         .unwrap_or(false)
+}
+
+fn codex_error_is_auth(params: &Value) -> bool {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            params
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default();
+    let additional = params
+        .pointer("/error/additionalDetails")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("additionalDetails").and_then(Value::as_str))
+        .unwrap_or_default();
+    let combined = format!("{message} {additional}").to_ascii_lowercase();
+    [
+        "no auth available",
+        "unauthorized",
+        "login",
+        "api key",
+        "sign in",
+        "authentication",
+    ]
+    .iter()
+    .any(|marker| combined.contains(marker))
 }
 
 struct AppServerSession {
@@ -10938,6 +10977,25 @@ mod tests {
             )),
             CODEX_APP_SERVER_AUTH_REQUIRED
         );
+    }
+
+    #[test]
+    fn codex_stream_auth_errors_fail_fast() {
+        let value = json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "message": "Reconnecting... 1/5",
+                    "additionalDetails": "unexpected status 502 Bad Gateway: no auth available, url: http://localhost:64485/v1/responses"
+                },
+                "willRetry": true
+            }
+        });
+        assert!(codex_error_is_auth(value.get("params").unwrap()));
+        assert!(!codex_error_is_auth(&json!({
+            "error": {"message": "transient network error"},
+            "willRetry": true
+        })));
     }
 
     #[test]
