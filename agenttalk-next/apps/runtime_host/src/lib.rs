@@ -4712,6 +4712,9 @@ pub fn connector_runtime_failure(error: &RuntimeError) -> Option<ConnectorRuntim
         RuntimeError::Provider(code) if code == KUN_PROVIDER_AUTHENTICATION_FAILED => {
             Some(ConnectorRuntimeFailure::ProviderAuthenticationFailed)
         }
+        RuntimeError::Provider(code) if code == CODEX_APP_SERVER_AUTH_REQUIRED => {
+            Some(ConnectorRuntimeFailure::RuntimeAuthenticationFailed)
+        }
         _ => None,
     }
 }
@@ -6231,6 +6234,7 @@ const CODEX_RUNTIME_UNAVAILABLE: &str = "codex_runtime_unavailable";
 const CODEX_PROTOCOL_ERROR: &str = "codex_protocol_error";
 const CODEX_CATALOG_UNAVAILABLE: &str = "codex_catalog_unavailable";
 const CODEX_MODEL_UNAVAILABLE: &str = "codex_model_unavailable";
+const CODEX_APP_SERVER_AUTH_REQUIRED: &str = "codex_app_server_auth_required";
 const KUN_SHARED_RUNTIME_UNAVAILABLE: &str = "kun_shared_runtime_unavailable";
 const KUN_RUNTIME_IDENTITY_MISMATCH: &str = "kun_runtime_identity_mismatch";
 const KUN_CATALOG_UNAVAILABLE: &str = "kun_catalog_unavailable";
@@ -6722,6 +6726,9 @@ fn safe_runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::Protocol(code) if code == CODEX_MODEL_UNAVAILABLE => CODEX_MODEL_UNAVAILABLE,
         RuntimeError::Provider(code) if code == KUN_PROVIDER_AUTHENTICATION_FAILED => {
             KUN_PROVIDER_AUTHENTICATION_FAILED
+        }
+        RuntimeError::Provider(code) if code == CODEX_APP_SERVER_AUTH_REQUIRED => {
+            CODEX_APP_SERVER_AUTH_REQUIRED
         }
         RuntimeError::Provider(_) => "provider_rejected",
         RuntimeError::Protocol(_) => "runtime_protocol_error",
@@ -7386,10 +7393,18 @@ impl CodexAppServerTransport {
             self.close_session(&session);
             return Err(error);
         }
+        // 0.148+ app-server initialize no longer returns `serverInfo.version`.
+        // The CLI version is embedded in `userAgent` as `name/version (...)`.
         let version = initialization
             .pointer("/serverInfo/version")
             .and_then(Value::as_str)
             .or_else(|| initialization.get("version").and_then(Value::as_str))
+            .or_else(|| {
+                initialization
+                    .get("userAgent")
+                    .and_then(Value::as_str)
+                    .and_then(parse_codex_app_server_version)
+            })
             .and_then(safe_model_identifier);
         Ok((session, version))
     }
@@ -8357,16 +8372,22 @@ fn jsonrpc_response_id(value: &Value) -> Option<u64> {
 
 fn rpc_response_result(value: &Value) -> Result<Value, RuntimeError> {
     if let Some(error) = value.get("error") {
-        let category = error
+        let message = error
             .get("message")
             .and_then(Value::as_str)
-            .map(str::to_ascii_lowercase)
             .unwrap_or_default();
+        let category = message.to_ascii_lowercase();
         if ["auth", "login", "api key", "unauthorized"]
             .iter()
             .any(|marker| category.contains(marker))
         {
-            return Err(RuntimeError::Authentication);
+            // A JSON-RPC auth error from the local app-server is a local CLI
+            // credential problem, not a generic Runtime authentication. Keep
+            // the codex-specific code so Core/UI can render it explicitly
+            // instead of collapsing every auth-like word into `Authentication`.
+            return Err(RuntimeError::Provider(
+                CODEX_APP_SERVER_AUTH_REQUIRED.into(),
+            ));
         }
         return Err(RuntimeError::Provider("codex_provider_rejected".into()));
     }
@@ -8381,6 +8402,21 @@ fn is_jsonrpc_server_request(value: &Value) -> bool {
         && value.get("method").and_then(Value::as_str).is_some()
         && value.get("result").is_none()
         && value.get("error").is_none()
+}
+
+fn parse_codex_app_server_version(user_agent: &str) -> Option<&str> {
+    // userAgent is formatted as `{clientName}/{version} (...)`; clientName may
+    // contain spaces, so take the first whitespace-separated token that has a
+    // `/` rather than assuming the first token is the version pair.
+    let token = user_agent
+        .split_whitespace()
+        .find(|part| part.contains('/'))?;
+    let version = token.split_once('/')?.1;
+    if version.is_empty() || version.len() > 64 {
+        None
+    } else {
+        Some(version)
+    }
 }
 
 fn json_string_at(value: &Value, candidates: &[&str]) -> Option<String> {
@@ -10874,6 +10910,34 @@ mod tests {
             json!({"reason":"provider_error"})
         );
         assert!(!serde_json::to_string(&failed).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn codex_app_server_initialize_version_parses_user_agent_with_spaces() {
+        assert_eq!(
+            parse_codex_app_server_version("AgentTalk Core/0.149.0-alpha.4 (Windows 10)"),
+            Some("0.149.0-alpha.4")
+        );
+        assert_eq!(parse_codex_app_server_version("Codex/1.2.3"), Some("1.2.3"));
+        assert_eq!(parse_codex_app_server_version("no version"), None);
+    }
+
+    #[test]
+    fn codex_app_server_auth_errors_use_explicit_code() {
+        let value = json!({
+            "id": 1,
+            "error": {"code": -32001, "message": "Unauthorized: codex login required"}
+        });
+        assert!(matches!(
+            rpc_response_result(&value),
+            Err(RuntimeError::Provider(code)) if code == CODEX_APP_SERVER_AUTH_REQUIRED
+        ));
+        assert_eq!(
+            safe_runtime_error_code(&RuntimeError::Provider(
+                CODEX_APP_SERVER_AUTH_REQUIRED.into()
+            )),
+            CODEX_APP_SERVER_AUTH_REQUIRED
+        );
     }
 
     #[test]
