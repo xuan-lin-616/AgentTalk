@@ -11,6 +11,7 @@ class LocalAgentCenterDialog extends StatefulWidget {
     super.key,
     required this.client,
     required this.sessionId,
+    this.projectId,
     this.onProjectionChanged,
     this.onScanLocalAgents,
     this.onManualAdd,
@@ -18,6 +19,7 @@ class LocalAgentCenterDialog extends StatefulWidget {
 
   final CoreIpcClient client;
   final String sessionId;
+  final String? projectId;
   final ValueChanged<Map<String, dynamic>>? onProjectionChanged;
   final VoidCallback? onScanLocalAgents;
   final VoidCallback? onManualAdd;
@@ -38,7 +40,6 @@ class _LocalAgentCenterDialogState extends State<LocalAgentCenterDialog> {
       runtimeTypeName: 'codex',
       providerType: 'codex',
       installCommand: 'npm install -g @openai/codex',
-      needsAdapter: false,
     ),
     _LocalIntegrationDescriptor(
       id: 'local.claude-code',
@@ -48,17 +49,15 @@ class _LocalAgentCenterDialogState extends State<LocalAgentCenterDialog> {
       runtimeTypeName: 'claude-code',
       providerType: 'anthropic',
       installCommand: 'npm install -g @anthropic-ai/claude-code',
-      needsAdapter: false,
     ),
     _LocalIntegrationDescriptor(
       id: 'local.antigravity',
       displayName: 'Antigravity',
-      description: 'Google Antigravity。agy CLI 检测；协议未确证，暂不提供连接 Adapter。',
-      protocol: '待确证（NeedsAdapter）',
+      description: 'Google Antigravity agy CLI，NDJSON 流连接。',
+      protocol: 'agy stream-json (NDJSON stdio)',
       runtimeTypeName: 'antigravity',
       providerType: 'antigravity',
       installCommand: '',
-      needsAdapter: true,
     ),
   ];
 
@@ -187,6 +186,96 @@ class _LocalAgentCenterDialogState extends State<LocalAgentCenterDialog> {
     } on Object catch (error) {
       if (mounted) {
         setState(() => _error = 'Connector 保存被 Core 拒绝：$error');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _importAgent(_LocalIntegrationDescriptor integration) async {
+    final projectId = widget.projectId;
+    if (projectId == null || projectId.trim().isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('请先在主界面选择项目，再导入本地智能体。')));
+      }
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _status = null;
+      _error = null;
+    });
+    try {
+      // Ensure a Connector profile exists so Core can resolve runtimeType
+      // (antigravity/codex/...) when this agent is used in a conversation.
+      if (_profileFor(integration.id) == null) {
+        final profileResult = await widget.client.createConnectorProfile(
+          sessionId: widget.sessionId,
+          profile: ConnectorProfileMetadata(
+            scopeId: _scopeId,
+            connectorId: integration.id,
+            displayName: integration.displayName,
+            providerType: integration.providerType,
+            runtimeTypeName: integration.runtimeTypeName,
+            enabled: true,
+          ),
+        );
+        widget.onProjectionChanged?.call(profileResult.projection);
+      }
+
+      final agentId = 'agent-${DateTime.now().microsecondsSinceEpoch}';
+      final createResponse = await widget.client.request({
+        'kind': 'command',
+        'protocol': {'major': 1, 'minor': 0},
+        'requestId': 'agent-create-$agentId',
+        'sessionId': widget.sessionId,
+        'command': 'agent.create',
+        'payload': {
+          'agentId': agentId,
+          'name': integration.displayName,
+          'role': '项目智能体',
+          'specialty': '本地智能体',
+          'systemPrompt': '你是本地智能体，通过 AgentTalk 接入当前项目。',
+        },
+      });
+      final createPayload = createResponse['payload'];
+      final createProjection = createPayload is Map<String, dynamic>
+          ? createPayload['projection']
+          : null;
+      if (createProjection is! Map<String, dynamic>) {
+        throw const CoreIpcException('智能体创建后的投影无效');
+      }
+
+      await widget.client.setAgentModelBinding(
+        sessionId: widget.sessionId,
+        agentId: agentId,
+        connectorId: integration.id,
+      );
+      final joinResult = await widget.client.setProjectAgentModelSelection(
+        sessionId: widget.sessionId,
+        projectId: projectId,
+        agentId: agentId,
+        enabled: true,
+        workspaceAccess: 'none',
+        modelSelectionMode: 'connector_default',
+        candidateModelListMode: 'inherit',
+        candidateModelListRevision: 0,
+      );
+      final joinedProjection = joinResult['projection'];
+      if (joinedProjection is! Map<String, dynamic>) {
+        throw const CoreIpcException('项目智能体加入后的投影无效');
+      }
+      widget.onProjectionChanged?.call(joinedProjection);
+      await _reloadProfiles();
+      if (!mounted) return;
+      setState(() {
+        _status = '${integration.displayName} 已导入并加入当前项目';
+      });
+    } on Object catch (error) {
+      if (mounted) {
+        setState(() => _error = '导入 ${integration.displayName} 失败：$error');
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -399,6 +488,7 @@ class _LocalAgentCenterDialogState extends State<LocalAgentCenterDialog> {
             onConnect: () => _connect(integration),
             onEdit: (profile) => _edit(profile),
             onInstall: () => _showInstallCommand(integration),
+            onImport: () => _importAgent(integration),
           ),
         const SizedBox(height: 16),
         Text(
@@ -476,7 +566,6 @@ class _LocalIntegrationDescriptor {
     required this.runtimeTypeName,
     required this.providerType,
     required this.installCommand,
-    required this.needsAdapter,
   });
 
   final String id;
@@ -486,7 +575,6 @@ class _LocalIntegrationDescriptor {
   final String runtimeTypeName;
   final String providerType;
   final String installCommand;
-  final bool needsAdapter;
 }
 
 class _IntegrationCard extends StatelessWidget {
@@ -499,6 +587,7 @@ class _IntegrationCard extends StatelessWidget {
     required this.onConnect,
     required this.onEdit,
     required this.onInstall,
+    required this.onImport,
   });
 
   final _LocalIntegrationDescriptor integration;
@@ -509,9 +598,13 @@ class _IntegrationCard extends StatelessWidget {
   final VoidCallback onConnect;
   final ValueChanged<ConnectorProfileMetadata> onEdit;
   final VoidCallback onInstall;
+  final VoidCallback onImport;
 
   bool get _installed =>
       discovery != null && discovery!.availability != 'unavailable';
+
+  bool get _canImport =>
+      _installed && discovery!.availability != 'authentication_required';
 
   @override
   Widget build(BuildContext context) {
@@ -520,9 +613,8 @@ class _IntegrationCard extends StatelessWidget {
     final version = discovery?.catalogRevision;
     final status = installed
         ? switch (discovery!.availability) {
-            'available' => '已安装 · 可连接',
             'authentication_required' => '已安装 · 需要登录',
-            _ => '已安装 · 待配置',
+            _ => '已安装 · 可连接',
           }
         : '未安装';
     final isConfigured = profile != null;
@@ -596,25 +688,28 @@ class _IntegrationCard extends StatelessWidget {
                     icon: const Icon(Icons.download_outlined),
                     label: const Text('一键安装（显示命令）'),
                   )
-                else if (isConfigured)
-                  OutlinedButton.icon(
-                    onPressed: busy ? null : () => onEdit(profile!),
-                    icon: const Icon(Icons.settings_outlined),
-                    label: const Text('连接/配置'),
-                  )
-                else
-                  FilledButton.icon(
-                    onPressed: busy ? null : onConnect,
-                    icon: const Icon(Icons.link_outlined),
-                    label: const Text('连接/配置'),
-                  ),
-                const SizedBox(width: 8),
-                if (integration.needsAdapter)
-                  const Chip(
-                    label: Text('connect 待定 / NeedsAdapter'),
-                    side: BorderSide(color: Colors.orange),
-                    backgroundColor: Color(0x00FFFFFF),
-                  ),
+                else ...[
+                  if (_canImport) ...[
+                    FilledButton.icon(
+                      onPressed: busy ? null : onImport,
+                      icon: const Icon(Icons.person_add_alt_1_outlined),
+                      label: const Text('导入'),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  if (isConfigured)
+                    OutlinedButton.icon(
+                      onPressed: busy ? null : () => onEdit(profile!),
+                      icon: const Icon(Icons.settings_outlined),
+                      label: const Text('配置'),
+                    )
+                  else
+                    OutlinedButton.icon(
+                      onPressed: busy ? null : onConnect,
+                      icon: const Icon(Icons.link_outlined),
+                      label: const Text('连接/配置'),
+                    ),
+                ],
               ],
             ),
             if (isConfigured && health != null) ...[

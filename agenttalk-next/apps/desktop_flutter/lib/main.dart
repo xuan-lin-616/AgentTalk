@@ -1708,6 +1708,7 @@ class WorkspaceShellState extends State<WorkspaceShell> {
       builder: (context) => LocalAgentCenterDialog(
         client: client,
         sessionId: sessionId,
+        projectId: _activeProjectId,
         onProjectionChanged: (projection) {
           if (!mounted) return;
           setState(() {
