@@ -5,8 +5,8 @@ mod discovery;
 pub use adapters::acp::{AcpDiscoverySession, AcpFactoryError, AcpProtocolAdapterFactory};
 pub use agent_integrations::{
     connect_by_id, detect_by_id, discover_agent_integrations, install_by_id, integration,
-    list_integrations, verify_by_id, AntigravityIntegration, ClaudeCodeConfig,
-    ClaudeCodeIntegration, ClaudeCodeRuntime, CodexIntegration, Integration,
+    list_integrations, verify_by_id, AntigravityConfig, AntigravityIntegration, AntigravityRuntime,
+    ClaudeCodeConfig, ClaudeCodeIntegration, ClaudeCodeRuntime, CodexIntegration, Integration,
     IntegrationConnectError, IntegrationDescriptor, IntegrationDetectOutcome, IntegrationInstall,
     IntegrationInstalled, IntegrationLoginState, IntegrationVerification,
     IntegrationVerificationStatus,

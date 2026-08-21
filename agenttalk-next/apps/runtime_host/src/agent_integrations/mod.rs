@@ -10,7 +10,7 @@ mod antigravity;
 mod claude;
 mod codex;
 
-pub use antigravity::AntigravityIntegration;
+pub use antigravity::{AntigravityConfig, AntigravityIntegration, AntigravityRuntime};
 pub use claude::{ClaudeCodeConfig, ClaudeCodeIntegration, ClaudeCodeRuntime};
 pub use codex::CodexIntegration;
 
@@ -98,6 +98,7 @@ pub struct IntegrationDescriptor {
 pub enum IntegrationConnectError {
     NotInstalled,
     NeedsAdapter,
+    AuthenticationRequired,
     ConnectFailed,
 }
 
@@ -106,6 +107,7 @@ impl std::fmt::Display for IntegrationConnectError {
         formatter.write_str(match self {
             Self::NotInstalled => "integration is not installed",
             Self::NeedsAdapter => "integration protocol adapter is not implemented yet",
+            Self::AuthenticationRequired => "integration requires local CLI login",
             Self::ConnectFailed => "integration connection handshake failed",
         })
     }

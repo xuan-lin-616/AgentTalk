@@ -33,9 +33,9 @@ use agenttalk_protocols::{
 };
 #[cfg(windows)]
 use agenttalk_runtime_host::{
-    connector_runtime_failure, ClaudeCodeConfig, ClaudeCodeRuntime, CodexAppServerConfig,
-    CodexAppServerRuntime, HttpCustomRuntime, KunSharedRuntime, OpenAiCompatibleRuntime,
-    RuntimeAdapter, RuntimeError, UnconfiguredRuntime,
+    connector_runtime_failure, AntigravityConfig, AntigravityRuntime, ClaudeCodeConfig,
+    ClaudeCodeRuntime, CodexAppServerConfig, CodexAppServerRuntime, HttpCustomRuntime,
+    KunSharedRuntime, OpenAiCompatibleRuntime, RuntimeAdapter, RuntimeError, UnconfiguredRuntime,
 };
 #[cfg(windows)]
 use agenttalk_storage::{
@@ -1597,7 +1597,7 @@ fn runtime_registry_from_configuration(
         // deterministic first-party Connector types recognizable without an
         // environment-variable activation path. The registry reads only
         // adapter ids here; every adapter remains lazy.
-        vec!["unconfigured", "codex", "kun", "claude-code"]
+        vec!["unconfigured", "codex", "kun", "claude-code", "antigravity"]
     } else {
         configured
             .split(',')
@@ -1653,6 +1653,10 @@ fn runtime_registry_from_configuration(
             "claude-code" => Box::new(ClaudeCodeRuntime::with_config(ClaudeCodeConfig {
                 isolated_cwd: codex_isolated_cwd.clone(),
                 ..ClaudeCodeConfig::default()
+            })),
+            "antigravity" => Box::new(AntigravityRuntime::with_config(AntigravityConfig {
+                isolated_cwd: codex_isolated_cwd.clone(),
+                ..AntigravityConfig::default()
             })),
             "kun" => Box::new(KunSharedRuntime::with_config(Default::default())),
             "openai-compatible" => Box::new(OpenAiCompatibleRuntime::new("default")),
@@ -7809,6 +7813,7 @@ mod tests {
         assert!(registry.has_runtime_type("codex"));
         assert!(registry.has_runtime_type("kun"));
         assert!(registry.has_runtime_type("claude-code"));
+        assert!(registry.has_runtime_type("antigravity"));
 
         // Opening Core and reading the old unscoped projection must not probe
         // either transport or silently choose one of the connector adapters.
@@ -7907,6 +7912,7 @@ mod tests {
         assert!(!registry.has_runtime_type("codex"));
         assert!(!registry.has_runtime_type("kun"));
         assert!(!registry.has_runtime_type("claude-code"));
+        assert!(!registry.has_runtime_type("antigravity"));
 
         let fixture_error = runtime_registry_from_configuration("fixture-dual", false, None)
             .err()
