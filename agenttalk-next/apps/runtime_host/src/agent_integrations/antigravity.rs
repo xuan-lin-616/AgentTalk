@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use agenttalk_domain::WorkspaceAccess;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{
     bounded_request_timeout, connector_started_event, has_reparse_point, is_real_regular_file,
@@ -28,7 +28,6 @@ use super::{
 const ANTIGRAVITY_RUNTIME_UNAVAILABLE: &str = "antigravity_runtime_unavailable";
 const ANTIGRAVITY_PROTOCOL_ERROR: &str = "antigravity_protocol_error";
 const MAX_ANTIGRAVITY_LINE_BYTES: usize = 128 * 1024;
-const ANTIGRAVITY_SETUP_TIMEOUT: Duration = Duration::from_secs(8);
 const ANTIGRAVITY_MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 const ANTIGRAVITY_CLEANUP_GRACE: Duration = Duration::from_millis(1_500);
 
@@ -90,7 +89,10 @@ impl Integration for AntigravityIntegration {
                 login_state: IntegrationLoginState::LoginRequired,
                 protocol_major: Some(1),
                 version: None,
-                detail: Some("agy_login_required".into()),
+                detail: Some(
+                    "agy_headless_oauth_required_run_agy_interactively_to_complete_device_code"
+                        .into(),
+                ),
             },
             Err(_) => IntegrationVerification {
                 integration_id: self.descriptor().id.clone(),
@@ -420,32 +422,32 @@ impl AntigravityRuntime {
         &self,
         cwd: &Path,
         print_timeout: Duration,
-    ) -> Result<(Child, ChildStdin, ChildStdout, ChildStderr), RuntimeError> {
+        prompt: &str,
+    ) -> Result<(Child, ChildStdout, ChildStderr), RuntimeError> {
         let executable = self.binary_path()?;
         let mut command = Command::new(executable);
+        // agy 1.1.x parses the print prompt as the first positional arg
+        // after `--print`. Flags must come after the prompt; otherwise the
+        // flags themselves are sent to the model as the prompt. Confirmed
+        // against a real logged-in `agy`:
+        //   agy --print <prompt> --output-format=stream-json --print-timeout=N
         command
             .args(&self.config.command_args)
             .arg("--print")
-            .arg("--input-format")
-            .arg("stream-json")
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--print-timeout")
-            .arg(format!("{}s", print_timeout.as_secs().max(1)))
+            .arg(prompt)
+            .arg("--output-format=stream-json")
+            .arg(format!(
+                "--print-timeout={}s",
+                print_timeout.as_secs().max(1)
+            ))
             .current_dir(cwd)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_antigravity_child_environment(&mut command);
         let mut child = command
             .spawn()
             .map_err(|_| RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into()))?;
-        let Some(stdin) = child.stdin.take() else {
-            terminate_spawned_child(&mut child);
-            return Err(RuntimeError::Transport(
-                ANTIGRAVITY_RUNTIME_UNAVAILABLE.into(),
-            ));
-        };
         let Some(stdout) = child.stdout.take() else {
             terminate_spawned_child(&mut child);
             return Err(RuntimeError::Transport(
@@ -458,33 +460,37 @@ impl AntigravityRuntime {
                 ANTIGRAVITY_RUNTIME_UNAVAILABLE.into(),
             ));
         };
-        Ok((child, stdin, stdout, stderr))
+        Ok((child, stdout, stderr))
     }
 }
 
 impl AntigravityRuntime {
     fn probe_stream_json_roundtrip(&self) -> Result<(), RuntimeError> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
-        let deadline =
-            crate::TransportDeadline::after(ANTIGRAVITY_SETUP_TIMEOUT + Duration::from_secs(2));
-        let (mut child, mut stdin, stdout, stderr) =
-            self.spawn_stream_child(&cwd, ANTIGRAVITY_SETUP_TIMEOUT)?;
+        let probe_timeout = self
+            .config
+            .effective_request_timeout()
+            .min(Duration::from_secs(30));
+        let deadline = crate::TransportDeadline::after(probe_timeout + Duration::from_secs(2));
+        let (mut child, stdout, stderr) =
+            self.spawn_stream_child(&cwd, probe_timeout, "Reply with the single word ok.")?;
         let stderr_tail = Arc::new(Mutex::new(String::new()));
         crate::spawn_bounded_stderr_reader(stderr, Arc::clone(&stderr_tail));
         let (sender, receiver) = mpsc::sync_channel(8);
         spawn_antigravity_line_reader(stdout, sender);
-        let probe_message = json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": "Reply with the single word ok."}]
-            }
-        });
-        write_antigravity_frame(&mut stdin, &probe_message)?;
-        drop(stdin);
         let result = loop {
             if deadline.remaining().is_err() {
+                let stderr = stderr_tail
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
                 let _ = child.kill();
+                if matches!(
+                    antigravity_exit_error(&stderr),
+                    RuntimeError::Authentication
+                ) {
+                    break Err(RuntimeError::Authentication);
+                }
                 break Err(RuntimeError::Timeout);
             }
             match receiver.recv_timeout(Duration::from_millis(100)) {
@@ -520,15 +526,7 @@ impl AntigravityRuntime {
                         break Err(antigravity_exit_error(&stderr));
                     }
                     Ok(Some(_)) => break Err(RuntimeError::TransportClosed),
-                    Ok(None) => {
-                        // agy accepted the stream-json prompt but produced no
-                        // stream event and did not exit. In headless print
-                        // mode this is the local login/eligibility wait;
-                        // report it as authentication instead of a protocol
-                        // or transport error.
-                        let _ = child.kill();
-                        break Err(RuntimeError::Authentication);
-                    }
+                    Ok(None) => continue,
                     Err(_) => {
                         break Err(RuntimeError::Transport(
                             ANTIGRAVITY_RUNTIME_UNAVAILABLE.into(),
@@ -832,11 +830,10 @@ impl AntigravityRuntime {
             bounded_request_timeout(request.timeout_ms)
                 .min(self.config.effective_request_timeout()),
         );
-        let (child, mut stdin, stdout, stderr) = self.spawn_stream_child(
-            &cwd,
-            bounded_request_timeout(request.timeout_ms)
-                .min(self.config.effective_request_timeout()),
-        )?;
+        let print_timeout = bounded_request_timeout(request.timeout_ms)
+            .min(self.config.effective_request_timeout());
+        let (child, stdout, stderr) =
+            self.spawn_stream_child(&cwd, print_timeout, &request.rendered_context)?;
         let child = Arc::new(Mutex::new(child));
         self.register_active_child(&request.execution_run_id, Arc::clone(&child));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -845,15 +842,6 @@ impl AntigravityRuntime {
         spawn_antigravity_line_reader(stdout, sender);
 
         let result = (|| {
-            let prompt_message = json!({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": request.rendered_context}]
-                }
-            });
-            write_antigravity_frame(&mut stdin, &prompt_message)?;
-            drop(stdin);
             producer.push(connector_started_event("antigravity", request, None, None))?;
             let mut event_index = 1u64;
             let mut accumulated_text = String::new();
@@ -1050,18 +1038,11 @@ fn spawn_antigravity_line_reader(
     });
 }
 
-fn write_antigravity_frame(writer: &mut impl Write, value: &Value) -> Result<(), RuntimeError> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|_| RuntimeError::Protocol(ANTIGRAVITY_PROTOCOL_ERROR.into()))?;
-    bytes.push(b'\n');
-    writer
-        .write_all(&bytes)
-        .and_then(|()| writer.flush())
-        .map_err(|_| RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into()))
-}
-
 fn antigravity_event_type(value: &Value) -> Option<&str> {
-    value.get("type").and_then(Value::as_str)
+    value
+        .get("event")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("type").and_then(Value::as_str))
 }
 
 fn antigravity_delta_text(value: &Value) -> Option<&str> {
@@ -1069,11 +1050,15 @@ fn antigravity_delta_text(value: &Value) -> Option<&str> {
         .get("step_update")
         .or_else(|| value.get("stepUpdate"))
         .unwrap_or(value);
-    let text = body.get("text").and_then(Value::as_str);
+    // 1.1.17 stream-json emits agent_response chunks in `text_delta`.
+    let text = body
+        .get("text_delta")
+        .and_then(Value::as_str)
+        .or_else(|| body.get("text").and_then(Value::as_str));
     if let Some(text) = text {
         return Some(text);
     }
-    // Some builds place the chunk under `message.content`.
+    // Older/build variants place the chunk under `message.content`.
     body.get("message")
         .and_then(|message| message.get("content"))
         .and_then(|content| {
@@ -1095,8 +1080,9 @@ fn antigravity_result_text(value: &Value) -> Option<String> {
         .or_else(|| value.get("resultData"))
         .unwrap_or(value);
     let text = body
-        .get("output")
+        .get("response")
         .and_then(Value::as_str)
+        .or_else(|| body.get("output").and_then(Value::as_str))
         .or_else(|| body.get("text").and_then(Value::as_str))
         .or_else(|| {
             body.get("message")
@@ -1113,10 +1099,10 @@ fn antigravity_result_text(value: &Value) -> Option<String> {
 
 fn antigravity_stop_reason(value: &Value) -> Option<&str> {
     let body = value.get("result").unwrap_or(value);
-    body.get("stopReason")
+    body.get("status")
         .and_then(Value::as_str)
+        .or_else(|| body.get("stopReason").and_then(Value::as_str))
         .or_else(|| body.get("stop_reason").and_then(Value::as_str))
-        .or_else(|| body.get("status").and_then(Value::as_str))
 }
 
 fn antigravity_exit_error(stderr: &str) -> RuntimeError {
@@ -1127,6 +1113,9 @@ fn antigravity_exit_error(stderr: &str) -> RuntimeError {
         || lowered.contains("auth")
         || lowered.contains("eligibility")
         || lowered.contains("not signed in")
+        || lowered.contains("device")
+        || lowered.contains("oauth")
+        || lowered.contains("paste")
         || lowered.contains("agent execution terminated due to error")
     {
         RuntimeError::Authentication
@@ -1221,20 +1210,27 @@ mod tests {
     #[test]
     fn ndjson_stream_conversion_extracts_deltas_and_result() {
         let init = json!({
-            "type": "init",
-            "init": {"conversationId": "conv-1", "tools": []}
+            "event": "init",
+            "conversation_id": "conv-1",
+            "init": {"cwd": "C:\tmp", "tools": []}
         });
         assert_eq!(antigravity_event_type(&init), Some("init"));
 
         let step = json!({
-            "type": "step_update",
-            "step_update": {"step_type": "agent_message", "text": "Hello "}
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "conv-1",
+                "step_index": 2,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "Hello "
+            }
         });
         assert_eq!(antigravity_event_type(&step), Some("step_update"));
         assert_eq!(antigravity_delta_text(&step), Some("Hello "));
 
         let step_nested = json!({
-            "type": "step_update",
+            "event": "step_update",
             "step_update": {
                 "step_type": "agent_message",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": "world"}]}
@@ -1243,12 +1239,16 @@ mod tests {
         assert_eq!(antigravity_delta_text(&step_nested), Some("world"));
 
         let result = json!({
-            "type": "result",
-            "result": {"output": "Hello world", "stopReason": "end_turn", "conversationId": "conv-1"}
+            "event": "result",
+            "result": {
+                "conversation_id": "conv-1",
+                "status": "SUCCESS",
+                "response": "Hello world"
+            }
         });
         assert_eq!(antigravity_event_type(&result), Some("result"));
         assert_eq!(antigravity_result_text(&result), Some("Hello world".into()));
-        assert_eq!(antigravity_stop_reason(&result), Some("end_turn"));
+        assert_eq!(antigravity_stop_reason(&result), Some("SUCCESS"));
     }
 
     #[test]
@@ -1259,6 +1259,10 @@ mod tests {
         ));
         assert!(matches!(
             antigravity_exit_error("Eligibility check failed"),
+            RuntimeError::Authentication
+        ));
+        assert!(matches!(
+            antigravity_exit_error("Open browser to complete OAuth device-code flow"),
             RuntimeError::Authentication
         ));
         assert!(matches!(
