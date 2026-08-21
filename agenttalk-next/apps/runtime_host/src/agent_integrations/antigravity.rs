@@ -27,7 +27,7 @@ use super::{
 
 const ANTIGRAVITY_RUNTIME_UNAVAILABLE: &str = "antigravity_runtime_unavailable";
 const ANTIGRAVITY_PROTOCOL_ERROR: &str = "antigravity_protocol_error";
-const MAX_ANTIGRAVITY_LINE_BYTES: usize = 128 * 1024;
+const MAX_ANTIGRAVITY_LINE_BYTES: usize = 4 * 1024 * 1024;
 const ANTIGRAVITY_MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 const ANTIGRAVITY_CLEANUP_GRACE: Duration = Duration::from_millis(1_500);
 
@@ -380,47 +380,66 @@ impl AntigravityRuntime {
             .ok_or_else(|| RuntimeError::Transport(ANTIGRAVITY_RUNTIME_UNAVAILABLE.into()))
     }
 
-    fn execution_cwd(&self, request: &RuntimeRequest) -> Result<PathBuf, RuntimeError> {
-        if !matches!(request.workspace_access, WorkspaceAccess::None) {
-            let cwd = request
-                .canonical_cwd
-                .as_deref()
-                .filter(|cwd| !cwd.trim().is_empty())
-                .map(PathBuf::from)
-                .ok_or(RuntimeError::InvalidWorkspace)?;
+    fn execution_workspace(
+        &self,
+        request: &RuntimeRequest,
+    ) -> Result<(PathBuf, Option<PathBuf>), RuntimeError> {
+        if let Some(cwd) = request
+            .canonical_cwd
+            .as_deref()
+            .filter(|cwd| !cwd.trim().is_empty())
+            .map(PathBuf::from)
+        {
             if !cwd.is_absolute() || !cwd.is_dir() {
                 return Err(RuntimeError::InvalidWorkspace);
             }
-            return Ok(cwd);
+            let canonical = cwd
+                .canonicalize()
+                .map_err(|_| RuntimeError::InvalidWorkspace)?;
+            if !canonical.is_dir() || has_reparse_point(&canonical) {
+                return Err(RuntimeError::InvalidWorkspace);
+            }
+            // Pass the project root both as the child cwd and as an
+            // explicit `--add-dir`, so agy tools can write to the project
+            // instead of falling back to the agy scratch directory.
+            // agy may reject Windows verbatim `\?\` prefixes for
+            // `--add-dir`, so strip that prefix from the workspace path
+            // while keeping the canonical path as the child cwd.
+            let workspace_dir = cwd
+                .to_string_lossy()
+                .trim_start_matches("\\\\?\\")
+                .to_owned();
+            return Ok((canonical, Some(PathBuf::from(workspace_dir))));
         }
-        if request.canonical_cwd.is_some() {
-            return Err(RuntimeError::InvalidWorkspace);
+        if matches!(request.workspace_access, WorkspaceAccess::None) {
+            let configured = self
+                .config
+                .isolated_cwd
+                .as_deref()
+                .filter(|path| path.is_absolute())
+                .ok_or(RuntimeError::InvalidWorkspace)?;
+            if has_reparse_point(configured) {
+                return Err(RuntimeError::InvalidWorkspace);
+            }
+            fs::create_dir_all(configured).map_err(|_| RuntimeError::InvalidWorkspace)?;
+            if has_reparse_point(configured) {
+                return Err(RuntimeError::InvalidWorkspace);
+            }
+            let canonical = configured
+                .canonicalize()
+                .map_err(|_| RuntimeError::InvalidWorkspace)?;
+            if !canonical.is_dir() || has_reparse_point(&canonical) {
+                return Err(RuntimeError::InvalidWorkspace);
+            }
+            return Ok((canonical, None));
         }
-        let configured = self
-            .config
-            .isolated_cwd
-            .as_deref()
-            .filter(|path| path.is_absolute())
-            .ok_or(RuntimeError::InvalidWorkspace)?;
-        if has_reparse_point(configured) {
-            return Err(RuntimeError::InvalidWorkspace);
-        }
-        fs::create_dir_all(configured).map_err(|_| RuntimeError::InvalidWorkspace)?;
-        if has_reparse_point(configured) {
-            return Err(RuntimeError::InvalidWorkspace);
-        }
-        let canonical = configured
-            .canonicalize()
-            .map_err(|_| RuntimeError::InvalidWorkspace)?;
-        if !canonical.is_dir() || has_reparse_point(&canonical) {
-            return Err(RuntimeError::InvalidWorkspace);
-        }
-        Ok(canonical)
+        Err(RuntimeError::InvalidWorkspace)
     }
 
     fn spawn_stream_child(
         &self,
         cwd: &Path,
+        workspace_dir: Option<&Path>,
         print_timeout: Duration,
         prompt: &str,
     ) -> Result<(Child, ChildStdout, ChildStderr), RuntimeError> {
@@ -435,7 +454,11 @@ impl AntigravityRuntime {
             .args(&self.config.command_args)
             .arg("--print")
             .arg(prompt)
-            .arg("--output-format=stream-json")
+            .arg("--output-format=stream-json");
+        if let Some(workspace_dir) = workspace_dir {
+            command.arg("--add-dir").arg(workspace_dir);
+        }
+        command
             .arg(format!(
                 "--print-timeout={}s",
                 print_timeout.as_secs().max(1)
@@ -473,7 +496,7 @@ impl AntigravityRuntime {
             .min(Duration::from_secs(30));
         let deadline = crate::TransportDeadline::after(probe_timeout + Duration::from_secs(2));
         let (mut child, stdout, stderr) =
-            self.spawn_stream_child(&cwd, probe_timeout, "Reply with the single word ok.")?;
+            self.spawn_stream_child(&cwd, None, probe_timeout, "Reply with the single word ok.")?;
         let stderr_tail = Arc::new(Mutex::new(String::new()));
         crate::spawn_bounded_stderr_reader(stderr, Arc::clone(&stderr_tail));
         let (sender, receiver) = mpsc::sync_channel(8);
@@ -825,15 +848,19 @@ impl AntigravityRuntime {
         if cancelled.load(Ordering::Acquire) {
             return Err(RuntimeError::Cancelled);
         }
-        let cwd = self.execution_cwd(request)?;
+        let (cwd, workspace_dir) = self.execution_workspace(request)?;
         let total_deadline = crate::TransportDeadline::after(
             bounded_request_timeout(request.timeout_ms)
                 .min(self.config.effective_request_timeout()),
         );
         let print_timeout = bounded_request_timeout(request.timeout_ms)
             .min(self.config.effective_request_timeout());
-        let (child, stdout, stderr) =
-            self.spawn_stream_child(&cwd, print_timeout, &request.rendered_context)?;
+        let (child, stdout, stderr) = self.spawn_stream_child(
+            &cwd,
+            workspace_dir.as_deref(),
+            print_timeout,
+            &request.rendered_context,
+        )?;
         let child = Arc::new(Mutex::new(child));
         self.register_active_child(&request.execution_run_id, Arc::clone(&child));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
@@ -929,6 +956,19 @@ impl AntigravityRuntime {
                                 ))?;
                             }
                         }
+                        if let Some(reason) = antigravity_tool_failure_reason(&value) {
+                            event_index += 1;
+                            producer.push(terminal_event(
+                                "antigravity",
+                                "execution.failed",
+                                request,
+                                None,
+                                None,
+                                event_index,
+                                Some(reason),
+                            ))?;
+                            return Ok(());
+                        }
                     }
                     Some("result") => {
                         if let Some(final_text) = antigravity_result_text(&value) {
@@ -944,10 +984,11 @@ impl AntigravityRuntime {
                                 ))?;
                             }
                         }
-                        let event_type = match antigravity_stop_reason(&value) {
-                            Some("failed") | Some("error") | Some("cancelled") => {
-                                "execution.failed"
-                            }
+                        let stop_reason = antigravity_stop_reason(&value)
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        let event_type = match stop_reason.as_str() {
+                            "failed" | "error" | "cancelled" => "execution.failed",
                             _ => "execution.completed",
                         };
                         event_index += 1;
@@ -1105,6 +1146,28 @@ fn antigravity_stop_reason(value: &Value) -> Option<&str> {
         .or_else(|| body.get("stop_reason").and_then(Value::as_str))
 }
 
+fn antigravity_tool_failure_reason(value: &Value) -> Option<&'static str> {
+    let body = value
+        .get("step_update")
+        .or_else(|| value.get("stepUpdate"))
+        .unwrap_or(value);
+    if body.get("step_type").and_then(Value::as_str) != Some("tool") {
+        return None;
+    }
+    if body.get("state").and_then(Value::as_str) != Some("ERROR") {
+        return None;
+    }
+    let message = body
+        .pointer("/tool_info/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if message.to_ascii_lowercase().contains("permission") {
+        Some("permission_denied")
+    } else {
+        Some("tool_error")
+    }
+}
+
 fn antigravity_exit_error(stderr: &str) -> RuntimeError {
     let lowered = stderr.to_ascii_lowercase();
     if lowered.contains("sign in")
@@ -1249,6 +1312,37 @@ mod tests {
         assert_eq!(antigravity_event_type(&result), Some("result"));
         assert_eq!(antigravity_result_text(&result), Some("Hello world".into()));
         assert_eq!(antigravity_stop_reason(&result), Some("SUCCESS"));
+    }
+
+    #[test]
+    fn tool_failures_are_detected_as_terminal_errors() {
+        let denied = json!({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 3,
+                "state": "ERROR",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "name": "run_command",
+                    "parameters": {"CommandLine": "exit 1"},
+                    "error": {
+                        "type": "TOOL_ERROR",
+                        "message": "permission check failed for command \"exit 1\": user denied permission"
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            antigravity_tool_failure_reason(&denied),
+            Some("permission_denied")
+        );
+
+        let failed = json!({
+            "event": "result",
+            "result": {"status": "ERROR", "error": "tool failed"}
+        });
+        assert_eq!(antigravity_stop_reason(&failed), Some("ERROR"));
     }
 
     #[test]
